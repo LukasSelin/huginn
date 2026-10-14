@@ -70,7 +70,7 @@ func TestBeforeIndex(t *testing.T) {
 	if st.Ready || st.Repo != "demo" {
 		t.Errorf("status = %+v, want not ready for demo", st)
 	}
-	for _, url := range []string{"/api/dirs", "/api/dir?d=geo", "/api/symbol/1"} {
+	for _, url := range []string{"/api/dirs", "/api/dir?d=geo", "/api/symbol/1", "/api/journey"} {
 		getJSON(t, h, url, http.StatusServiceUnavailable, nil)
 	}
 }
@@ -180,12 +180,38 @@ func TestAPI(t *testing.T) {
 		getJSON(t, h, "/api/symbol/zero", http.StatusNotFound, nil)
 	})
 
+	t.Run("journey", func(t *testing.T) {
+		var j journeyJSON
+		getJSON(t, h, "/api/journey?step=commit", http.StatusOK, &j)
+		if j.Step != "commit" || len(j.Frames) != 3 || len(j.Packages) != 2 {
+			t.Fatalf("journey = %+v", j)
+		}
+		var lives []int
+		for _, f := range j.Frames {
+			lives = append(lives, f.Live)
+		}
+		// main and Point, Move; then Hello and Bye; then Bye goes.
+		if !slices.Equal(lives, []int{3, 5, 4}) || j.Frames[2].SHA != hashes[2] || j.Frames[2].Total != 3 {
+			t.Errorf("frames = %+v", j.Frames)
+		}
+		if len(j.Chapters) != 3 || j.Chapters[0].FirstRev != 0 || j.Chapters[2].LastRev != 2 || j.Chapters[0].Title == "" {
+			t.Errorf("chapters = %+v", j.Chapters)
+		}
+		getJSON(t, h, "/api/journey", http.StatusOK, &j)
+		if j.Step != "week" || len(j.Frames) == 0 {
+			t.Errorf("default step %q, %d frames", j.Step, len(j.Frames))
+		}
+		getJSON(t, h, "/api/journey?step=day", http.StatusBadRequest, nil)
+	})
+
 	t.Run("ui", func(t *testing.T) {
-		rec := httptest.NewRecorder()
-		h.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/", nil))
-		body, _ := io.ReadAll(rec.Body)
-		if rec.Code != http.StatusOK || !strings.Contains(string(body), "<html") {
-			t.Errorf("GET /: status %d, body %.80q", rec.Code, body)
+		for _, page := range []string{"/", "/journey"} {
+			rec := httptest.NewRecorder()
+			h.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, page, nil))
+			body, _ := io.ReadAll(rec.Body)
+			if rec.Code != http.StatusOK || !strings.Contains(string(body), "<html") {
+				t.Errorf("GET %s: status %d, body %.80q", page, rec.Code, body)
+			}
 		}
 	})
 }

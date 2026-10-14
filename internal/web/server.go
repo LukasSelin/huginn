@@ -47,6 +47,8 @@ type index struct {
 	order []string                     // directories, sorted
 	cmap  *codemap.Map
 	took  time.Duration
+
+	journeys journeys // built on first request
 }
 
 // New returns a server for repo. name labels it in the UI.
@@ -87,12 +89,14 @@ func (s *Server) Handler() http.Handler {
 	ui, _ := fs.Sub(static, "static")
 	mux.Handle("GET /", http.FileServerFS(ui))
 	mux.HandleFunc("GET /symbols", func(w http.ResponseWriter, r *http.Request) { http.ServeFileFS(w, r, ui, "symbols.html") })
+	mux.HandleFunc("GET /journey", func(w http.ResponseWriter, r *http.Request) { http.ServeFileFS(w, r, ui, "journey.html") })
 	mux.HandleFunc("GET /api/status", s.status)
 	mux.HandleFunc("GET /api/dirs", s.ready(s.dirList))
 	mux.HandleFunc("GET /api/dir", s.ready(s.dir))
 	mux.HandleFunc("GET /api/symbol/{id}", s.ready(s.symbol))
 	mux.HandleFunc("GET /api/map", s.ready(s.codeMap))
 	mux.HandleFunc("GET /api/map/{dir...}", s.ready(s.mapDir))
+	mux.HandleFunc("GET /api/journey", s.ready(s.journeyAPI))
 	mux.HandleFunc("GET /api/commit/{rev...}", s.commit)
 	return mux
 }
