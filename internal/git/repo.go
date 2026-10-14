@@ -17,6 +17,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"time"
 )
 
 // Repo is a git repository on disk.
@@ -54,9 +55,18 @@ func (r *Repo) GitDir(ctx context.Context) (string, error) {
 	return filepath.FromSlash(strings.TrimSpace(string(out))), nil
 }
 
+// waitDelay bounds how long Wait keeps reading a git command's output once
+// the command was killed or has exited.
+const waitDelay = 5 * time.Second
+
 func (r *Repo) command(ctx context.Context, args ...string) *exec.Cmd {
 	cmd := exec.CommandContext(ctx, r.git, args...)
 	cmd.Dir = r.dir
+	// On Windows, git.exe is often a launcher that runs the real git as a
+	// child. Cancelling kills only the launcher, and the child, blocked on
+	// a pipe nobody reads any more, keeps stdout and stderr open, so Wait
+	// would never return.
+	cmd.WaitDelay = waitDelay
 	return cmd
 }
 
