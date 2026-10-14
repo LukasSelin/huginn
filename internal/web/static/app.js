@@ -418,19 +418,29 @@ function callerRows(cs) {
       c.test && h('span', { class: 'tag' }, 'test'))));
 }
 
-// memberList shows a type's member changes as before/after lines.
+// memberList shows a type's member changes as before/after lines, then the
+// types implementing the interface that the changes can break.
 function memberList(ms) {
   if (!ms || !ms.length) return null;
-  return h('ul', { class: 'members mono small' }, ms.flatMap((m) => {
+  const impls = ms.find((m) => m.implementers)?.implementers || [];
+  return [h('ul', { class: 'members mono small' }, ms.flatMap((m) => {
     const notes = [m.flags.split('|').filter((f) => f !== 'added' && f !== 'removed').join(', '),
-      m.breaks && `breaks ${m.breaks}`, m.uses > 0 && plural(m.uses, 'field use') + (m.approximate ? ' (approx.)' : '')]
+      m.breaks && `breaks ${m.breaks}`, m.uses > 0 && plural(m.uses, 'field use') + (m.approximate ? ' (approx.)' : ''),
+      m.unkeyed > 0 && `breaks ${plural(m.unkeyed, 'unkeyed literal')}`,
+      m.implementers && plural(m.implementers.length, 'implementer') + ' (approx.)']
       .filter(Boolean).join(' · ');
     const note = notes && h('span', { class: `mnote${m.breaks ? ' warn' : ''}` }, notes);
     const rows = [];
     if (m.oldDecl) rows.push(h('li', { class: 'm-old' }, h('span', { class: 'sign', 'aria-hidden': 'true' }, '−'), m.oldDecl, !m.newDecl && note));
     if (m.newDecl) rows.push(h('li', { class: 'm-new' }, h('span', { class: 'sign', 'aria-hidden': 'true' }, '+'), m.newDecl, note));
     return rows;
-  }));
+  })),
+  impls.length > 0 && h('details', { class: 'callers' },
+    h('summary', { class: 'small muted' }, plural(impls.length, 'implementer') + ' (approx.)'),
+    h('ul', { class: 'caller-list' }, impls.map((c) => h('li', { class: 'caller' },
+      h('span', { class: 'mono cname' }, c.name),
+      h('span', { class: 'muted small mono' }, loc(c.path, c.line)),
+      h('span', { class: 'tags' }, c.test && h('span', { class: 'tag' }, 'test'))))))];
 }
 
 function card(c) {

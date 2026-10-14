@@ -113,6 +113,9 @@ type memberJSON struct {
 	Breaks      string `json:"breaks,omitempty"` // whose code the change breaks
 	Uses        int    `json:"uses"`
 	Approximate bool   `json:"approximate"`
+
+	Implementers []callerJSON `json:"implementers,omitempty"` // approximate, see semdiff.MemberChange
+	Unkeyed      int          `json:"unkeyed,omitempty"`      // unkeyed literals the change breaks
 }
 
 func membersJSON(ms []semdiff.MemberChange) []memberJSON {
@@ -121,7 +124,8 @@ func membersJSON(ms []semdiff.MemberChange) []memberJSON {
 		out = append(out, memberJSON{
 			Flags: m.Flags.String(), Member: m.Member, Name: m.Name, OldName: m.OldName,
 			OldDecl: m.OldDecl, NewDecl: m.NewDecl, Exported: m.Exported, Breaks: m.Breaks,
-			Uses: m.Uses, Approximate: m.Approximate,
+			Uses: m.Uses, Approximate: m.Approximate, Implementers: callersJSON(m.Implementers),
+			Unkeyed: m.Unkeyed,
 		})
 	}
 	return out

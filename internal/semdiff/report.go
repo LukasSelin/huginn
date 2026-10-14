@@ -428,7 +428,8 @@ func summary(c ast.Change) string {
 	return strings.Join(parts, " · ")
 }
 
-// impact describes a change's reach: "17 call sites · 4 field uses · exported".
+// impact describes a change's reach:
+// "17 call sites · 4 field uses · 2 implementers (approx.) · exported".
 func impact(c Change) string {
 	sites := "no callers"
 	if c.CallSites > 0 {
@@ -437,16 +438,24 @@ func impact(c Change) string {
 			sites += " (approx.)"
 		}
 	}
-	uses, approx := 0, false
+	uses, approx, impls, unkeyed := 0, false, 0, 0
 	for _, m := range c.Members {
 		uses += m.Uses
 		approx = approx || m.Approximate
+		impls = max(impls, len(m.Implementers)) // every member shares the one list
+		unkeyed = max(unkeyed, m.Unkeyed)       // and the one count
 	}
 	if uses > 0 {
 		sites += " · " + plural(uses, "field use")
 		if approx {
 			sites += " (approx.)"
 		}
+	}
+	if unkeyed > 0 {
+		sites += " · " + plural(unkeyed, "unkeyed literal")
+	}
+	if impls > 0 {
+		sites += " · " + plural(impls, "implementer") + " (approx.)"
 	}
 	if c.Exported {
 		return sites + " · exported"

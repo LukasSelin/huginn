@@ -25,6 +25,10 @@ type index struct {
 
 	fields      map[string][]site // field uses by symID of "Type.Field"
 	fieldByName map[string][]site // field uses x.Name with unknown x, by Name
+
+	types       []typeSite             // type declarations, for implementer search
+	methodSets  map[string]methodSet   // methods by symID of the receiver base type
+	methodFiles map[string][]*ast.File // files declaring them, by the same id
 }
 
 // symID identifies a symbol across a tree: its package import path and its
@@ -42,13 +46,27 @@ func newIndex(tree []*ast.File, pkgOf func(path, pkg string) string) *index {
 
 		fields:      map[string][]site{},
 		fieldByName: map[string][]site{},
+
+		methodSets:  map[string]methodSet{},
+		methodFiles: map[string][]*ast.File{},
 	}
 	methods := map[string]bool{}
 	for _, f := range tree {
 		pkg := pkgOf(f.Path, f.Package)
 		for _, s := range f.Symbols {
-			if s.Kind == ast.KindMethod {
+			switch s.Kind {
+			case ast.KindMethod:
 				methods[symID(pkg, s.Key)] = true
+				id := symID(pkg, s.Recv)
+				if idx.methodSets[id] == nil {
+					idx.methodSets[id] = methodSet{}
+				}
+				idx.methodSets[id][s.Name] = unqualified(s.MethodKey())
+				if fs := idx.methodFiles[id]; len(fs) == 0 || fs[len(fs)-1] != f {
+					idx.methodFiles[id] = append(fs, f)
+				}
+			case ast.KindType:
+				idx.types = append(idx.types, typeSite{sym: s, file: f, pkg: pkg})
 			}
 		}
 	}
@@ -156,6 +174,16 @@ func (idx *index) callers(s *ast.Symbol, pkg string, record func(callerID, Calle
 	}
 	sortCallers(out)
 	return out, approx
+}
+
+// unkeyedLiterals counts the unkeyed literals T{1, "x"} of type typ,
+// declared in package pkg. Their type is spelled out, so the count is exact
+// as far as names go.
+func (idx *index) unkeyedLiterals(typ, pkg string) (n int) {
+	for _, st := range idx.fields[symID(pkg, typ+".")] {
+		n += st.uses
+	}
+	return n
 }
 
 // fieldUses counts the uses of field name of struct type typ, declared in

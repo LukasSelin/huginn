@@ -259,7 +259,9 @@ func (s *Server) Run(c cfg.Options) {
 	y := &cfg.Options{Addr: "b"}
 	s.start()
 	_ = []Config{{Port: 2}}
-	use(x, y)
+	z := cfg.Options{"c", 3}
+	_, _ = []int{1}, Config{}
+	use(x, y, z)
 }
 `)
 	var got []string
@@ -272,6 +274,7 @@ func (s *Server) Run(c cfg.Options) {
 		" Config.Addr 1 approx=false",
 		" Config.Port 1 approx=false",
 		" Server.conf 1 approx=false",
+		"example.com/cfg Options. 1 approx=false", // unkeyed
 		"example.com/cfg Options.Addr 1 approx=false",
 	}
 	if fmt.Sprint(got) != fmt.Sprint(want) {

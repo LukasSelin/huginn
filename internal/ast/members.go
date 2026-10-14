@@ -60,6 +60,16 @@ type Member struct {
 	typeKey string // Type with parameter names dropped; used for comparison
 }
 
+// MethodKey returns an interface method's parameter and result types without
+// names, "(int, string)(error)", comparable with Symbol.MethodKey. It is
+// empty for other members.
+func (m *Member) MethodKey() string {
+	if m.Kind != MemberMethod {
+		return ""
+	}
+	return m.typeKey
+}
+
 // Embedded reports that the member is an embedded struct field or interface.
 func (m *Member) Embedded() bool { return m.Kind == MemberEmbedded || m.Kind == MemberInterface }
 

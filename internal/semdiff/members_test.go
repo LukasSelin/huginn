@@ -2,6 +2,7 @@ package semdiff
 
 import (
 	"fmt"
+	"strings"
 	"testing"
 
 	"huginn/internal/ast"
@@ -171,5 +172,25 @@ func TestOnlyAddedFieldIsNotAPIChange(t *testing.T) {
 	c := change(t, r, "cfg.Options")
 	if got := members(c.Members); fmt.Sprint(got) != "[tag field Addr added field Port]" || c.APIChange {
 		t.Errorf("members = %q APIChange=%v", got, c.APIChange)
+	}
+}
+
+func TestUnkeyedLiteralsOfChangedStruct(t *testing.T) {
+	oldA := parse(t, "geo/geo.go", "package geo\n\ntype Point struct{ X, Y int }\n")
+	newA := parse(t, "geo/geo.go", "package geo\n\ntype Point struct {\n\tX, Y int\n\tlabel string\n}\n")
+	use := parse(t, "geo/use.go", `package geo
+
+func Origin() Point { return Point{0, 0} }
+
+func Unit() []Point { return []Point{Point{1, 0}, {0, 1}, Point{X: 1, Y: 1}} }
+`)
+	r := Build(Input{Files: []FileDiff{{Old: oldA, New: newA}}, Tree: []*ast.File{newA, use}, GoMod: goMod})
+	c := change(t, r, "geo.Point")
+	// Point{0, 0} and Point{1, 0} spell their type; {0, 1} elides it.
+	if len(c.Members) != 1 || c.Members[0].Unkeyed != 2 || c.Members[0].Breaking {
+		t.Fatalf("members = %+v", c.Members)
+	}
+	if !strings.Contains(c.Impact, "2 unkeyed literals") {
+		t.Errorf("Impact = %q", c.Impact)
 	}
 }
