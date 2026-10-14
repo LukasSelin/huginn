@@ -126,7 +126,7 @@ func buckets(h *lineage.History, n int) []Bucket {
 	for sym := range h.All() {
 		for i := range sym.Events {
 			e := &sym.Events[i]
-			rev, ok := h.Index(e.SHA)
+			rev, ok := h.Position(e.SHA)
 			if !ok {
 				continue
 			}
@@ -158,8 +158,8 @@ func buckets(h *lineage.History, n int) []Bucket {
 		lo, hi := b*revs/n, (b+1)*revs/n // revisions [lo, hi)
 		bk := &out[b]
 		bk.Revisions = hi - lo
-		bk.First, bk.From = h.At(lo)
-		bk.Last, bk.To = h.At(hi - 1)
+		bk.First, bk.From = h.RevisionAt(lo)
+		bk.Last, bk.To = h.RevisionAt(hi - 1)
 		for ; next < len(steps) && steps[next].rev < hi; next++ {
 			st := steps[next]
 			e := st.event

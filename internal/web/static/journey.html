@@ -1,0 +1,120 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>huginn · journey</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600&amp;family=JetBrains+Mono:wght@400;600&amp;family=Newsreader:ital,opsz,wght@0,6..72,400;0,6..72,500;1,6..72,400&amp;display=swap" rel="stylesheet">
+<link rel="stylesheet" href="app.css">
+<link rel="stylesheet" href="journey.css">
+</head>
+<body>
+<header class="top">
+  <div class="brand">
+    <svg width="26" height="26" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 12c3-5 6-7 9-7s6 2 9 7c-3 5-6 7-9 7s-6-2-9-7z"></path><circle cx="12" cy="12" r="3"></circle></svg>
+    <span class="mono">huginn</span>
+    <span class="repo" id="repo"></span>
+  </div>
+  <nav aria-label="Views" class="views">
+    <a href="/">Map</a>
+    <a href="/health">Health</a>
+    <a href="/symbols">Symbols</a>
+    <a href="/symbols#c=HEAD">Commit</a>
+    <a href="/journey" aria-current="page">Journey</a>
+  </nav>
+</header>
+
+<div id="loading" class="loading" role="status">Starting…</div>
+
+<div id="app" class="cols" hidden>
+  <main class="center">
+    <div class="titlerow">
+      <h1>Journey</h1>
+      <span class="muted" id="subtitle">The history played back, chapter by chapter</span>
+    </div>
+
+    <section class="panel stage" id="stage" aria-label="Packages over time">
+      <svg class="deps" id="deps" aria-hidden="true"></svg>
+      <div class="bubbles" id="bubbles" aria-hidden="true"></div>
+      <div class="ov ov-tl">
+        <div class="date" id="date"></div>
+        <div class="chap" id="chapLabel"></div>
+      </div>
+      <dl class="ov ov-tr counters">
+        <div><dt>Commits</dt><dd id="cCommits">0</dd></div>
+        <div><dt>Live symbols</dt><dd id="cLive">0</dd></div>
+        <div><dt>Packages</dt><dd id="cPkgs">0</dd></div>
+      </dl>
+      <p class="ov ov-bl caption" id="caption" aria-live="polite"></p>
+      <div class="ov ov-br legend" aria-label="Activity scale">
+        <span class="muted small">quiet</span>
+        <span class="swatches" id="swatches"></span>
+        <span class="muted small">busy</span>
+      </div>
+    </section>
+
+    <section class="panel playbar" aria-label="Playback">
+      <div class="controls">
+        <div class="transport">
+          <button type="button" class="icon" id="prev" aria-label="Previous frame">
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M6 5h2v14H6zM20 5v14L9 12z"></path></svg>
+          </button>
+          <button type="button" class="icon play" id="play" aria-label="Play">
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true" id="playIcon"><path d="M7 4v16l13-8z"></path></svg>
+          </button>
+          <button type="button" class="icon" id="next" aria-label="Next frame">
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M16 5h2v14h-2zM4 5v14l11-7z"></path></svg>
+          </button>
+        </div>
+        <div class="seg" role="group" aria-label="Speed" id="speed">
+          <button type="button" data-v="1">1×</button>
+          <button type="button" data-v="2">2×</button>
+          <button type="button" data-v="4">4×</button>
+        </div>
+        <div class="seg" role="group" aria-label="Step by" id="step">
+          <button type="button" data-v="commit">Commit</button>
+          <button type="button" data-v="week">Week</button>
+          <button type="button" data-v="month">Month</button>
+        </div>
+        <span class="muted small mono" id="frameLabel"></span>
+      </div>
+      <div class="rows">
+        <div class="row-label eyebrow">Chapters</div>
+        <div class="track bands" id="bands"></div>
+        <div class="row-label eyebrow" id="periodLabel">Months</div>
+        <div class="track periods" id="periods"></div>
+        <div class="playhead" id="playhead" aria-hidden="true"></div>
+      </div>
+    </section>
+  </main>
+
+  <aside class="detail story" aria-label="Story">
+    <div class="eyebrow-row">
+      <h2 class="eyebrow">The story so far</h2>
+      <button type="button" class="toggle" id="narrate" aria-pressed="false">
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M11 5 6 9H2v6h4l5 4z"></path><path d="M15.5 8.5a5 5 0 0 1 0 7"></path><path d="M19 5a10 10 0 0 1 0 14"></path></svg>
+        Narrate aloud
+      </button>
+    </div>
+    <div>
+      <div class="muted small" id="chapNum"></div>
+      <h2 class="ctitle" id="chapTitle"></h2>
+      <p class="muted small mono" id="chapDates"></p>
+    </div>
+    <p class="narrative" id="chapText"></p>
+    <div class="stats" id="chapStats"></div>
+    <section aria-labelledby="kmHead">
+      <h3 class="eyebrow" id="kmHead">Key moments</h3>
+      <ol class="moments" id="moments"></ol>
+    </section>
+    <section aria-labelledby="chHead">
+      <h3 class="eyebrow" id="chHead">Chapters</h3>
+      <ol class="chapters" id="chapters"></ol>
+    </section>
+  </aside>
+</div>
+<script src="common.js"></script>
+<script src="journey.js"></script>
+</body>
+</html>

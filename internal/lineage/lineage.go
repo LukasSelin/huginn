@@ -225,15 +225,16 @@ func (h *History) Neighbors(sha string) (prev, next string, ok bool) {
 	return prev, next, true
 }
 
-// Index returns the position of sha among the applied revisions, oldest
-// first. ok is false when sha was never applied.
-func (h *History) Index(sha string) (i int, ok bool) {
+// Position returns the index of revision sha in the order revisions were
+// applied, oldest first. ok is false when sha was never applied.
+func (h *History) Position(sha string) (i int, ok bool) {
 	i, ok = h.pos[sha]
 	return i, ok
 }
 
-// At returns the SHA and time of the i'th applied revision, oldest first.
-func (h *History) At(i int) (sha string, t time.Time) { return h.shas[i], h.times[i] }
+// RevisionAt returns the hash and time of the i-th applied revision, oldest
+// first, for 0 <= i < Revisions().
+func (h *History) RevisionAt(i int) (sha string, t time.Time) { return h.shas[i], h.times[i] }
 
 // Span returns the times of the first and last applied revisions.
 func (h *History) Span() (first, last time.Time) { return h.first, h.last }
