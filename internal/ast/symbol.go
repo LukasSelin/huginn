@@ -61,6 +61,17 @@ type Symbol struct {
 	// kind, package, receiver and name. Nil for other kinds of declarations.
 	Refs []Ref
 
+	// FieldRefs are the struct fields a function or method body uses by
+	// name, sorted by package, type and name. Nil for other kinds of
+	// declarations.
+	FieldRefs []FieldRef
+
+	// Members are the fields of a struct type or the methods, embedded
+	// interfaces and type terms of an interface type, in declaration order.
+	// Nil for other declarations. They are not part of BodyHash's input
+	// beyond the type definition itself.
+	Members []Member
+
 	sigKey   string              // signature with parameter names dropped; used for comparison
 	shingles map[uint64]struct{} // token n-grams of the body; used for fuzzy matching
 }

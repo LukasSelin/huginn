@@ -39,6 +39,10 @@ type Change struct {
 	Flags      ChangeFlags
 	Old, New   *Symbol
 	Similarity float64 // body similarity of a fuzzy match; 1 for matches by name
+
+	// Members are the member-level changes of a struct or interface type
+	// whose definition changed, as DiffMembers reports them.
+	Members []MemberChange
 }
 
 // RenameThreshold is the minimum body similarity for two differently named
@@ -81,7 +85,7 @@ func Diff(old, new []*File) []Change {
 		}
 		matchedOld[best] = true
 		if f := compare(oldSyms[best], n); f != 0 {
-			changes = append(changes, Change{Flags: f, Old: oldSyms[best], New: n, Similarity: 1})
+			changes = append(changes, matched(f, oldSyms[best], n, 1))
 		}
 	}
 
@@ -112,7 +116,7 @@ func Diff(old, new []*File) []Change {
 		}
 		matchedOld[p.o], matchedNew[p.n] = true, true
 		o, n := oldSyms[p.o], unmatchedNew[p.n]
-		changes = append(changes, Change{Flags: compare(o, n), Old: o, New: n, Similarity: p.score})
+		changes = append(changes, matched(compare(o, n), o, n, p.score))
 	}
 
 	// Pass 3: whatever is left was added or deleted.
@@ -138,6 +142,15 @@ func Diff(old, new []*File) []Change {
 		return cmp.Or(cmp.Compare(sa.Path, sb.Path), cmp.Compare(sa.StartLine, sb.StartLine), cmp.Compare(sa.Key, sb.Key))
 	})
 	return changes
+}
+
+// matched builds the change of a symbol found on both sides.
+func matched(f ChangeFlags, o, n *Symbol, sim float64) Change {
+	c := Change{Flags: f, Old: o, New: n, Similarity: sim}
+	if f.Has(BodyChanged) {
+		c.Members = DiffMembers(o, n)
+	}
+	return c
 }
 
 func collect(files []*File) []*Symbol {

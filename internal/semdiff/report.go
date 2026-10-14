@@ -207,6 +207,11 @@ type Change struct {
 	Impact      string // "17 call sites · exported"
 
 	Similarity float64 // body similarity, below 1 for fuzzy rename or move matches
+
+	// Members are the member-level changes of a struct or interface type
+	// whose definition changed, in declaration order. A breaking member
+	// change of an exported type sets APIChange.
+	Members []MemberChange
 }
 
 // Caller is a declaration that refers to a changed symbol.
@@ -272,6 +277,10 @@ func Build(in Input) *Report {
 
 	for _, c := range ast.Diff(olds, news) {
 		rc := newChange(c, pkgOf)
+		rc.Members = memberChanges(c, pkgOf, idx)
+		for _, m := range rc.Members {
+			rc.APIChange = rc.APIChange || m.Breaking
+		}
 		target := c.New
 		if target == nil {
 			target = c.Old
@@ -409,6 +418,8 @@ func summary(c ast.Change) string {
 			body = []string{"body edited, same size"}
 		}
 		parts = append(parts, body...)
+	case c.Flags.Has(ast.BodyChanged) && len(c.Members) > 0:
+		parts = append(parts, memberSummary(c.Members))
 	case c.Flags.Has(ast.BodyChanged):
 		parts = append(parts, "definition changed")
 	case c.Flags.Has(ast.SignatureChanged):
@@ -417,12 +428,23 @@ func summary(c ast.Change) string {
 	return strings.Join(parts, " · ")
 }
 
-// impact describes a change's reach: "17 call sites · exported".
+// impact describes a change's reach: "17 call sites · 4 field uses · exported".
 func impact(c Change) string {
 	sites := "no callers"
 	if c.CallSites > 0 {
 		sites = plural(c.CallSites, "call site")
 		if c.Approximate {
+			sites += " (approx.)"
+		}
+	}
+	uses, approx := 0, false
+	for _, m := range c.Members {
+		uses += m.Uses
+		approx = approx || m.Approximate
+	}
+	if uses > 0 {
+		sites += " · " + plural(uses, "field use")
+		if approx {
 			sites += " (approx.)"
 		}
 	}
