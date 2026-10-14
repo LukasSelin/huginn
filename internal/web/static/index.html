@@ -1,0 +1,61 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>huginn · symbols</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600&amp;family=JetBrains+Mono:wght@400;600&amp;display=swap" rel="stylesheet">
+<link rel="stylesheet" href="app.css">
+</head>
+<body>
+<header class="top">
+  <div class="brand">
+    <svg width="26" height="26" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 12c3-5 6-7 9-7s6 2 9 7c-3 5-6 7-9 7s-6-2-9-7z"></path><circle cx="12" cy="12" r="3"></circle></svg>
+    <span class="mono">huginn</span>
+    <span class="repo" id="repo"></span>
+  </div>
+  <nav aria-label="Views" class="views">
+    <a href="#" aria-current="page">Symbols</a>
+  </nav>
+  <nav aria-label="Breadcrumb" class="crumbs mono" id="crumbs"></nav>
+</header>
+
+<div id="loading" class="loading" role="status">Starting…</div>
+
+<div id="app" class="cols" hidden>
+  <aside class="outline" aria-label="AST outline">
+    <label class="field">
+      <span class="eyebrow">Directory</span>
+      <input id="dirInput" list="dirList" class="mono" autocomplete="off" spellcheck="false">
+      <datalist id="dirList"></datalist>
+    </label>
+    <div class="eyebrow-row"><h2 class="eyebrow">AST outline</h2><span class="muted small">go/ast</span></div>
+    <div id="tree" role="tree" aria-label="Symbols" class="tree mono"></div>
+  </aside>
+
+  <main class="center">
+    <div class="titlerow">
+      <h1>Symbol timeline</h1>
+      <span class="muted" id="subtitle">One lane per declaration · identity survives renames and moves</span>
+    </div>
+    <div class="legend" id="legend"></div>
+    <div class="panel lanes-scroll">
+      <div class="lanes" id="lanes"></div>
+    </div>
+    <section class="panel" aria-label="Size over time" id="sizePanel" hidden>
+      <div class="titlerow">
+        <h2 class="h2" id="sizeTitle"></h2>
+        <span class="muted small">statements (bars) · cyclomatic (line)</span>
+      </div>
+      <div id="sizeChart" class="size"></div>
+    </section>
+  </main>
+
+  <aside class="detail" aria-label="Lineage" id="detail">
+    <p class="muted">Select a symbol to see its lineage.</p>
+  </aside>
+</div>
+<script src="app.js"></script>
+</body>
+</html>
