@@ -98,7 +98,8 @@ type Options struct {
 	FirstParent bool
 
 	// IncludeGenerated diffs files with a "Code generated ... DO NOT EDIT."
-	// header. By default a file generated on either side is ignored.
+	// header. By default generated code is treated as absent, so a file that
+	// gains or loses the header deletes or adds its symbols.
 	IncludeGenerated bool
 }
 
@@ -202,8 +203,23 @@ type walker struct {
 }
 
 type parsed struct {
+	ok  bool // the side is a Go file to diff; f may still be nil if it did not parse
 	f   *ast.File
 	err error
+}
+
+// side returns one side of a changed file. Unless generated code is
+// included, a generated side counts as absent: a file that stops being
+// generated adds its symbols, and one that becomes generated deletes them.
+func (w *walker) side(isGo bool, path, hash string) (parsed, error) {
+	if !isGo {
+		return parsed{}, nil
+	}
+	p, err := w.parse(path, hash)
+	if err != nil || w.opts.IncludeGenerated || p.f == nil || !p.f.Generated {
+		return p, err
+	}
+	return parsed{}, nil
 }
 
 // pkgFiles are the two sides of the Go files a commit touched in one directory.
@@ -227,41 +243,30 @@ func (w *walker) analyze(c *Commit) error {
 		// A copy leaves its source in place, so only the new side counts.
 		oldGo := fc.Status != StatusCopied && isGoFile(fc.OldPath, fc.oldMode)
 		newGo := isGoFile(fc.NewPath, fc.newMode)
-		if !oldGo && !newGo {
-			continue
+		old, err := w.side(oldGo, fc.OldPath, fc.oldHash)
+		if err != nil {
+			return err
 		}
-		var old, new *ast.File
-		if oldGo {
-			p, err := w.parse(fc.OldPath, fc.oldHash)
-			if err != nil {
-				return err
-			}
-			old = p.f
-			if p.err != nil {
-				c.ParseErrors = append(c.ParseErrors, p.err)
-			}
+		new, err := w.side(newGo, fc.NewPath, fc.newHash)
+		if err != nil {
+			return err
 		}
-		if newGo {
-			p, err := w.parse(fc.NewPath, fc.newHash)
-			if err != nil {
-				return err
-			}
-			new = p.f
-			if p.err != nil {
-				c.ParseErrors = append(c.ParseErrors, p.err)
-			}
-		}
-		if !w.opts.IncludeGenerated && (old != nil && old.Generated || new != nil && new.Generated) {
+		if !old.ok && !new.ok {
 			continue
 		}
 		goFiles++
-		if old != nil {
-			g := group(fc.OldPath)
-			g.old = append(g.old, old)
+		for _, s := range []parsed{old, new} {
+			if s.ok && s.err != nil {
+				c.ParseErrors = append(c.ParseErrors, s.err)
+			}
 		}
-		if new != nil {
+		if old.f != nil {
+			g := group(fc.OldPath)
+			g.old = append(g.old, old.f)
+		}
+		if new.f != nil {
 			g := group(fc.NewPath)
-			g.new = append(g.new, new)
+			g.new = append(g.new, new.f)
 		}
 	}
 
@@ -284,6 +289,7 @@ func (w *walker) parse(path, hash string) (parsed, error) {
 			return parsed{}, err
 		}
 		p.f, p.err = ast.ParseSource(path, src)
+		p.ok = true
 	}
 	w.cur[key] = p
 	return p, nil
