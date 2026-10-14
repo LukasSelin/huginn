@@ -130,6 +130,11 @@ type FileDiff struct {
 	Old, New *ast.File
 }
 
+// ResolveCommit returns the full hash of the commit rev names.
+func (r *Repo) ResolveCommit(ctx context.Context, rev string) (string, error) {
+	return r.resolve(ctx, rev, "commit")
+}
+
 // Diff returns the single commit rev, analyzed as Walk would with opts, and
 // the Go files it touched. Only opts.IncludeGenerated is used.
 func (r *Repo) Diff(ctx context.Context, rev string, opts Options) (*Commit, []FileDiff, error) {

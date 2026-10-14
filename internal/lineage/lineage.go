@@ -103,6 +103,8 @@ type History struct {
 	live      map[locator]ID
 	symbols   []*Symbol // by ID-1
 	revisions int
+	shas      []string       // applied revisions, oldest first
+	pos       map[string]int // index into shas
 	first     time.Time
 	last      time.Time
 }
@@ -112,7 +114,7 @@ type locator struct{ path, key string }
 
 func at(s *ast.Symbol) locator { return locator{s.Path, s.Key} }
 
-func New() *History { return &History{live: map[locator]ID{}} }
+func New() *History { return &History{live: map[locator]ID{}, pos: map[string]int{}} }
 
 // Apply records one revision. Revisions must be applied oldest first.
 //
@@ -121,6 +123,8 @@ func New() *History { return &History{live: map[locator]ID{}} }
 // (init, _) whose "#n" key shifted in an earlier revision without a change.
 func (h *History) Apply(r Revision) {
 	h.revisions++
+	h.pos[r.SHA] = len(h.shas)
+	h.shas = append(h.shas, r.SHA)
 	if h.first.IsZero() {
 		h.first = r.Time
 	}
@@ -202,6 +206,22 @@ func (h *History) Live() int { return len(h.live) }
 
 // Revisions returns how many revisions were applied.
 func (h *History) Revisions() int { return h.revisions }
+
+// Neighbors returns the revisions applied just before and just after sha,
+// "" at either end. ok is false when sha was never applied.
+func (h *History) Neighbors(sha string) (prev, next string, ok bool) {
+	i, ok := h.pos[sha]
+	if !ok {
+		return "", "", false
+	}
+	if i > 0 {
+		prev = h.shas[i-1]
+	}
+	if i+1 < len(h.shas) {
+		next = h.shas[i+1]
+	}
+	return prev, next, true
+}
 
 // Span returns the times of the first and last applied revisions.
 func (h *History) Span() (first, last time.Time) { return h.first, h.last }

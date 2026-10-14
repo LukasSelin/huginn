@@ -7,7 +7,8 @@
 //
 //	huginn serve [-C dir] [-branch rev] [-tests] [-no-cache] [-addr host:port]
 //
-// indexes the history and serves the symbol timeline in a browser.
+// indexes the history and serves the symbol timeline and the semantic diff
+// of each commit in a browser.
 //
 // Both keep the walked history in .git/huginn, so that the next run only
 // walks commits it has not seen; -no-cache walks everything afresh.

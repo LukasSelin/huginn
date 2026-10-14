@@ -16,7 +16,8 @@
     <span class="repo" id="repo"></span>
   </div>
   <nav aria-label="Views" class="views">
-    <a href="#" aria-current="page">Symbols</a>
+    <a href="#" id="navSymbols" aria-current="page">Symbols</a>
+    <a href="#" id="navCommit">Commit</a>
   </nav>
   <nav aria-label="Breadcrumb" class="crumbs mono" id="crumbs"></nav>
 </header>
@@ -55,6 +56,20 @@
   <aside class="detail" aria-label="Lineage" id="detail">
     <p class="muted">Select a symbol to see its lineage.</p>
   </aside>
+</div>
+<div id="commitView" class="commit-view" hidden>
+  <section class="commit-head" aria-label="Commit" id="commitHead"></section>
+  <div class="cols">
+    <aside class="outline" aria-label="Files">
+      <div class="eyebrow-row"><h2 class="eyebrow">Files</h2><span class="muted small" id="fileCount"></span></div>
+      <div id="commitFiles" class="tree mono"></div>
+    </aside>
+    <main class="center">
+      <div class="chips" id="chips" role="group" aria-label="Filter by kind of change"></div>
+      <div id="cards" class="cards"></div>
+    </main>
+    <aside class="detail" aria-label="Blast radius" id="blast"></aside>
+  </div>
 </div>
 <script src="app.js"></script>
 </body>
