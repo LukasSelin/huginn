@@ -8,9 +8,11 @@ import (
 	"io"
 	"maps"
 	"path"
+	"runtime"
 	"slices"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"huginn/internal/ast"
@@ -204,26 +206,7 @@ func (r *Repo) walk(ctx context.Context, opts Options, fn func(*Commit, []fileSi
 	}()
 
 	w := &walker{cf: cf, opts: opts}
-	lr := newLogReader(stdout)
-	for {
-		if err := ctx.Err(); err != nil {
-			return err
-		}
-		c, err := lr.next()
-		if err == io.EOF {
-			return nil
-		}
-		if err != nil {
-			return err
-		}
-		sides, err := w.analyze(c)
-		if err != nil {
-			return err
-		}
-		if err := fn(c, sides); err != nil {
-			return err
-		}
-	}
+	return w.run(ctx, cancel, newLogReader(stdout), fn)
 }
 
 func logArgs(opts Options) []string {
@@ -280,20 +263,176 @@ func (r *Repo) Commits(ctx context.Context, opts Options) ([]string, error) {
 }
 
 // walker turns commits from the log into symbol changes.
+//
+// Reading and parsing blobs runs ahead of the diffing, on other goroutines.
+// schedule reads commits from the log and requests the blobs each one needs
+// from git cat-file, read collects the replies in request order and hands
+// them to a pool of parse workers, and the caller's goroutine takes the
+// commits in log order, waits for their blobs, and diffs them.
 type walker struct {
 	cf   *catFile
 	opts Options
 
-	// Parsed blobs from this commit and the previous one. Along a linear
-	// history the old side of a file is the new side of the commit before,
-	// so most files are read and parsed once.
-	cur, prev map[string]parsed
+	// Blobs of this commit and the previous one, parsed or being parsed.
+	// Along a linear history the old side of a file is the new side of the
+	// commit before, so most files are read and parsed once. Only schedule
+	// uses them.
+	cur, prev map[string]*blob
 }
+
+// lookahead is how many commits the log is read ahead of the one being
+// diffed.
+const lookahead = 64
 
 type parsed struct {
 	ok  bool // the side is a Go file to diff; f may still be nil if it did not parse
 	f   *ast.File
 	err error
+}
+
+// blob is one side of a Go file, read and parsed in the background.
+type blob struct {
+	hash, path string
+	src        []byte
+	done       chan struct{} // closed once p or err is set
+	p          parsed
+	err        error // reading failed; a syntax error is in p.err
+}
+
+// result waits for b to be read and parsed. A nil blob is a side that is not
+// a Go file.
+func (b *blob) result() (parsed, error) {
+	if b == nil {
+		return parsed{}, nil
+	}
+	<-b.done
+	return b.p, b.err
+}
+
+func (b *blob) parse() {
+	b.p.f, b.p.err = ast.ParseSource(b.path, b.src)
+	b.p.ok = true
+	b.src = nil
+	close(b.done)
+}
+
+// pending is a commit from the log whose blobs are being read and parsed.
+type pending struct {
+	c     *Commit
+	files []pendingSides
+}
+
+// pendingSides are the sides of one Go file a pending commit touched.
+type pendingSides struct {
+	fc       *FileChange
+	old, new *blob
+}
+
+// run analyzes the commits lr reads and calls fn for each, in log order. It
+// returns once every goroutine it started has stopped, calling cancel first
+// to stop git if it fails.
+func (w *walker) run(ctx context.Context, cancel context.CancelFunc, lr *logReader, fn func(*Commit, []fileSides) error) error {
+	commits := make(chan *pending, lookahead)
+	batches := make(chan []*blob, lookahead)
+	workers := runtime.GOMAXPROCS(0)
+	work := make(chan *blob, workers)
+	schedErr := make(chan error, 1)
+
+	var wg sync.WaitGroup
+	wg.Go(func() { schedErr <- w.schedule(ctx, lr, commits, batches) })
+	wg.Go(func() { w.read(batches, work) })
+	for range workers {
+		wg.Go(func() {
+			for b := range work {
+				b.parse()
+			}
+		})
+	}
+
+	err := func() error {
+		for p := range commits {
+			if err := ctx.Err(); err != nil {
+				return err
+			}
+			sides, err := w.analyze(p)
+			if err != nil {
+				return err
+			}
+			if err := fn(p.c, sides); err != nil {
+				return err
+			}
+		}
+		return <-schedErr
+	}()
+	if err != nil {
+		cancel() // unblocks reads and writes on git's pipes
+	}
+	wg.Wait()
+	return err
+}
+
+// schedule reads commits from the log, requests the blobs each needs that
+// are not parsed or being parsed already, and queues the commit for analyze.
+// Each commit's requests go to git cat-file in one write.
+func (w *walker) schedule(ctx context.Context, lr *logReader, commits chan<- *pending, batches chan<- []*blob) error {
+	defer close(commits)
+	defer close(batches)
+	for {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		c, err := lr.next()
+		if err == io.EOF {
+			return nil
+		}
+		if err != nil {
+			return err
+		}
+		p, batch := w.sides(c)
+		if len(batch) > 0 {
+			// read takes every batch, so this does not block for long. The
+			// batch goes first so that read is ready for the replies before
+			// git can fill its output pipe with them.
+			batches <- batch
+			names := make([]string, len(batch))
+			for i, b := range batch {
+				names[i] = b.hash
+			}
+			if err := w.cf.request(names...); err != nil {
+				return err
+			}
+		}
+		select {
+		case commits <- p:
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+	}
+}
+
+// read reads the blobs of each batch from git cat-file, in the order they
+// were requested, and hands them to the parse workers. Once a read fails,
+// it and every later blob fail with the same error.
+func (w *walker) read(batches <-chan []*blob, work chan<- *blob) {
+	defer close(work)
+	var failed error
+	for batch := range batches {
+		for _, b := range batch {
+			if failed == nil {
+				if b.src, failed = w.cf.readBlob(); failed != nil {
+					// Keep git from blocking on a full pipe while schedule
+					// still writes to it.
+					go io.Copy(io.Discard, w.cf.out)
+				}
+			}
+			if failed != nil {
+				b.err = failed
+				close(b.done)
+				continue
+			}
+			work <- b
+		}
+	}
 }
 
 // present returns a side as the diff sees it. Unless generated code is
@@ -312,9 +451,26 @@ type fileSides struct {
 	old, new parsed
 }
 
-// sides parses both sides of every Go file c touched, generated or not.
-func (w *walker) sides(c *Commit) ([]fileSides, error) {
-	var out []fileSides
+// sides finds both sides of every Go file c touched, generated or not, and
+// returns them with the blobs that are new to this commit and still need to
+// be read. The others are shared with the previous commit.
+func (w *walker) sides(c *Commit) (*pending, []*blob) {
+	w.prev, w.cur = w.cur, map[string]*blob{}
+	p := &pending{c: c}
+	var batch []*blob
+	side := func(path, hash string) *blob {
+		key := hash + "\x00" + path
+		if b, ok := w.cur[key]; ok {
+			return b
+		}
+		b, ok := w.prev[key]
+		if !ok {
+			b = &blob{hash: hash, path: path, done: make(chan struct{})}
+			batch = append(batch, b)
+		}
+		w.cur[key] = b
+		return b
+	}
 	for i := range c.Files {
 		fc := &c.Files[i]
 		// A copy leaves its source in place, so only the new side counts.
@@ -323,32 +479,37 @@ func (w *walker) sides(c *Commit) ([]fileSides, error) {
 		if !oldGo && !newGo {
 			continue
 		}
-		s := fileSides{fc: fc}
-		var err error
+		s := pendingSides{fc: fc}
 		if oldGo {
-			if s.old, err = w.parse(fc.OldPath, fc.oldHash); err != nil {
-				return nil, err
-			}
+			s.old = side(fc.OldPath, fc.oldHash)
 		}
 		if newGo {
-			if s.new, err = w.parse(fc.NewPath, fc.newHash); err != nil {
-				return nil, err
-			}
+			s.new = side(fc.NewPath, fc.newHash)
 		}
-		out = append(out, s)
+		p.files = append(p.files, s)
 	}
-	return out, nil
+	return p, batch
 }
 
 // pkgFiles are the two sides of the Go files a commit touched in one directory.
 type pkgFiles struct{ old, new []*ast.File }
 
-// analyze fills in the symbol changes of c and returns the sides it parsed.
-func (w *walker) analyze(c *Commit) ([]fileSides, error) {
-	w.prev, w.cur = w.cur, map[string]parsed{}
-	all, err := w.sides(c)
-	if err != nil {
-		return nil, err
+// analyze waits for the blobs of p, fills in the symbol changes of its
+// commit, and returns the sides it parsed. The error is for failing to read
+// a blob; syntax errors go to the commit's ParseErrors.
+func (w *walker) analyze(p *pending) ([]fileSides, error) {
+	c := p.c
+	var all []fileSides
+	for _, ps := range p.files {
+		s := fileSides{fc: ps.fc}
+		var err error
+		if s.old, err = ps.old.result(); err != nil {
+			return nil, err
+		}
+		if s.new, err = ps.new.result(); err != nil {
+			return nil, err
+		}
+		all = append(all, s)
 	}
 
 	pkgs := map[string]*pkgFiles{}
@@ -385,26 +546,6 @@ func (w *walker) analyze(c *Commit) ([]fileSides, error) {
 	c.Changes = diffPackages(pkgs)
 	c.FormattingOnly = goFiles > 0 && len(c.Changes) == 0 && len(c.ParseErrors) == 0
 	return all, nil
-}
-
-// parse reads and parses one blob. The error is for failing to read it; a
-// syntax error is reported in parsed.err alongside the recovered symbols.
-func (w *walker) parse(path, hash string) (parsed, error) {
-	key := hash + "\x00" + path
-	if p, ok := w.cur[key]; ok {
-		return p, nil
-	}
-	p, ok := w.prev[key]
-	if !ok {
-		src, err := w.cf.blob(hash)
-		if err != nil {
-			return parsed{}, err
-		}
-		p.f, p.err = ast.ParseSource(path, src)
-		p.ok = true
-	}
-	w.cur[key] = p
-	return p, nil
 }
 
 func isGoFile(p, mode string) bool {

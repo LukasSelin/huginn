@@ -1,6 +1,6 @@
 // Command huginn explores a Go repository's history symbol by symbol.
 //
-//	huginn symbols [-C dir] [-branch rev] [-tests] [-no-cache] name
+//	huginn symbols [-C dir] [-branch rev] [-max-count n] [-tests] [-no-cache] name
 //
 // prints the life of every symbol whose qualified name is name, e.g.
 // "ParseFile" or "(*Indexer).Visit", newest change first.
@@ -37,7 +37,7 @@ import (
 )
 
 const usage = `usage:
-  huginn symbols [-C dir] [-branch rev] [-tests] [-no-cache] name
+  huginn symbols [-C dir] [-branch rev] [-max-count n] [-tests] [-no-cache] name
   huginn serve [-C dir] [-branch rev] [-tests] [-no-cache] [-addr host:port]
   huginn semdiff [-C dir] [-include-generated] [-callers n] rev`
 
@@ -64,6 +64,7 @@ func symbols(ctx context.Context, stdout, stderr io.Writer, args []string) error
 	fs.SetOutput(stderr)
 	dir := fs.String("C", ".", "repository directory")
 	branch := fs.String("branch", "", "revision to walk (default HEAD)")
+	maxCount := fs.Int("max-count", 0, "index only the newest `n` commits; 0 for all")
 	tests := fs.Bool("tests", false, "include symbols declared in _test.go files")
 	noCache := fs.Bool("no-cache", false, "walk all history instead of reusing .git/huginn")
 	if err := fs.Parse(args); err != nil {
@@ -81,6 +82,7 @@ func symbols(ctx context.Context, stdout, stderr io.Writer, args []string) error
 	if err != nil {
 		return err
 	}
+	opts.MaxCount = *maxCount
 	start := time.Now()
 	h, err := lineage.Build(ctx, repo, opts)
 	if err != nil {
