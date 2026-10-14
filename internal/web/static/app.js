@@ -10,7 +10,21 @@ const RANK = Object.fromEntries(KINDS.map(([k], i) => [k, i]));
 const DIAMOND = new Set(['signature', 'renamed']);
 const ICON = { type: 'T', func: 'f', method: 'm', var: 'v', const: 'c' };
 
-const state = { status: null, dirs: [], dir: null, file: null, sel: null, syms: [], symbol: null };
+// Kinds of semantic change on the commit screen, in the report's display
+// order.
+const COMMIT_KINDS = [
+  ['signature', 'Signature'], ['added', 'Added'], ['body', 'Body edit'],
+  ['renamed', 'Renamed'], ['moved', 'Moved'], ['deleted', 'Deleted'],
+];
+const COMMIT_LABEL = Object.fromEntries(COMMIT_KINDS);
+
+const state = {
+  status: null, dirs: [], dir: null, file: null, sel: null, syms: [], symbol: null,
+  // Commit screen: the revision in the URL, its report and the revision it
+  // was fetched for, the last commit shown (for the Commit tab), and the
+  // filters, which reset per commit.
+  commit: null, report: null, reportRev: null, lastCommit: null, kinds: new Set(), commitFile: null,
+};
 
 // h builds an element; strings become text nodes, never markup.
 function h(tag, attrs, ...kids) {
@@ -43,25 +57,39 @@ async function api(path) {
 
 function readHash() {
   const p = new URLSearchParams(location.hash.slice(1));
-  return { dir: p.get('d'), file: p.get('f'), sel: p.get('s') ? Number(p.get('s')) : null };
+  return { dir: p.get('d'), file: p.get('f'), sel: p.get('s') ? Number(p.get('s')) : null, commit: p.get('c') };
 }
 
-function go(next) {
-  const v = { dir: state.dir, file: state.file, sel: state.sel, ...next };
+// hashFor returns the URL hash of the current view changed by next. The
+// symbol view's parameters are kept on the commit screen, so that going back
+// to Symbols returns to where the reader was.
+function hashFor(next) {
+  const v = { dir: state.dir, file: state.file, sel: state.sel, commit: state.commit, ...next };
   const p = new URLSearchParams();
   if (v.dir) p.set('d', v.dir);
   if (v.file) p.set('f', v.file);
   if (v.sel) p.set('s', v.sel);
-  location.hash = p.toString();
+  if (v.commit) p.set('c', v.commit);
+  return '#' + p.toString();
+}
+
+function go(next) {
+  location.hash = hashFor(next);
 }
 
 async function route() {
   const want = readHash();
+  state.commit = want.commit;
+  showView(!!want.commit);
+  if (want.commit) {
+    await routeCommit(want.commit);
+    return;
+  }
   if (!want.dir || !state.dirs.some((d) => d.dir === want.dir)) {
     // Default to the directory with the most history.
     const busiest = state.dirs.reduce((a, b) => (b.changes > a.changes ? b : a), state.dirs[0]);
     if (!busiest) return;
-    go({ dir: busiest.dir, file: null, sel: null });
+    go({ dir: busiest.dir, file: null, sel: null, commit: null });
     return;
   }
   if (want.dir !== state.dir) {
@@ -74,6 +102,15 @@ async function route() {
     state.symbol = want.sel ? await api(`/api/symbol/${want.sel}`) : null;
   }
   render();
+}
+
+function showView(commit) {
+  $('app').hidden = commit;
+  $('commitView').hidden = !commit;
+  $('navSymbols').toggleAttribute('aria-current', !commit);
+  $('navCommit').toggleAttribute('aria-current', commit);
+  $(commit ? 'navCommit' : 'navSymbols').setAttribute('aria-current', 'page');
+  document.title = commit ? 'huginn · commit' : 'huginn · symbols';
 }
 
 // ---- outline ----
@@ -254,11 +291,199 @@ function renderDetail() {
       h('span', { class: 'muted small' }, `${s.path}:${s.start}–${s.end} · ${s.authors} author${s.authors === 1 ? '' : 's'} · ${s.events.length} change${s.events.length === 1 ? '' : 's'}`)),
     h('section', { class: 'lineage' },
       h('h2', { class: 'h2', style: 'margin-bottom: 12px' }, 'Lineage'),
-      [...s.events].reverse().map((e) => h('div', { class: 'ev' },
+      [...s.events].reverse().map((e) => h('a', { class: 'ev', href: hashFor({ commit: e.sha }), title: 'Open the semantic diff of this commit' },
         h('div', { class: 'rail' }, mark(e.kind), h('span', { class: 'bar' })),
         h('div', { class: 'body' },
           h('span', { class: 'meta' }, `${label[e.kind] || e.kind} · ${fmtDate(e.t)} · `, h('span', { class: 'mono' }, e.sha.slice(0, 7)), ` · ${e.author}`),
           h('span', { class: 'text' }, e.summary))))));
+}
+
+// ---- commit screen ----
+
+async function routeCommit(rev) {
+  if (!state.report || rev !== state.reportRev) {
+    $('commitHead').replaceChildren(h('p', { class: 'muted' }, `Computing the semantic diff of ${rev.slice(0, 12)}…`));
+    for (const id of ['commitFiles', 'chips', 'cards', 'blast']) $(id).replaceChildren();
+    $('fileCount').textContent = '';
+    $('crumbs').replaceChildren(
+      h('button', { type: 'button', onclick: () => go({ commit: null }) }, state.status.repo), h('span', {}, '›'),
+      h('span', { class: 'here' }, `commit ${rev.slice(0, 12)}`));
+    let rep;
+    try {
+      rep = await api(`/api/commit/${encodeURIComponent(rev)}`);
+    } catch (err) {
+      if (state.commit === rev) $('commitHead').replaceChildren(h('p', { class: 'muted' }, String(err)));
+      return;
+    }
+    if (state.commit !== rev) return; // navigated away meanwhile
+    state.report = rep;
+    state.reportRev = rev;
+    state.lastCommit = rep.sha;
+    state.kinds = new Set();
+    state.commitFile = null;
+  }
+  renderCommit();
+}
+
+const plural = (n, noun) => `${n.toLocaleString()} ${noun}${n === 1 ? '' : 's'}`;
+const fmtDateTime = (t) => new Date(t * 1000).toLocaleString(undefined, {
+  year: 'numeric', month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit',
+});
+const dots = (kinds) => h('span', { class: 'dots' }, kinds.map((k) => h('span', { class: `dot m-${k}`, title: COMMIT_LABEL[k] })));
+const loc = (path, line) => `${path}:${line}`;
+
+function renderCommit() {
+  const r = state.report;
+  $('crumbs').replaceChildren(
+    h('button', { type: 'button', onclick: () => go({ commit: null }) }, state.status.repo), h('span', {}, '›'),
+    h('span', { class: 'here' }, `commit ${r.sha.slice(0, 7)}`));
+  renderCommitHead(r);
+  renderCommitFiles(r);
+  renderChips(r);
+  renderCards(r);
+  renderBlast(r);
+}
+
+function renderCommitHead(r) {
+  const body = r.message.slice(r.subject.length).trim();
+  const navBtn = (rev, label, aria) => (rev
+    ? h('a', { class: 'btn', href: hashFor({ commit: rev }), 'aria-label': aria, title: rev.slice(0, 12) }, label)
+    : h('span', { class: 'btn', 'aria-disabled': 'true', 'aria-label': aria }, label));
+  $('commitHead').replaceChildren(
+    h('div', { class: 'commit-meta' },
+      h('div', { class: 'stack' },
+        h('span', { class: 'eyebrow' }, 'Semantic commit diff'),
+        h('h1', {}, r.subject || '(no message)'),
+        h('span', { class: 'muted small' },
+          h('span', { class: 'mono sha', title: r.sha }, r.sha.slice(0, 12)), ` · ${r.author} · ${fmtDateTime(r.t)}`,
+          r.parents.length > 1 ? ` · merge of ${r.parents.length} parents` : ''),
+        body && h('details', { class: 'msg' }, h('summary', { class: 'muted small' }, 'Full message'), h('pre', {}, body))),
+      h('nav', { class: 'commit-nav', 'aria-label': 'Neighboring commits' },
+        navBtn(r.nav.prev, '← Older', 'Previous commit'),
+        navBtn(r.nav.next, 'Newer →', 'Next commit'))),
+    h('p', { class: 'headline' },
+      h('span', { class: 'plus' }, `+${r.added.toLocaleString()}`), ' ',
+      h('span', { class: 'minus' }, `−${r.removed.toLocaleString()}`), ' lines → ',
+      h('strong', {}, plural(r.semanticChanges, 'semantic change')),
+      h('span', { class: 'muted' }, ` across ${plural(r.symbols, 'symbol')}`)),
+    r.warnings ? h('p', { class: 'muted small' }, `⚠ ${r.warnings.join(' · ')}`) : '');
+}
+
+function renderCommitFiles(r) {
+  $('fileCount').textContent = `${r.files.length} changed`;
+  const row = (f) => {
+    const on = state.commitFile === f.path;
+    return h('button', {
+      type: 'button', class: 'node file', 'aria-pressed': String(on), title: f.oldPath ? `${f.oldPath} → ${f.path}` : f.path,
+      onclick: () => { state.commitFile = on ? null : f.path; renderCommit(); },
+    }, dots(f.kinds), h('span', { class: 'lbl' }, f.path),
+      h('span', { class: 'n' }, h('span', { class: 'plus' }, `+${f.added}`), ' ', h('span', { class: 'minus' }, `−${f.removed}`)));
+  };
+  $('commitFiles').replaceChildren(
+    h('button', {
+      type: 'button', class: 'node file', 'aria-pressed': String(!state.commitFile),
+      onclick: () => { state.commitFile = null; renderCommit(); },
+    }, h('span', { class: 'lbl' }, 'All files'), h('span', { class: 'n' }, r.changes.length)),
+    ...(r.files.length ? r.files.map(row) : [h('p', { class: 'muted small' }, 'No Go files with semantic changes.')]));
+}
+
+function renderChips(r) {
+  const chip = (key, label, n) => {
+    const on = key ? state.kinds.has(key) : state.kinds.size === 0;
+    return h('button', {
+      type: 'button', class: 'chip', 'aria-pressed': String(on),
+      onclick: () => {
+        if (!key) state.kinds.clear();
+        else if (!state.kinds.delete(key)) state.kinds.add(key);
+        renderCommit();
+      },
+    }, key && h('span', { class: `dot m-${key}` }), label, h('span', { class: 'n' }, n));
+  };
+  $('chips').replaceChildren(
+    chip(null, 'All', r.semanticChanges),
+    ...COMMIT_KINDS.filter(([k]) => r.counts[k]).map(([k, l]) => chip(k, l, r.counts[k])));
+}
+
+function sigBlock(cls, sign, text) {
+  return h('code', { class: `sig ${cls}` }, h('span', { class: 'sign', 'aria-hidden': 'true' }, sign), text);
+}
+
+function callerRows(cs) {
+  return cs.map((c) => h('li', { class: 'caller' },
+    h('span', { class: 'mono cname' }, c.name),
+    h('span', { class: 'muted small mono' }, loc(c.path, c.line)),
+    h('span', { class: 'tags' },
+      h('span', { class: 'calls' }, `×${c.calls}`),
+      c.approximate && h('span', { class: 'tag', title: 'Matched by method name only' }, 'approx.'),
+      c.test && h('span', { class: 'tag' }, 'test'))));
+}
+
+function card(c) {
+  let sig;
+  if (c.kinds.includes('signature') && c.oldSignature) sig = [sigBlock('sig-old', '−', c.oldSignature), sigBlock('sig-new', '+', c.newSignature)];
+  else if (c.kind === 'added') sig = sigBlock('sig-new', '+', c.newSignature);
+  else if (c.kind === 'deleted') sig = sigBlock('sig-old', '−', c.oldSignature);
+  else sig = sigBlock('', ' ', c.newSignature);
+  const was = c.oldPath && (c.oldPath !== c.path || c.oldName)
+    ? ` · was ${c.oldName || c.name} at ${loc(c.oldPath, c.oldLine)}` : '';
+  return h('article', { class: `card c-${c.kind}` },
+    h('header', { class: 'card-head' },
+      h('span', { class: `badge b-${c.kind}` }, COMMIT_LABEL[c.kind]),
+      c.kinds.filter((k) => k !== c.kind).map((k) => h('span', { class: `badge minor b-${k}` }, COMMIT_LABEL[k])),
+      h('span', { class: 'muted small' }, c.symbol),
+      h('span', { class: 'cname mono' }, c.name),
+      c.exported && h('span', { class: 'tag' }, 'exported')),
+    h('span', { class: 'muted small mono' }, loc(c.path, c.line), was),
+    sig,
+    c.summary && h('span', { class: 'summary mono' }, c.summary),
+    h('span', { class: `impact${c.apiChange ? ' warn' : ''}` }, c.impact, c.apiChange ? ' · API change' : ''),
+    c.callers.length > 0 && h('details', { class: 'callers' },
+      h('summary', { class: 'small muted' }, plural(c.callers.length, 'caller')),
+      h('ul', { class: 'caller-list' }, callerRows(c.callers))));
+}
+
+function renderCards(r) {
+  const f = state.commitFile;
+  const shown = r.changes.filter((c) => (!f || c.path === f || c.oldPath === f)
+    && (state.kinds.size === 0 || c.kinds.some((k) => state.kinds.has(k))));
+  let empty = 'No changes match the filters.';
+  if (!r.changes.length) empty = r.noise.length ? 'No semantic changes: every Go file touched is noise.' : 'No Go symbols changed in this commit.';
+  $('cards').replaceChildren(...(shown.length ? shown.map(card) : [h('div', { class: 'panel empty' }, empty)]));
+}
+
+function renderBlast(r) {
+  const b = r.blast;
+  const stat = (n, label) => h('div', { class: 'stat' }, h('strong', {}, n), h('span', { class: 'muted small' }, label));
+  const LIMIT = 12;
+  $('blast').replaceChildren(
+    h('section', { class: 'stack' },
+      h('h2', { class: 'eyebrow' }, 'Blast radius'),
+      h('div', { class: 'stats' },
+        stat(`${b.callSites.toLocaleString()}${b.approximate ? '~' : ''}`, b.approximate ? 'call sites (approx.)' : 'call sites'),
+        stat(b.packages.length, 'packages affected'),
+        stat(b.callers.length, 'calling declarations')),
+      b.packages.length > 0 && h('ul', { class: 'pkgs mono small' }, b.packages.map((p) => h('li', {}, p)))),
+    b.exportedApiChanged
+      ? h('section', { class: 'api-warn', role: 'note' },
+        h('strong', {}, '⚠ Exported API changed'),
+        h('span', { class: 'small' }, 'Callers in other packages or modules may break.'),
+        h('ul', { class: 'mono small' }, b.apiChanges.map((n) => h('li', {}, n))))
+      : h('p', { class: 'muted small' }, 'No exported API changed.'),
+    h('section', { class: 'stack' },
+      h('h2', { class: 'eyebrow' }, 'Affected callers'),
+      b.callers.length
+        ? h('ul', { class: 'caller-list' }, callerRows(b.callers.slice(0, LIMIT)))
+        : h('p', { class: 'muted small' }, 'No callers outside the change.'),
+      b.callers.length > LIMIT && h('details', {},
+        h('summary', { class: 'small muted' }, `${b.callers.length - LIMIT} more`),
+        h('ul', { class: 'caller-list' }, callerRows(b.callers.slice(LIMIT))))),
+    h('section', { class: 'stack' },
+      h('h2', { class: 'eyebrow' }, 'Ignored as noise'),
+      r.noise.length
+        ? h('ul', { class: 'noise' }, r.noise.map((n) => h('li', {},
+          h('span', { class: 'mono small' }, n.path),
+          h('span', { class: 'muted small' }, `${n.reason} · +${n.added} −${n.removed}`))))
+        : h('p', { class: 'muted small' }, 'Nothing.')));
 }
 
 // ---- page ----
@@ -296,8 +521,9 @@ async function boot() {
   $('dirInput').addEventListener('change', (e) => {
     if (state.dirs.some((d) => d.dir === e.target.value)) go({ dir: e.target.value, file: null, sel: null });
   });
+  $('navSymbols').addEventListener('click', (e) => { e.preventDefault(); go({ commit: null }); });
+  $('navCommit').addEventListener('click', (e) => { e.preventDefault(); go({ commit: state.lastCommit || 'HEAD' }); });
   $('loading').hidden = true;
-  $('app').hidden = false;
   window.addEventListener('hashchange', () => route().catch(fail));
   await route();
 }

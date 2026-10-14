@@ -1,7 +1,8 @@
 // Package web serves huginn's browser UI and the JSON API behind it.
 //
 // The history is indexed in memory once, in the background; until it is
-// ready the API answers /api/status only, which reports indexing progress.
+// ready the API answers /api/status, which reports indexing progress, and
+// /api/commit, whose reports are computed on demand.
 package web
 
 import (
@@ -33,6 +34,9 @@ type Server struct {
 	index atomic.Pointer[index]
 	done  atomic.Int64 // commits applied so far while indexing
 	err   atomic.Pointer[error]
+
+	reports *reportCache                                       // commit reports by hash
+	build   func(context.Context, string) (*commitJSON, error) // buildReport, or a test's stand-in
 }
 
 // index is the read-only view the API serves once indexing is done.
@@ -45,7 +49,9 @@ type index struct {
 
 // New returns a server for repo. name labels it in the UI.
 func New(repo *git.Repo, name string, opts lineage.BuildOptions) *Server {
-	return &Server{repo: repo, name: name, opts: opts}
+	s := &Server{repo: repo, name: name, opts: opts, reports: newReportCache(reportCacheSize)}
+	s.build = s.buildReport
+	return s
 }
 
 // Index builds the history. It blocks until done; run it in a goroutine to
@@ -81,6 +87,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /api/dirs", s.ready(s.dirList))
 	mux.HandleFunc("GET /api/dir", s.ready(s.dir))
 	mux.HandleFunc("GET /api/symbol/{id}", s.ready(s.symbol))
+	mux.HandleFunc("GET /api/commit/{rev...}", s.commit)
 	return mux
 }
 
