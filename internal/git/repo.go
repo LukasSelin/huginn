@@ -70,7 +70,9 @@ func gitError(cmd *exec.Cmd, err error, stderr *bytes.Buffer) error {
 }
 
 // catFile reads objects through a long-running git cat-file --batch process.
-// Requests are made one at a time, so the pipes cannot deadlock.
+// blob makes one request at a time, so the pipes cannot deadlock. To keep
+// git busy instead, one goroutine can write many object names with request
+// while another reads the replies, in the same order, with readBlob.
 type catFile struct {
 	cmd    *exec.Cmd
 	in     io.WriteCloser
@@ -98,9 +100,31 @@ func (r *Repo) startCatFile(ctx context.Context) (*catFile, error) {
 
 // blob returns the contents of the blob with the given object name.
 func (c *catFile) blob(name string) ([]byte, error) {
-	if _, err := io.WriteString(c.in, name+"\n"); err != nil {
-		return nil, fmt.Errorf("git cat-file: %w", err)
+	if err := c.request(name); err != nil {
+		return nil, err
 	}
+	return c.readBlob()
+}
+
+// request asks for the given objects in one write.
+func (c *catFile) request(names ...string) error {
+	n := 0
+	for _, name := range names {
+		n += len(name) + 1
+	}
+	buf := make([]byte, 0, n)
+	for _, name := range names {
+		buf = append(append(buf, name...), '\n')
+	}
+	if _, err := c.in.Write(buf); err != nil {
+		return fmt.Errorf("git cat-file: %w", err)
+	}
+	return nil
+}
+
+// readBlob reads the reply to the oldest request not yet read, which must be
+// for a blob.
+func (c *catFile) readBlob() ([]byte, error) {
 	header, err := c.out.ReadString('\n')
 	if err != nil {
 		return nil, fmt.Errorf("git cat-file: %w", err)

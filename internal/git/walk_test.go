@@ -2,6 +2,7 @@ package git
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"go/format"
 	"os/exec"
@@ -223,6 +224,43 @@ func TestWalkLimits(t *testing.T) {
 		if !slices.Equal(got, tt.want) {
 			t.Errorf("%+v: commits = %v, want %v", tt.opts, got, tt.want)
 		}
+	}
+}
+
+// TestWalkStop stops a walk while blobs of later commits are still being
+// read and parsed ahead of fn.
+func TestWalkStop(t *testing.T) {
+	r := newTestRepo(t)
+	var hashes []string
+	for i := range 20 {
+		files := map[string]string{}
+		for j := range 10 {
+			files[fmt.Sprintf("p%d/f.go", j)] = fmt.Sprintf("package p\n\nfunc F%d() int { return %d }\n", j, i)
+		}
+		hashes = append(hashes, r.Commit(fmt.Sprint("commit ", i), files))
+	}
+	repo, err := Open(r.Dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	errStop := errors.New("stop")
+	var got []string
+	err = repo.Walk(context.Background(), Options{}, func(c *Commit) error {
+		got = append(got, c.Hash)
+		if len(c.Changes) != 10 {
+			t.Errorf("commit %d: %d changes, want 10", len(got)-1, len(c.Changes))
+		}
+		if len(got) == 3 {
+			return errStop
+		}
+		return nil
+	})
+	if err != errStop {
+		t.Errorf("Walk = %v, want %v", err, errStop)
+	}
+	if !slices.Equal(got, hashes[:3]) {
+		t.Errorf("commits = %v, want %v", got, hashes[:3])
 	}
 }
 
