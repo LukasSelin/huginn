@@ -1,263 +1,151 @@
-// Command huginn explores the history of a Go repository per symbol.
+// Command huginn explores a Go repository's history symbol by symbol.
 //
-// Usage:
+//	huginn symbols [-C dir] [-branch rev] [-tests] name
 //
-//	huginn semdiff [-C dir] [-include-generated] [-callers n] <rev>
+// prints the life of every symbol whose qualified name is name, e.g.
+// "ParseFile" or "(*Indexer).Visit", newest change first.
+//
+//	huginn serve [-C dir] [-branch rev] [-tests] [-addr host:port]
+//
+// indexes the history and serves the symbol timeline in a browser.
+//
+//	huginn semdiff [-C dir] [-include-generated] [-callers n] rev
+//
+// prints the semantic diff of one commit: its changed symbols, their
+// callers, the blast radius and the files that changed only in formatting.
 package main
 
 import (
 	"context"
-	"errors"
 	"flag"
 	"fmt"
 	"io"
+	"net"
+	"net/http"
 	"os"
 	"os/signal"
-	"strings"
-	"unicode/utf8"
+	"path/filepath"
+	"time"
 
 	"huginn/internal/git"
-	"huginn/internal/semdiff"
+	"huginn/internal/lineage"
+	"huginn/internal/web"
 )
 
-const usage = `usage: huginn <command> [arguments]
-
-commands:
-  semdiff   print the semantic diff of one commit
-`
+const usage = `usage:
+  huginn symbols [-C dir] [-branch rev] [-tests] name
+  huginn serve [-C dir] [-branch rev] [-tests] [-addr host:port]
+  huginn semdiff [-C dir] [-include-generated] [-callers n] rev`
 
 func main() {
-	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
-	defer stop()
-	if err := run(ctx, os.Args[1:], os.Stdout, os.Stderr); err != nil {
-		if !errors.Is(err, flag.ErrHelp) {
-			fmt.Fprintln(os.Stderr, "huginn:", err)
-		}
+	cmds := map[string]func(context.Context, io.Writer, io.Writer, []string) error{
+		"symbols": symbols,
+		"serve":   serve,
+		"semdiff": semanticDiff,
+	}
+	if len(os.Args) < 2 || cmds[os.Args[1]] == nil {
+		fmt.Fprintln(os.Stderr, usage)
 		os.Exit(2)
 	}
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
+	defer stop()
+	if err := cmds[os.Args[1]](ctx, os.Stdout, os.Stderr, os.Args[2:]); err != nil {
+		fmt.Fprintln(os.Stderr, "huginn:", err)
+		os.Exit(1)
+	}
 }
 
-func run(ctx context.Context, args []string, stdout, stderr io.Writer) error {
-	if len(args) == 0 {
-		fmt.Fprint(stderr, usage)
-		return flag.ErrHelp
-	}
-	switch args[0] {
-	case "semdiff":
-		return runSemdiff(ctx, args[1:], stdout, stderr)
-	case "help", "-h", "-help", "--help":
-		fmt.Fprint(stdout, usage)
-		return nil
-	}
-	fmt.Fprint(stderr, usage)
-	return fmt.Errorf("unknown command %q", args[0])
-}
-
-func runSemdiff(ctx context.Context, args []string, stdout, stderr io.Writer) error {
-	fs := flag.NewFlagSet("semdiff", flag.ContinueOnError)
+func symbols(ctx context.Context, stdout, stderr io.Writer, args []string) error {
+	fs := flag.NewFlagSet("symbols", flag.ContinueOnError)
 	fs.SetOutput(stderr)
-	dir := fs.String("C", ".", "run in `dir` instead of the current directory")
-	includeGenerated := fs.Bool("include-generated", false, "diff generated files like hand-written ones")
-	maxCallers := fs.Int("callers", 5, "list at most `n` callers per change and 3n in the blast radius; 0 for all")
-	fs.Usage = func() {
-		fmt.Fprintln(stderr, "usage: huginn semdiff [flags] <rev>")
-		fs.PrintDefaults()
-	}
+	dir := fs.String("C", ".", "repository directory")
+	branch := fs.String("branch", "", "revision to walk (default HEAD)")
+	tests := fs.Bool("tests", false, "include symbols declared in _test.go files")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
 	if fs.NArg() != 1 {
-		fs.Usage()
-		return flag.ErrHelp
+		return fmt.Errorf("want one symbol name, got %d", fs.NArg())
 	}
 
 	repo, err := git.Open(*dir)
 	if err != nil {
 		return err
 	}
-	c, files, err := repo.Diff(ctx, fs.Arg(0), git.Options{IncludeGenerated: *includeGenerated})
+	start := time.Now()
+	h, err := lineage.Build(ctx, repo, lineage.BuildOptions{Options: git.Options{Branch: *branch}, Tests: *tests})
 	if err != nil {
 		return err
 	}
-	tree, err := repo.Tree(ctx, c.Hash)
+	fmt.Fprintf(stderr, "indexed %d live symbols in %v\n", h.Live(), time.Since(start).Round(time.Millisecond))
+
+	found := h.Find(fs.Arg(0))
+	if len(found) == 0 {
+		return fmt.Errorf("no symbol named %q", fs.Arg(0))
+	}
+	for i, s := range found {
+		if i > 0 {
+			fmt.Fprintln(stdout)
+		}
+		printSymbol(stdout, s)
+	}
+	return nil
+}
+
+func printSymbol(w io.Writer, s *lineage.Symbol) {
+	cur := s.Latest()
+	state := "alive"
+	if !s.Alive() {
+		state = "deleted"
+	}
+	fmt.Fprintf(w, "%s  %s:%d  %s  %d changes\n", cur.QualifiedName(), cur.Path, cur.StartLine, state, len(s.Events))
+	for i := len(s.Events) - 1; i >= 0; i-- {
+		e := s.Events[i]
+		fmt.Fprintf(w, "  %s  %.7s  %-16s  %-22s  %s\n", e.Time.Format("2006-01-02"), e.SHA, e.Author, e.Flags, e.Summary())
+	}
+}
+
+func serve(ctx context.Context, stdout, stderr io.Writer, args []string) error {
+	fs := flag.NewFlagSet("serve", flag.ContinueOnError)
+	fs.SetOutput(stderr)
+	dir := fs.String("C", ".", "repository directory")
+	branch := fs.String("branch", "", "revision to walk (default HEAD)")
+	tests := fs.Bool("tests", false, "include symbols declared in _test.go files")
+	addr := fs.String("addr", "localhost:7878", "address to listen on")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	repo, err := git.Open(*dir)
 	if err != nil {
 		return err
 	}
+	abs, err := filepath.Abs(*dir)
+	if err != nil {
+		return err
+	}
+	srv := web.New(repo, filepath.Base(abs), lineage.BuildOptions{Options: git.Options{Branch: *branch}, Tests: *tests})
 
-	in := semdiff.Input{Tree: tree.Files, GoMod: tree.GoMod, IncludeGenerated: *includeGenerated}
-	for _, fd := range files {
-		in.Files = append(in.Files, semdiff.FileDiff{Old: fd.Old, New: fd.New, Added: fd.Added, Removed: fd.Removed})
+	ln, err := net.Listen("tcp", *addr)
+	if err != nil {
+		return err
 	}
-	for _, err := range c.ParseErrors {
-		fmt.Fprintln(stderr, "warning:", err)
-	}
-	if n := len(tree.ParseErrors); n > 0 {
-		fmt.Fprintf(stderr, "warning: %d files in the tree have syntax errors; callers may be missing\n", n)
-	}
-
-	p := &printer{w: stdout, maxCallers: *maxCallers}
-	p.report(c, semdiff.Build(in))
-	return p.err
-}
-
-// printer writes a report as plain text, remembering the first write error.
-type printer struct {
-	w          io.Writer
-	maxCallers int
-	err        error
-}
-
-func (p *printer) printf(format string, args ...any) {
-	if p.err == nil {
-		_, p.err = fmt.Fprintf(p.w, format, args...)
-	}
-}
-
-func (p *printer) report(c *git.Commit, r *semdiff.Report) {
-	subject, _, _ := strings.Cut(strings.TrimSpace(c.Message), "\n")
-	p.printf("commit %s\n", c.Hash)
-	p.printf("Author: %s <%s>\n", c.Author, c.Email)
-	p.printf("Date:   %s\n\n", c.AuthorTime.Format("Mon Jan 2 15:04:05 2006 -0700"))
-	p.printf("    %s\n\n", subject)
-
-	p.printf("%s\n", r.Headline())
-	var counts []string
-	for _, k := range semdiff.Kinds {
-		if n := r.Counts[k]; n > 0 {
-			counts = append(counts, fmt.Sprintf("%s %d", k, n))
-		}
-	}
-	if len(counts) > 0 {
-		p.printf("%s\n", strings.Join(counts, " · "))
-	}
-
-	if len(r.Files) > 0 {
-		p.printf("\nFiles\n")
-		names := make([]string, len(r.Files))
-		width := 0
-		for i, f := range r.Files {
-			names[i] = f.Path
-			if f.OldPath != "" {
-				names[i] = f.OldPath + " → " + f.Path
-			}
-			width = max(width, utf8.RuneCountInString(names[i]))
-		}
-		for i, f := range r.Files {
-			p.printf("  %s  %s", pad(names[i], width), pad(fmt.Sprintf("+%d −%d", f.Added, f.Removed), 10))
-			if f.Changes > 0 {
-				p.printf("  %s: %s", plural(f.Changes, "symbol"), kinds(f.Kinds))
-			}
-			p.printf("\n")
-		}
-	}
-
-	if len(r.Changes) > 0 {
-		p.printf("\nChanges\n")
-	}
-	for _, ch := range r.Changes {
-		p.printf("\n  [%s] %s %s\n", kinds(ch.Kinds), ch.Symbol, ch.Name)
-		where := fmt.Sprintf("%s:%d", ch.Path, ch.Line)
-		if ch.OldPath != "" && (ch.OldPath != ch.Path || ch.OldName != "") {
-			where += fmt.Sprintf(" (was %s at %s:%d)", cmpOr(ch.OldName, ch.Name), ch.OldPath, ch.OldLine)
-		}
-		p.printf("    %s\n", where)
-		if ch.OldSignature != "" && ch.OldSignature != ch.NewSignature {
-			p.printf("    - %s\n", ch.OldSignature)
-		}
-		if ch.NewSignature != "" {
-			mark := "+"
-			if ch.OldSignature == ch.NewSignature {
-				mark = " "
-			}
-			p.printf("    %s %s\n", mark, ch.NewSignature)
-		}
-		if ch.Summary != "" {
-			p.printf("    %s\n", ch.Summary)
-		}
-		impact := ch.Impact
-		if ch.APIChange {
-			impact += " · API change"
-		}
-		p.printf("    %s\n", impact)
-		p.callers("      ", ch.Callers, p.maxCallers)
-	}
-
-	b := r.Blast
-	p.printf("\nBlast radius\n")
-	if b.CallSites == 0 {
-		p.printf("  no callers outside the change\n")
-	} else {
-		sites := plural(b.CallSites, "call site")
-		if b.Approximate {
-			sites += " (approx.)"
-		}
-		p.printf("  %s in %s, %s\n", sites, plural(len(b.Callers), "declaration"), plural(len(b.Packages), "package"))
-		for _, pkg := range b.Packages {
-			p.printf("    %s\n", pkg)
-		}
-	}
-	if b.ExportedAPIChanged() {
-		p.printf("  exported API changed: %s\n", strings.Join(b.APIChanges, ", "))
-	}
-	p.callers("  ", b.Callers, 3*p.maxCallers)
-
-	if len(r.Noise) > 0 {
-		p.printf("\nNoise\n")
-		width := 0
-		for _, n := range r.Noise {
-			width = max(width, utf8.RuneCountInString(n.Path))
-		}
-		for _, n := range r.Noise {
-			p.printf("  %s  %s  %s\n", pad(n.Path, width), pad(fmt.Sprintf("+%d −%d", n.Added, n.Removed), 10), n.Reason)
-		}
-	}
-}
-
-// callers lists up to limit callers, all of them if limit is 0.
-func (p *printer) callers(indent string, cs []semdiff.Caller, limit int) {
-	for i, cl := range cs {
-		if limit > 0 && i == limit {
-			p.printf("%s… and %d more\n", indent, len(cs)-limit)
+	fmt.Fprintf(stdout, "huginn: serving http://%s\n", ln.Addr())
+	go func() {
+		start := time.Now()
+		if err := srv.Index(ctx); err != nil {
+			fmt.Fprintln(stderr, "huginn: indexing:", err)
 			return
 		}
-		var notes []string
-		if cl.Approximate {
-			notes = append(notes, "approx.")
-		}
-		if cl.Test {
-			notes = append(notes, "test")
-		}
-		note := ""
-		if len(notes) > 0 {
-			note = " (" + strings.Join(notes, ", ") + ")"
-		}
-		p.printf("%s%s  %s:%d  ×%d%s\n", indent, cl.Name, cl.Path, cl.Line, cl.Calls, note)
-	}
-}
+		fmt.Fprintf(stderr, "huginn: indexed in %v\n", time.Since(start).Round(time.Millisecond))
+	}()
 
-func kinds(ks []semdiff.Kind) string {
-	s := make([]string, len(ks))
-	for i, k := range ks {
-		s[i] = k.String()
+	hs := &http.Server{Handler: srv.Handler()}
+	go func() {
+		<-ctx.Done()
+		hs.Close()
+	}()
+	if err := hs.Serve(ln); err != http.ErrServerClosed {
+		return err
 	}
-	return strings.Join(s, ", ")
-}
-
-func plural(n int, noun string) string {
-	if n == 1 {
-		return "1 " + noun
-	}
-	return fmt.Sprintf("%d %ss", n, noun)
-}
-
-// pad right-pads s with spaces to width runes.
-func pad(s string, width int) string {
-	return s + strings.Repeat(" ", max(0, width-utf8.RuneCountInString(s)))
-}
-
-func cmpOr(a, b string) string {
-	if a != "" {
-		return a
-	}
-	return b
+	return nil
 }
