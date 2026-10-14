@@ -1,0 +1,56 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>huginn · health</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600&amp;family=JetBrains+Mono:wght@400;600&amp;family=Newsreader:opsz,wght@6..72,400;6..72,500&amp;display=swap" rel="stylesheet">
+<link rel="stylesheet" href="app.css">
+<link rel="stylesheet" href="health.css">
+</head>
+<body>
+<header class="top">
+  <div class="brand">
+    <svg width="26" height="26" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 12c3-5 6-7 9-7s6 2 9 7c-3 5-6 7-9 7s-6-2-9-7z"></path><circle cx="12" cy="12" r="3"></circle></svg>
+    <span class="mono">huginn</span>
+    <span class="repo" id="repo"></span>
+  </div>
+  <nav aria-label="Views" class="views">
+    <a href="/">Map</a>
+    <a href="/health" aria-current="page">Health</a>
+    <a href="/symbols">Symbols</a>
+    <a href="/symbols#c=HEAD">Commit</a>
+  </nav>
+</header>
+
+<div id="loading" class="loading" role="status">Starting…</div>
+
+<main id="app" class="health" hidden>
+  <section class="summary" aria-label="Summary">
+    <p class="eyebrow" id="span"></p>
+    <h1 class="headline" id="headline"></h1>
+    <p class="lede" id="lede"></p>
+  </section>
+
+  <section class="cards" id="cards" aria-label="Trends"></section>
+
+  <div class="pair">
+    <section class="panel hot" aria-labelledby="hotTitle">
+      <div class="titlerow">
+        <h2 class="h2" id="hotTitle">Hotspots</h2>
+        <span class="muted small">files edited often and carrying the most complexity · score = semantic edits × cyclomatic complexity</span>
+      </div>
+      <div class="scroll"><table id="hotspots"></table></div>
+    </section>
+
+    <section class="panel owners" aria-labelledby="ownTitle">
+      <h2 class="h2" id="ownTitle">Who knows this code</h2>
+      <div id="owners"></div>
+    </section>
+  </div>
+</main>
+<script src="common.js"></script>
+<script src="health.js"></script>
+</body>
+</html>

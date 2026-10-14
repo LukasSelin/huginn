@@ -104,6 +104,7 @@ type History struct {
 	symbols   []*Symbol // by ID-1
 	revisions int
 	shas      []string       // applied revisions, oldest first
+	times     []time.Time    // of shas
 	pos       map[string]int // index into shas
 	first     time.Time
 	last      time.Time
@@ -125,6 +126,7 @@ func (h *History) Apply(r Revision) {
 	h.revisions++
 	h.pos[r.SHA] = len(h.shas)
 	h.shas = append(h.shas, r.SHA)
+	h.times = append(h.times, r.Time)
 	if h.first.IsZero() {
 		h.first = r.Time
 	}
@@ -222,6 +224,16 @@ func (h *History) Neighbors(sha string) (prev, next string, ok bool) {
 	}
 	return prev, next, true
 }
+
+// Index returns the position of sha among the applied revisions, oldest
+// first. ok is false when sha was never applied.
+func (h *History) Index(sha string) (i int, ok bool) {
+	i, ok = h.pos[sha]
+	return i, ok
+}
+
+// At returns the SHA and time of the i'th applied revision, oldest first.
+func (h *History) At(i int) (sha string, t time.Time) { return h.shas[i], h.times[i] }
 
 // Span returns the times of the first and last applied revisions.
 func (h *History) Span() (first, last time.Time) { return h.first, h.last }

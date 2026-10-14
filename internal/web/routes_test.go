@@ -70,7 +70,7 @@ func TestBeforeIndex(t *testing.T) {
 	if st.Ready || st.Repo != "demo" {
 		t.Errorf("status = %+v, want not ready for demo", st)
 	}
-	for _, url := range []string{"/api/dirs", "/api/dir?d=geo", "/api/symbol/1"} {
+	for _, url := range []string{"/api/dirs", "/api/dir?d=geo", "/api/symbol/1", "/api/health"} {
 		getJSON(t, h, url, http.StatusServiceUnavailable, nil)
 	}
 }
@@ -180,12 +180,45 @@ func TestAPI(t *testing.T) {
 		getJSON(t, h, "/api/symbol/zero", http.StatusNotFound, nil)
 	})
 
+	t.Run("health", func(t *testing.T) {
+		var hj healthJSON
+		getJSON(t, h, "/api/health", http.StatusOK, &hj)
+		if len(hj.Buckets) != 3 {
+			t.Fatalf("buckets = %+v, want one per commit", hj.Buckets)
+		}
+		var exported []int
+		for _, b := range hj.Buckets {
+			exported = append(exported, b.Exported)
+		}
+		// Point and Move; then Hello and Bye; then Bye is gone.
+		if want := []int{2, 4, 3}; !slices.Equal(exported, want) {
+			t.Errorf("exported = %v, want %v", exported, want)
+		}
+		last := hj.Buckets[2]
+		if last.Last != hashes[2] || last.Symbols != 4 || last.Reshaped != 1 || last.Edits["deleted"] != 1 {
+			t.Errorf("last bucket = %+v", last)
+		}
+		var paths []string
+		for _, s := range hj.Hotspots {
+			paths = append(paths, s.Path)
+		}
+		// Both geo files have three edits on complexity 1; main.go one.
+		if want := []string{"geo/hello.go", "geo/point.go", "main.go"}; !slices.Equal(paths, want) {
+			t.Errorf("hotspots = %q, want %q", paths, want)
+		}
+		if hj.Tests || hj.Authors != 1 || hj.BusFactor != 1 || len(hj.Owners) != 1 || hj.Owners[0].Symbols != 4 {
+			t.Errorf("tests %v, authors %d, bus factor %d, owners %+v", hj.Tests, hj.Authors, hj.BusFactor, hj.Owners)
+		}
+	})
+
 	t.Run("ui", func(t *testing.T) {
-		rec := httptest.NewRecorder()
-		h.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/", nil))
-		body, _ := io.ReadAll(rec.Body)
-		if rec.Code != http.StatusOK || !strings.Contains(string(body), "<html") {
-			t.Errorf("GET /: status %d, body %.80q", rec.Code, body)
+		for _, url := range []string{"/", "/health"} {
+			rec := httptest.NewRecorder()
+			h.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, url, nil))
+			body, _ := io.ReadAll(rec.Body)
+			if rec.Code != http.StatusOK || !strings.Contains(string(body), "<html") {
+				t.Errorf("GET %s: status %d, body %.80q", url, rec.Code, body)
+			}
 		}
 	})
 }
