@@ -171,8 +171,10 @@ func (p *printer) report(c *git.Commit, r *semdiff.Report) {
 }
 
 // members lists a type's member changes, one line per side, the notes on
-// the last: "+ field UserID int  renamed · breaks callers · 4 field uses".
+// the last: "+ field UserID int  renamed · breaks callers · 4 field uses",
+// then the types implementing the interface that the changes can break.
 func (p *printer) members(ms []semdiff.MemberChange) {
+	var impls []semdiff.Caller
 	for _, m := range ms {
 		var notes []string
 		if m.Flags.Has(ast.MemberRenamed) {
@@ -194,6 +196,13 @@ func (p *printer) members(ms []semdiff.MemberChange) {
 			}
 			notes = append(notes, uses)
 		}
+		if m.Unkeyed > 0 {
+			notes = append(notes, "breaks "+plural(m.Unkeyed, "unkeyed literal"))
+		}
+		if len(m.Implementers) > 0 {
+			impls = m.Implementers // every member shares the one list
+			notes = append(notes, plural(len(m.Implementers), "implementer")+" (approx.)")
+		}
 		note := ""
 		if len(notes) > 0 {
 			note = "  " + strings.Join(notes, " · ")
@@ -207,6 +216,23 @@ func (p *printer) members(ms []semdiff.MemberChange) {
 			p.printf("      - %s %s\n", m.Member, m.OldDecl)
 			p.printf("      + %s %s%s\n", m.Member, m.NewDecl, note)
 		}
+	}
+	p.implementers("        ", impls, p.maxCallers)
+}
+
+// implementers lists up to limit types implementing a changed interface,
+// all of them if limit is 0.
+func (p *printer) implementers(indent string, cs []semdiff.Caller, limit int) {
+	for i, cl := range cs {
+		if limit > 0 && i == limit {
+			p.printf("%s… and %d more\n", indent, len(cs)-limit)
+			return
+		}
+		note := ""
+		if cl.Test {
+			note = " (test)"
+		}
+		p.printf("%simplemented by %s  %s:%d%s\n", indent, cl.Name, cl.Path, cl.Line, note)
 	}
 }
 

@@ -96,6 +96,9 @@ func funcSymbol(d *goast.FuncDecl) *Symbol {
 		fieldList(d.Type.TypeParams, "[", "]", false) +
 		fieldList(d.Type.Params, "(", ")", false) +
 		fieldList(d.Type.Results, "(", ")", false)
+	if s.Kind == KindMethod {
+		s.methodKey = fieldList(d.Type.Params, "(", ")", false) + fieldList(d.Type.Results, "(", ")", false)
+	}
 
 	if d.Body != nil {
 		h := newHasher()

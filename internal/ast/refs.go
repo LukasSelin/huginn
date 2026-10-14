@@ -71,10 +71,15 @@ func (r Ref) Approximate() bool { return r.Kind == RefMethod && r.Recv == "" }
 // literals that spell their type (T{Name: v}, pkg.T{Name: v}) and for
 // selectors on the enclosing method's receiver; otherwise only the field
 // name is, and a method value x.M can be mistaken for a field.
+//
+// An unkeyed literal of a named type, T{1, "x"}, is recorded with an empty
+// Name: it uses every field of T by position, so adding or removing any
+// field breaks it. T is not known to be a struct; it may be a named slice
+// or array type.
 type FieldRef struct {
 	Pkg  string // import path, for a literal of an imported type
 	Type string // the struct type's name when known: "Config"
-	Name string // field name
+	Name string // field name; empty for an unkeyed literal
 
 	Count int // occurrences
 	Line  int // first occurrence
@@ -83,6 +88,9 @@ type FieldRef struct {
 // Approximate reports that the struct type is unknown and the reference may
 // stand for any field of that name.
 func (r FieldRef) Approximate() bool { return r.Type == "" }
+
+// Unkeyed reports that the reference is an unkeyed literal of Type.
+func (r FieldRef) Unkeyed() bool { return r.Name == "" }
 
 // Import is one import declaration of a file.
 type Import struct {
@@ -253,6 +261,13 @@ func (r *refCollector) declare(n goast.Node) bool {
 		// but the literal's type is only recognizable as a map when spelled out.
 		if _, isMap := x.Type.(*goast.MapType); !isMap {
 			pkg, typ := r.literalType(x.Type)
+			if typ != "" && len(x.Elts) > 0 {
+				if _, keyed := x.Elts[0].(*goast.KeyValueExpr); !keyed {
+					// T{1, "x"}: every field, by position. T may also be
+					// a named slice or array type; it is not known here.
+					r.addField(refKey{pkg: pkg, recv: typ}, x)
+				}
+			}
 			for _, e := range x.Elts {
 				if kv, ok := e.(*goast.KeyValueExpr); ok {
 					if id, ok := kv.Key.(*goast.Ident); ok {

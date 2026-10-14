@@ -72,9 +72,16 @@ type Symbol struct {
 	// beyond the type definition itself.
 	Members []Member
 
-	sigKey   string              // signature with parameter names dropped; used for comparison
-	shingles map[uint64]struct{} // token n-grams of the body; used for fuzzy matching
+	sigKey    string              // signature with parameter names dropped; used for comparison
+	methodKey string              // a method's parameter and result types; see MethodKey
+	shingles  map[uint64]struct{} // token n-grams of the body; used for fuzzy matching
 }
+
+// MethodKey returns a method's parameter and result types without names or
+// receiver, "(int, string)(error)", in the form Member.MethodKey gives an
+// interface method, so the two can be compared. It is empty for anything
+// but a method.
+func (s *Symbol) MethodKey() string { return s.methodKey }
 
 // QualifiedName returns the name as Go writes it, e.g. "(*Indexer).Visit".
 func (s *Symbol) QualifiedName() string {

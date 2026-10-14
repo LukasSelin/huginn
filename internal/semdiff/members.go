@@ -32,6 +32,19 @@ type MemberChange struct {
 	// Approximate is set when some were matched by field name only.
 	Uses        int
 	Approximate bool
+
+	// Implementers are the named types in the tree that implement the
+	// interface as it was before the commit, for a change that breaks
+	// implementers: the types it can break. The search is approximate, see
+	// index.implementers.
+	Implementers []Caller
+
+	// Unkeyed counts the unkeyed literals of the struct in the tree,
+	// T{1, "x"}, for a field that was added or removed. They list every
+	// field by position, so the change breaks them even when the field is
+	// unexported. The count may include literals of a named slice or array
+	// type of the same name.
+	Unkeyed int
 }
 
 // memberChanges converts a type's member changes and counts the uses of the
@@ -43,6 +56,8 @@ func memberChanges(c ast.Change, pkgOf func(path, pkg string) string, idx *index
 	pkg := pkgOf(c.Old.Path, c.Old.Package)
 	api := isAPI(c.Old)
 	out := make([]MemberChange, 0, len(c.Members))
+	var impls []Caller
+	searched := false
 	for _, mc := range c.Members {
 		cur := mc.Cur()
 		rc := MemberChange{Flags: mc.Flags, Member: cur.Kind.String(), Name: cur.Name}
@@ -61,9 +76,19 @@ func memberChanges(c ast.Change, pkgOf func(path, pkg string) string, idx *index
 			rc.Breaks = breaks(mc)
 			rc.Breaking = rc.Breaks != ""
 		}
+		if strings.Contains(rc.Breaks, "implementers") {
+			if !searched {
+				impls, searched = idx.implementers(c.Old, c.New, pkg), true
+			}
+			rc.Implementers = impls
+		}
 		if o := mc.Old; o != nil && (o.Kind == ast.MemberField || o.Kind == ast.MemberEmbedded) &&
 			mc.Flags&(ast.MemberRemoved|ast.MemberRetyped|ast.MemberRenamed) != 0 {
 			rc.Uses, rc.Approximate = idx.fieldUses(c.Old.Name, o.Name, pkg)
+		}
+		if m := mc.Cur(); (m.Kind == ast.MemberField || m.Kind == ast.MemberEmbedded) &&
+			mc.Flags&(ast.MemberAdded|ast.MemberRemoved) != 0 {
+			rc.Unkeyed = idx.unkeyedLiterals(c.Old.Name, pkg)
 		}
 		out = append(out, rc)
 	}
