@@ -57,6 +57,10 @@ type Symbol struct {
 	// body, type definition, or initializer), ignoring formatting and comments.
 	BodyHash uint64
 
+	// Refs are the symbols a function or method body refers to, sorted by
+	// kind, package, receiver and name. Nil for other kinds of declarations.
+	Refs []Ref
+
 	sigKey   string              // signature with parameter names dropped; used for comparison
 	shingles map[uint64]struct{} // token n-grams of the body; used for fuzzy matching
 }
@@ -77,5 +81,6 @@ type File struct {
 	Path      string
 	Package   string
 	Generated bool // carries a "Code generated ... DO NOT EDIT." header
+	Imports   []Import
 	Symbols   []*Symbol
 }

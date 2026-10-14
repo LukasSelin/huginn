@@ -21,7 +21,13 @@ func ParseSource(path string, src []byte) (*File, error) {
 		return nil, err
 	}
 
-	out := &File{Path: path, Package: f.Name.Name, Generated: goast.IsGenerated(f)}
+	out := &File{Path: path, Package: f.Name.Name, Generated: goast.IsGenerated(f), Imports: fileImports(f)}
+	imports := map[string]string{}
+	for _, im := range out.Imports {
+		if name := im.LocalName(); name != "_" && name != "." {
+			imports[name] = im.Path
+		}
+	}
 	seen := map[string]int{}
 	add := func(s *Symbol, n goast.Node) {
 		s.Path = path
@@ -45,7 +51,9 @@ func ParseSource(path string, src []byte) (*File, error) {
 	for _, decl := range f.Decls {
 		switch d := decl.(type) {
 		case *goast.FuncDecl:
-			add(funcSymbol(d), d)
+			s := funcSymbol(d)
+			s.Refs = funcRefs(fset, imports, d)
+			add(s, d)
 		case *goast.GenDecl:
 			for _, spec := range d.Specs {
 				// An ungrouped declaration spans its keyword; a grouped one only its spec.
