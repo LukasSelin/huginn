@@ -1,13 +1,6 @@
 'use strict';
 
-// Kinds of change, highest priority first: when several land in one time
-// bucket, the first in this list is the one drawn.
-const KINDS = [
-  ['deleted', 'Deleted'], ['added', 'Added'], ['signature', 'Signature change'],
-  ['renamed', 'Renamed'], ['moved', 'Moved'], ['body', 'Body edit'],
-];
 const RANK = Object.fromEntries(KINDS.map(([k], i) => [k, i]));
-const DIAMOND = new Set(['signature', 'renamed']);
 const ICON = { type: 'T', func: 'f', method: 'm', var: 'v', const: 'c' };
 
 // Kinds of semantic change on the commit screen, in the report's display
@@ -25,33 +18,6 @@ const state = {
   // filters, which reset per commit.
   commit: null, report: null, reportRev: null, lastCommit: null, kinds: new Set(), commitFile: null,
 };
-
-// h builds an element; strings become text nodes, never markup.
-function h(tag, attrs, ...kids) {
-  const el = document.createElement(tag);
-  for (const [k, v] of Object.entries(attrs || {})) {
-    if (v == null || v === false) continue;
-    if (k === 'class') el.className = v;
-    else if (k === 'style') el.style.cssText = v;
-    else if (k.startsWith('on')) el.addEventListener(k.slice(2), v);
-    else el.setAttribute(k, v === true ? '' : v);
-  }
-  for (const kid of kids.flat()) {
-    if (kid == null || kid === false) continue;
-    el.append(kid instanceof Node ? kid : document.createTextNode(String(kid)));
-  }
-  return el;
-}
-
-const $ = (id) => document.getElementById(id);
-const mark = (kind) => h('span', { class: `mark m-${kind}${DIAMOND.has(kind) ? ' diamond' : ''}`, 'aria-hidden': 'true' });
-const fmtDate = (t) => new Date(t * 1000).toLocaleDateString(undefined, { year: 'numeric', month: 'short', day: 'numeric' });
-
-async function api(path) {
-  const r = await fetch(path);
-  if (!r.ok) throw new Error(`${path}: ${r.status} ${await r.text()}`);
-  return r.json();
-}
 
 // ---- navigation (kept in the URL hash so views can be linked) ----
 
@@ -325,7 +291,6 @@ async function routeCommit(rev) {
   renderCommit();
 }
 
-const plural = (n, noun) => `${n.toLocaleString()} ${noun}${n === 1 ? '' : 's'}`;
 const fmtDateTime = (t) => new Date(t * 1000).toLocaleString(undefined, {
   year: 'numeric', month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit',
 });
@@ -530,16 +495,8 @@ function render() {
 
 async function boot() {
   $('legend').append(...KINDS.map(([k, l]) => h('span', {}, mark(k), l)));
-  for (;;) {
-    state.status = await api('/api/status');
-    if (state.status.error) {
-      $('loading').textContent = `Indexing failed: ${state.status.error}`;
-      return;
-    }
-    if (state.status.ready) break;
-    $('loading').textContent = `Indexing history… ${state.status.commits.toLocaleString()} commits`;
-    await new Promise((r) => setTimeout(r, 500));
-  }
+  state.status = await waitReady();
+  if (!state.status) return;
   const st = state.status;
   $('repo').textContent = `${st.repo} · ${st.commits.toLocaleString()} commits · ${st.live.toLocaleString()} live symbols`;
   state.dirs = await api('/api/dirs');
@@ -552,11 +509,6 @@ async function boot() {
   $('loading').hidden = true;
   window.addEventListener('hashchange', () => route().catch(fail));
   await route();
-}
-
-function fail(err) {
-  $('loading').hidden = false;
-  $('loading').textContent = String(err);
 }
 
 boot().catch(fail);
