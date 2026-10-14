@@ -1,0 +1,336 @@
+package git
+
+import (
+	"context"
+	"fmt"
+	"go/format"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"slices"
+	"strings"
+	"testing"
+	"time"
+
+	"huginn/internal/ast"
+)
+
+// testRepo is a throwaway repository whose commits are a day apart, starting
+// on 2026-01-01.
+type testRepo struct {
+	t    *testing.T
+	dir  string
+	days int
+}
+
+func newTestRepo(t *testing.T) *testRepo {
+	t.Helper()
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not installed")
+	}
+	// Keep the user's and the system's configuration (autocrlf, hooks,
+	// signing) out of the test.
+	global := filepath.Join(t.TempDir(), "gitconfig")
+	if err := os.WriteFile(global, nil, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("GIT_CONFIG_GLOBAL", global)
+	t.Setenv("GIT_CONFIG_NOSYSTEM", "1")
+
+	r := &testRepo{t: t, dir: t.TempDir()}
+	r.git("init", "-q", "-b", "master")
+	r.git("config", "user.name", "Ada")
+	r.git("config", "user.email", "ada@example.com")
+	return r
+}
+
+func (r *testRepo) date(day int) time.Time {
+	return time.Date(2026, 1, day, 12, 0, 0, 0, time.UTC)
+}
+
+func (r *testRepo) git(args ...string) string {
+	r.t.Helper()
+	cmd := exec.Command("git", args...)
+	cmd.Dir = r.dir
+	date := r.date(r.days).Format(time.RFC3339)
+	cmd.Env = append(os.Environ(), "GIT_AUTHOR_DATE="+date, "GIT_COMMITTER_DATE="+date)
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		r.t.Fatalf("git %s: %v\n%s", strings.Join(args, " "), err, out)
+	}
+	return strings.TrimSpace(string(out))
+}
+
+// commit writes files, deleting those whose content is empty, commits
+// everything and returns the commit hash.
+func (r *testRepo) commit(msg string, files map[string]string) string {
+	r.t.Helper()
+	r.days++
+	for name, src := range files {
+		p := filepath.Join(r.dir, filepath.FromSlash(name))
+		if src == "" {
+			if err := os.Remove(p); err != nil {
+				r.t.Fatal(err)
+			}
+			continue
+		}
+		if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
+			r.t.Fatal(err)
+		}
+		if err := os.WriteFile(p, []byte(src), 0o644); err != nil {
+			r.t.Fatal(err)
+		}
+	}
+	r.git("add", "-A")
+	r.git("commit", "-q", "--allow-empty", "-m", msg)
+	return r.git("rev-parse", "HEAD")
+}
+
+func (r *testRepo) walk(opts Options) []*Commit {
+	r.t.Helper()
+	repo, err := Open(r.dir)
+	if err != nil {
+		r.t.Fatal(err)
+	}
+	var out []*Commit
+	if err := repo.Walk(context.Background(), opts, func(c *Commit) error {
+		out = append(out, c)
+		return nil
+	}); err != nil {
+		r.t.Fatal(err)
+	}
+	return out
+}
+
+// summary renders changes as "Key flags", or "Old->New flags" for renames.
+func summary(changes []ast.Change) []string {
+	out := []string{}
+	for _, ch := range changes {
+		var name string
+		switch {
+		case ch.Old == nil:
+			name = ch.New.Key
+		case ch.New == nil || ch.Old.Key == ch.New.Key:
+			name = ch.Old.Key
+		default:
+			name = ch.Old.Key + "->" + ch.New.Key
+		}
+		out = append(out, name+" "+ch.Flags.String())
+	}
+	return out
+}
+
+// geoSrc is deliberately not gofmt-formatted.
+const geoSrc = `package geo
+
+import ( "fmt"; "math" )
+
+// Point is a location on the plane.
+type Point struct{X, Y float64}
+
+// Distance returns the euclidean distance between a and b.
+func Distance(a, b Point) float64 {
+	dx, dy := a.X-b.X, a.Y-b.Y
+	return math.Sqrt( dx*dx+dy*dy )
+}
+
+func (p Point) String() string {
+	return fmt.Sprintf("(%g, %g)", p.X, p.Y)
+}
+`
+
+const clampFunc = `func clamp(v, lo, hi float64) float64 {
+	if v < lo {
+		return lo
+	}
+	if v > hi {
+		return hi
+	}
+	return v
+}
+`
+
+func TestWalk(t *testing.T) {
+	r := newTestRepo(t)
+
+	renamed := strings.ReplaceAll(geoSrc, "Distance", "Dist")
+	withClamp := renamed + "\n" + clampFunc
+	pointerArgs := strings.Replace(withClamp, "a, b Point", "a, b *Point", 1)
+	formatted, err := format.Source([]byte(pointerArgs))
+	if err != nil {
+		t.Fatal(err)
+	}
+	gofmted := strings.Replace(string(formatted), "// Point is", "// Point is a 2D point:", 1)
+	withoutClamp := strings.Replace(gofmted, "\n"+clampFunc, "", 1)
+	if withoutClamp == gofmted {
+		t.Fatal("test setup: clamp not removed")
+	}
+
+	hashes := []string{
+		r.commit("root\n\nWith a body.", map[string]string{
+			"README.md":       "# geo\n",
+			"pkg/geo/geo.go":  geoSrc,
+			"pkg/geo/util.go": "package geo\n\n" + clampFunc,
+		}),
+		r.commit("rename file", map[string]string{"pkg/geo/geo.go": "", "pkg/geo/point.go": geoSrc}),
+		r.commit("rename symbol", map[string]string{"pkg/geo/point.go": renamed}),
+		r.commit("move between files", map[string]string{"pkg/geo/util.go": "", "pkg/geo/point.go": withClamp}),
+		r.commit("change signature", map[string]string{"pkg/geo/point.go": pointerArgs}),
+		r.commit("gofmt", map[string]string{"pkg/geo/point.go": gofmted}),
+		r.commit("move between packages", map[string]string{
+			"pkg/geo/point.go":   withoutClamp,
+			"pkg/mathx/clamp.go": "package mathx\n\n" + strings.Replace(clampFunc, "func clamp", "func Clamp", 1),
+		}),
+		r.commit("generated", map[string]string{
+			"pkg/geo/zz_generated.go": "// Code generated by hand. DO NOT EDIT.\n\npackage geo\n\nfunc Generated() {}\n",
+		}),
+		r.commit("break syntax", map[string]string{"pkg/geo/point.go": withoutClamp + "\nfunc Broken( {\n"}),
+	}
+
+	commits := r.walk(Options{})
+	var got []string
+	for _, c := range commits {
+		got = append(got, c.Hash)
+	}
+	if !slices.Equal(got, hashes) {
+		t.Fatalf("commits = %v, want %v", got, hashes)
+	}
+
+	want := [][]string{
+		{"Point added", "Distance added", "Point.String added", "clamp added"},
+		{"Point moved", "Distance moved", "Point.String moved"},
+		{"Distance->Dist renamed"},
+		{"clamp moved"},
+		{"Dist signature"},
+		{},
+		{"clamp->Clamp renamed|moved"},
+		{},
+	}
+	for i, w := range want {
+		c := commits[i]
+		if got := summary(c.Changes); !slices.Equal(got, w) {
+			t.Errorf("%s: changes = %q, want %q", c.Message, got, w)
+		}
+		if formatting := i == 5; c.FormattingOnly != formatting {
+			t.Errorf("%s: FormattingOnly = %v, want %v", c.Message, c.FormattingOnly, formatting)
+		}
+		if len(c.ParseErrors) > 0 {
+			t.Errorf("%s: ParseErrors = %v", c.Message, c.ParseErrors)
+		}
+	}
+
+	root := commits[0]
+	if root.Author != "Ada" || root.Email != "ada@example.com" || root.Message != "root\n\nWith a body." ||
+		!root.AuthorTime.Equal(r.date(1)) || len(root.Parents) != 0 {
+		t.Errorf("root metadata = %q <%s> %v %q parents %v", root.Author, root.Email, root.AuthorTime, root.Message, root.Parents)
+	}
+	if n := strings.Count(geoSrc, "\n") + strings.Count(clampFunc, "\n") + 3; root.Added != n || root.Removed != 0 {
+		t.Errorf("root lines = +%d -%d, want +%d -0", root.Added, root.Removed, n)
+	}
+	if commits[1].Parents[0] != hashes[0] {
+		t.Errorf("parents = %v, want [%s]", commits[1].Parents, hashes[0])
+	}
+
+	wantFiles := []FileChange{{Status: StatusRenamed, OldPath: "pkg/geo/geo.go", NewPath: "pkg/geo/point.go"}}
+	if got := publicFiles(commits[1].Files); !slices.Equal(got, wantFiles) {
+		t.Errorf("rename files = %+v, want %+v", got, wantFiles)
+	}
+	wantFiles = []FileChange{
+		{Status: StatusModified, OldPath: "pkg/geo/point.go", NewPath: "pkg/geo/point.go", Added: 10},
+		{Status: StatusDeleted, OldPath: "pkg/geo/util.go", Removed: 11},
+	}
+	if got := publicFiles(commits[3].Files); !slices.Equal(got, wantFiles) {
+		t.Errorf("move files = %+v, want %+v", got, wantFiles)
+	}
+	if c := commits[5]; c.Added == 0 || c.Removed == 0 {
+		t.Errorf("gofmt lines = +%d -%d, want both nonzero", c.Added, c.Removed)
+	}
+
+	if c := commits[8]; len(c.ParseErrors) == 0 || c.FormattingOnly {
+		t.Errorf("break syntax: ParseErrors = %v, FormattingOnly = %v", c.ParseErrors, c.FormattingOnly)
+	}
+
+	gen := r.walk(Options{IncludeGenerated: true, MaxCount: 2})[0]
+	if got := summary(gen.Changes); !slices.Equal(got, []string{"Generated added"}) {
+		t.Errorf("IncludeGenerated: changes = %q", got)
+	}
+}
+
+// publicFiles drops the unexported fields so that FileChanges compare by
+// what callers see.
+func publicFiles(files []FileChange) []FileChange {
+	out := make([]FileChange, len(files))
+	for i, f := range files {
+		out[i] = FileChange{Status: f.Status, OldPath: f.OldPath, NewPath: f.NewPath, Added: f.Added, Removed: f.Removed, Binary: f.Binary}
+	}
+	return out
+}
+
+func TestWalkLimits(t *testing.T) {
+	r := newTestRepo(t)
+	var hashes []string
+	for i := range 5 {
+		hashes = append(hashes, r.commit(fmt.Sprint("commit ", i), map[string]string{"a.go": fmt.Sprintf("package a\n\nconst N = %d\n", i)}))
+	}
+
+	tests := []struct {
+		opts Options
+		want []string
+	}{
+		{Options{MaxCount: 2}, hashes[3:]},
+		{Options{Since: r.date(2), Until: r.date(4)}, hashes[1:4]},
+		{Options{Since: r.date(2), MaxCount: 1}, hashes[4:]},
+		{Options{Branch: hashes[2]}, hashes[:3]},
+	}
+	for _, tt := range tests {
+		var got []string
+		for _, c := range r.walk(tt.opts) {
+			got = append(got, c.Hash)
+		}
+		if !slices.Equal(got, tt.want) {
+			t.Errorf("%+v: commits = %v, want %v", tt.opts, got, tt.want)
+		}
+	}
+}
+
+func TestWalkMerge(t *testing.T) {
+	r := newTestRepo(t)
+	r.commit("root", map[string]string{"a.go": "package a\n\nfunc A() int { return 1 }\n"})
+	r.git("checkout", "-q", "-b", "feature")
+	feature := r.commit("feature", map[string]string{"b.go": "package a\n\nfunc B() int { return 2 }\n"})
+	r.git("checkout", "-q", "master")
+	r.commit("mainline", map[string]string{"a.go": "package a\n\nfunc A() int { return 3 }\n"})
+	r.days++
+	r.git("merge", "-q", "--no-ff", "-m", "merge feature", "feature")
+
+	all := r.walk(Options{})
+	if len(all) != 4 || !slices.ContainsFunc(all, func(c *Commit) bool { return c.Hash == feature }) {
+		t.Fatalf("walk = %d commits, want 4 including feature", len(all))
+	}
+
+	mainline := r.walk(Options{FirstParent: true})
+	var msgs []string
+	for _, c := range mainline {
+		msgs = append(msgs, c.Message)
+	}
+	if want := []string{"root", "mainline", "merge feature"}; !slices.Equal(msgs, want) {
+		t.Fatalf("first-parent walk = %q, want %q", msgs, want)
+	}
+	merge := mainline[2]
+	if len(merge.Parents) != 2 {
+		t.Errorf("merge parents = %v", merge.Parents)
+	}
+	if got := summary(merge.Changes); !slices.Equal(got, []string{"B added"}) {
+		t.Errorf("merge changes = %q, want [B added]", got)
+	}
+}
+
+func TestOpenNotARepo(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not installed")
+	}
+	t.Setenv("GIT_CEILING_DIRECTORIES", filepath.Dir(t.TempDir()))
+	if _, err := Open(t.TempDir()); err == nil {
+		t.Error("Open of a plain directory succeeded")
+	}
+}
