@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"cmp"
 	"context"
+	"fmt"
 	"io"
 	"maps"
 	"path"
@@ -106,7 +107,52 @@ type Options struct {
 // Walk calls fn for each commit on opts.Branch, parents before children.
 // Each commit is diffed against its first parent, and a root commit against
 // the empty tree. Walk stops at the first error from fn and returns it.
-func (r *Repo) Walk(ctx context.Context, opts Options, fn func(*Commit) error) (err error) {
+func (r *Repo) Walk(ctx context.Context, opts Options, fn func(*Commit) error) error {
+	return r.walk(ctx, opts, func(c *Commit, _ []fileSides) error { return fn(c) })
+}
+
+// FileDiff is one Go file a commit touched, with both sides parsed.
+//
+// Unlike Commit.Changes, the sides are given whether or not they hold
+// generated code; File.Generated marks those that do, and the consumer
+// decides whether they count, as Options.IncludeGenerated does for the walk.
+type FileDiff struct {
+	FileChange
+
+	// Old and New are the file before and after the commit. Either is nil
+	// when that side is absent, is not a regular Go file, or did not parse at
+	// all. Syntax errors are in the commit's ParseErrors.
+	Old, New *ast.File
+}
+
+// Diff returns the single commit rev, analyzed as Walk would with opts, and
+// the Go files it touched. Only opts.IncludeGenerated is used.
+func (r *Repo) Diff(ctx context.Context, rev string, opts Options) (*Commit, []FileDiff, error) {
+	hash, err := r.resolve(ctx, rev, "commit")
+	if err != nil {
+		return nil, nil, err
+	}
+	opts = Options{Branch: hash, MaxCount: 1, IncludeGenerated: opts.IncludeGenerated}
+	var commit *Commit
+	var files []FileDiff
+	err = r.walk(ctx, opts, func(c *Commit, sides []fileSides) error {
+		commit = c
+		for _, s := range sides {
+			files = append(files, FileDiff{FileChange: *s.fc, Old: s.old.f, New: s.new.f})
+		}
+		return nil
+	})
+	if err == nil && commit == nil {
+		err = fmt.Errorf("diff %s: no such commit", rev)
+	}
+	if err != nil {
+		return nil, nil, err
+	}
+	return commit, files, nil
+}
+
+// walk is Walk, also handing fn the parsed sides of each commit's Go files.
+func (r *Repo) walk(ctx context.Context, opts Options, fn func(*Commit, []fileSides) error) (err error) {
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
 
@@ -157,10 +203,11 @@ func (r *Repo) Walk(ctx context.Context, opts Options, fn func(*Commit) error) (
 		if err != nil {
 			return err
 		}
-		if err := w.analyze(c); err != nil {
+		sides, err := w.analyze(c)
+		if err != nil {
 			return err
 		}
-		if err := fn(c); err != nil {
+		if err := fn(c, sides); err != nil {
 			return err
 		}
 	}
@@ -208,25 +255,60 @@ type parsed struct {
 	err error
 }
 
-// side returns one side of a changed file. Unless generated code is
+// present returns a side as the diff sees it. Unless generated code is
 // included, a generated side counts as absent: a file that stops being
 // generated adds its symbols, and one that becomes generated deletes them.
-func (w *walker) side(isGo bool, path, hash string) (parsed, error) {
-	if !isGo {
-		return parsed{}, nil
+func (w *walker) present(p parsed) parsed {
+	if w.opts.IncludeGenerated || p.f == nil || !p.f.Generated {
+		return p
 	}
-	p, err := w.parse(path, hash)
-	if err != nil || w.opts.IncludeGenerated || p.f == nil || !p.f.Generated {
-		return p, err
+	return parsed{}
+}
+
+// fileSides are both sides of one Go file a commit touched, as parsed.
+type fileSides struct {
+	fc       *FileChange
+	old, new parsed
+}
+
+// sides parses both sides of every Go file c touched, generated or not.
+func (w *walker) sides(c *Commit) ([]fileSides, error) {
+	var out []fileSides
+	for i := range c.Files {
+		fc := &c.Files[i]
+		// A copy leaves its source in place, so only the new side counts.
+		oldGo := fc.Status != StatusCopied && isGoFile(fc.OldPath, fc.oldMode)
+		newGo := isGoFile(fc.NewPath, fc.newMode)
+		if !oldGo && !newGo {
+			continue
+		}
+		s := fileSides{fc: fc}
+		var err error
+		if oldGo {
+			if s.old, err = w.parse(fc.OldPath, fc.oldHash); err != nil {
+				return nil, err
+			}
+		}
+		if newGo {
+			if s.new, err = w.parse(fc.NewPath, fc.newHash); err != nil {
+				return nil, err
+			}
+		}
+		out = append(out, s)
 	}
-	return parsed{}, nil
+	return out, nil
 }
 
 // pkgFiles are the two sides of the Go files a commit touched in one directory.
 type pkgFiles struct{ old, new []*ast.File }
 
-func (w *walker) analyze(c *Commit) error {
+// analyze fills in the symbol changes of c and returns the sides it parsed.
+func (w *walker) analyze(c *Commit) ([]fileSides, error) {
 	w.prev, w.cur = w.cur, map[string]parsed{}
+	all, err := w.sides(c)
+	if err != nil {
+		return nil, err
+	}
 
 	pkgs := map[string]*pkgFiles{}
 	group := func(p string) *pkgFiles {
@@ -238,41 +320,30 @@ func (w *walker) analyze(c *Commit) error {
 	}
 
 	goFiles := 0
-	for i := range c.Files {
-		fc := &c.Files[i]
-		// A copy leaves its source in place, so only the new side counts.
-		oldGo := fc.Status != StatusCopied && isGoFile(fc.OldPath, fc.oldMode)
-		newGo := isGoFile(fc.NewPath, fc.newMode)
-		old, err := w.side(oldGo, fc.OldPath, fc.oldHash)
-		if err != nil {
-			return err
-		}
-		new, err := w.side(newGo, fc.NewPath, fc.newHash)
-		if err != nil {
-			return err
-		}
+	for _, s := range all {
+		old, new := w.present(s.old), w.present(s.new)
 		if !old.ok && !new.ok {
 			continue
 		}
 		goFiles++
-		for _, s := range []parsed{old, new} {
-			if s.ok && s.err != nil {
-				c.ParseErrors = append(c.ParseErrors, s.err)
+		for _, p := range []parsed{old, new} {
+			if p.ok && p.err != nil {
+				c.ParseErrors = append(c.ParseErrors, p.err)
 			}
 		}
 		if old.f != nil {
-			g := group(fc.OldPath)
+			g := group(s.fc.OldPath)
 			g.old = append(g.old, old.f)
 		}
 		if new.f != nil {
-			g := group(fc.NewPath)
+			g := group(s.fc.NewPath)
 			g.new = append(g.new, new.f)
 		}
 	}
 
 	c.Changes = diffPackages(pkgs)
 	c.FormattingOnly = goFiles > 0 && len(c.Changes) == 0 && len(c.ParseErrors) == 0
-	return nil
+	return all, nil
 }
 
 // parse reads and parses one blob. The error is for failing to read it; a

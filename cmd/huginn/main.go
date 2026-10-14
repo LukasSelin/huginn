@@ -8,6 +8,11 @@
 //	huginn serve [-C dir] [-branch rev] [-tests] [-addr host:port]
 //
 // indexes the history and serves the symbol timeline in a browser.
+//
+//	huginn semdiff [-C dir] [-include-generated] [-callers n] rev
+//
+// prints the semantic diff of one commit: its changed symbols, their
+// callers, the blast radius and the files that changed only in formatting.
 package main
 
 import (
@@ -29,12 +34,14 @@ import (
 
 const usage = `usage:
   huginn symbols [-C dir] [-branch rev] [-tests] name
-  huginn serve [-C dir] [-branch rev] [-tests] [-addr host:port]`
+  huginn serve [-C dir] [-branch rev] [-tests] [-addr host:port]
+  huginn semdiff [-C dir] [-include-generated] [-callers n] rev`
 
 func main() {
 	cmds := map[string]func(context.Context, io.Writer, io.Writer, []string) error{
 		"symbols": symbols,
 		"serve":   serve,
+		"semdiff": semanticDiff,
 	}
 	if len(os.Args) < 2 || cmds[os.Args[1]] == nil {
 		fmt.Fprintln(os.Stderr, usage)
