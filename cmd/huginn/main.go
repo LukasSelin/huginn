@@ -1,13 +1,16 @@
 // Command huginn explores a Go repository's history symbol by symbol.
 //
-//	huginn symbols [-C dir] [-branch rev] [-tests] name
+//	huginn symbols [-C dir] [-branch rev] [-tests] [-no-cache] name
 //
 // prints the life of every symbol whose qualified name is name, e.g.
 // "ParseFile" or "(*Indexer).Visit", newest change first.
 //
-//	huginn serve [-C dir] [-branch rev] [-tests] [-addr host:port]
+//	huginn serve [-C dir] [-branch rev] [-tests] [-no-cache] [-addr host:port]
 //
 // indexes the history and serves the symbol timeline in a browser.
+//
+// Both keep the walked history in .git/huginn, so that the next run only
+// walks commits it has not seen; -no-cache walks everything afresh.
 //
 //	huginn semdiff [-C dir] [-include-generated] [-callers n] rev
 //
@@ -33,8 +36,8 @@ import (
 )
 
 const usage = `usage:
-  huginn symbols [-C dir] [-branch rev] [-tests] name
-  huginn serve [-C dir] [-branch rev] [-tests] [-addr host:port]
+  huginn symbols [-C dir] [-branch rev] [-tests] [-no-cache] name
+  huginn serve [-C dir] [-branch rev] [-tests] [-no-cache] [-addr host:port]
   huginn semdiff [-C dir] [-include-generated] [-callers n] rev`
 
 func main() {
@@ -61,6 +64,7 @@ func symbols(ctx context.Context, stdout, stderr io.Writer, args []string) error
 	dir := fs.String("C", ".", "repository directory")
 	branch := fs.String("branch", "", "revision to walk (default HEAD)")
 	tests := fs.Bool("tests", false, "include symbols declared in _test.go files")
+	noCache := fs.Bool("no-cache", false, "walk all history instead of reusing .git/huginn")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -72,12 +76,16 @@ func symbols(ctx context.Context, stdout, stderr io.Writer, args []string) error
 	if err != nil {
 		return err
 	}
-	start := time.Now()
-	h, err := lineage.Build(ctx, repo, lineage.BuildOptions{Options: git.Options{Branch: *branch}, Tests: *tests})
+	opts, err := buildOptions(ctx, repo, *branch, *tests, *noCache)
 	if err != nil {
 		return err
 	}
-	fmt.Fprintf(stderr, "indexed %d live symbols in %v\n", h.Live(), time.Since(start).Round(time.Millisecond))
+	start := time.Now()
+	h, err := lineage.Build(ctx, repo, opts)
+	if err != nil {
+		return err
+	}
+	fmt.Fprintf(stderr, "indexed %d live symbols in %v%s\n", h.Live(), time.Since(start).Round(time.Millisecond), cacheNote(opts.Cache))
 
 	found := h.Find(fs.Arg(0))
 	if len(found) == 0 {
@@ -90,6 +98,29 @@ func symbols(ctx context.Context, stdout, stderr io.Writer, args []string) error
 		printSymbol(stdout, s)
 	}
 	return nil
+}
+
+// buildOptions returns the options for indexing repo, with the cache in its
+// git directory unless noCache is set.
+func buildOptions(ctx context.Context, repo *git.Repo, branch string, tests, noCache bool) (lineage.BuildOptions, error) {
+	opts := lineage.BuildOptions{Options: git.Options{Branch: branch}, Tests: tests}
+	if noCache {
+		return opts, nil
+	}
+	gitDir, err := repo.GitDir(ctx)
+	if err != nil {
+		return opts, err
+	}
+	opts.Cache = lineage.NewCache(filepath.Join(gitDir, "huginn"))
+	return opts, nil
+}
+
+// cacheNote describes how much of the last build came from the cache.
+func cacheNote(c *lineage.Cache) string {
+	if c == nil {
+		return ""
+	}
+	return fmt.Sprintf(" (%d commits cached, %d walked)", c.Hits, c.Walked)
 }
 
 func printSymbol(w io.Writer, s *lineage.Symbol) {
@@ -111,6 +142,7 @@ func serve(ctx context.Context, stdout, stderr io.Writer, args []string) error {
 	dir := fs.String("C", ".", "repository directory")
 	branch := fs.String("branch", "", "revision to walk (default HEAD)")
 	tests := fs.Bool("tests", false, "include symbols declared in _test.go files")
+	noCache := fs.Bool("no-cache", false, "walk all history instead of reusing .git/huginn")
 	addr := fs.String("addr", "localhost:7878", "address to listen on")
 	if err := fs.Parse(args); err != nil {
 		return err
@@ -119,11 +151,15 @@ func serve(ctx context.Context, stdout, stderr io.Writer, args []string) error {
 	if err != nil {
 		return err
 	}
+	opts, err := buildOptions(ctx, repo, *branch, *tests, *noCache)
+	if err != nil {
+		return err
+	}
 	abs, err := filepath.Abs(*dir)
 	if err != nil {
 		return err
 	}
-	srv := web.New(repo, filepath.Base(abs), lineage.BuildOptions{Options: git.Options{Branch: *branch}, Tests: *tests})
+	srv := web.New(repo, filepath.Base(abs), opts)
 
 	ln, err := net.Listen("tcp", *addr)
 	if err != nil {
@@ -136,7 +172,7 @@ func serve(ctx context.Context, stdout, stderr io.Writer, args []string) error {
 			fmt.Fprintln(stderr, "huginn: indexing:", err)
 			return
 		}
-		fmt.Fprintf(stderr, "huginn: indexed in %v\n", time.Since(start).Round(time.Millisecond))
+		fmt.Fprintf(stderr, "huginn: indexed in %v%s\n", time.Since(start).Round(time.Millisecond), cacheNote(opts.Cache))
 	}()
 
 	hs := &http.Server{Handler: srv.Handler()}

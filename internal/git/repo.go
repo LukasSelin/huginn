@@ -14,6 +14,7 @@ import (
 	"fmt"
 	"io"
 	"os/exec"
+	"path/filepath"
 	"strconv"
 	"strings"
 )
@@ -38,6 +39,19 @@ func Open(dir string) (*Repo, error) {
 		return nil, fmt.Errorf("open %s: %w", dir, gitError(cmd, err, &stderr))
 	}
 	return r, nil
+}
+
+// GitDir returns the absolute path of the repository's git directory. For a
+// linked worktree it is the main repository's, which all worktrees share.
+func (r *Repo) GitDir(ctx context.Context) (string, error) {
+	cmd := r.command(ctx, "rev-parse", "--path-format=absolute", "--git-common-dir")
+	var stderr bytes.Buffer
+	cmd.Stderr = &stderr
+	out, err := cmd.Output()
+	if err != nil {
+		return "", gitError(cmd, err, &stderr)
+	}
+	return filepath.FromSlash(strings.TrimSpace(string(out))), nil
 }
 
 func (r *Repo) command(ctx context.Context, args ...string) *exec.Cmd {

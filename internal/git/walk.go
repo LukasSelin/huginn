@@ -102,6 +102,11 @@ type Options struct {
 	// header. By default generated code is treated as absent, so a file that
 	// gains or loses the header deletes or adds its symbols.
 	IncludeGenerated bool
+
+	// Commits, if not empty, walks exactly these commits in this order
+	// instead of a range of history; Branch, Since, Until, MaxCount and
+	// FirstParent are ignored. Each is still diffed against its first parent.
+	Commits []string
 }
 
 // Walk calls fn for each commit on opts.Branch, parents before children.
@@ -132,7 +137,7 @@ func (r *Repo) Diff(ctx context.Context, rev string, opts Options) (*Commit, []F
 	if err != nil {
 		return nil, nil, err
 	}
-	opts = Options{Branch: hash, MaxCount: 1, IncludeGenerated: opts.IncludeGenerated}
+	opts = Options{Commits: []string{hash}, IncludeGenerated: opts.IncludeGenerated}
 	var commit *Commit
 	var files []FileDiff
 	err = r.walk(ctx, opts, func(c *Commit, sides []fileSides) error {
@@ -172,6 +177,9 @@ func (r *Repo) walk(ctx context.Context, opts Options, fn func(*Commit, []fileSi
 	cmd := r.command(ctx, logArgs(opts)...)
 	var stderr bytes.Buffer
 	cmd.Stderr = &stderr
+	if len(opts.Commits) > 0 {
+		cmd.Stdin = strings.NewReader(strings.Join(opts.Commits, "\n") + "\n")
+	}
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {
 		return err
@@ -215,12 +223,24 @@ func (r *Repo) walk(ctx context.Context, opts Options, fn func(*Commit, []fileSi
 
 func logArgs(opts Options) []string {
 	args := []string{
-		"log", "--reverse", "--topo-order", "--root", "-z", logFormat,
+		"log", "--root", "-z", logFormat,
 		"--raw", "--numstat", "--no-abbrev", "-M", "--diff-merges=first-parent",
 		// Neutralize user configuration that would change the output.
 		"--no-color", "--no-relative", "--no-ext-diff", "--no-textconv",
 		"--no-show-signature", "--encoding=UTF-8",
 	}
+	if len(opts.Commits) > 0 {
+		// The hashes are fed on stdin, which keeps a long list off the
+		// command line.
+		return append(args, "--no-walk=unsorted", "--stdin", "--end-of-options", "--")
+	}
+	return append(args, rangeArgs(opts)...)
+}
+
+// rangeArgs selects the commits of a walk, oldest first, for git log or git
+// rev-list.
+func rangeArgs(opts Options) []string {
+	args := []string{"--reverse", "--topo-order"}
 	if opts.FirstParent {
 		args = append(args, "--first-parent")
 	}
@@ -236,6 +256,22 @@ func logArgs(opts Options) []string {
 	}
 	branch := cmp.Or(opts.Branch, "HEAD")
 	return append(args, "--end-of-options", branch, "--")
+}
+
+// Commits returns the hashes of the commits Walk would visit with opts, in
+// the same order, without reading or diffing them.
+func (r *Repo) Commits(ctx context.Context, opts Options) ([]string, error) {
+	if len(opts.Commits) > 0 {
+		return slices.Clone(opts.Commits), nil
+	}
+	cmd := r.command(ctx, append([]string{"rev-list"}, rangeArgs(opts)...)...)
+	var stderr bytes.Buffer
+	cmd.Stderr = &stderr
+	out, err := cmd.Output()
+	if err != nil {
+		return nil, gitError(cmd, err, &stderr)
+	}
+	return strings.Fields(string(out)), nil
 }
 
 // walker turns commits from the log into symbol changes.
