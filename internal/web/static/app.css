@@ -166,6 +166,10 @@ a.btn:hover { border-color: var(--accent); color: var(--text); }
 .sig-new { border-color: #24422F; background: #121C17; }
 .sig-new .sign { color: var(--added); }
 .summary { font-size: 12px; color: var(--text-2); }
+.members { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 2px; overflow-wrap: anywhere; }
+.members .sign { display: inline-block; width: 1.4em; user-select: none; }
+.members .m-old .sign { color: var(--deleted); } .members .m-new .sign { color: var(--added); }
+.members .mnote { margin-left: 10px; color: var(--muted); } .members .mnote.warn { color: var(--signature); }
 .impact { font-size: 12px; color: var(--muted); }
 .impact.warn { color: var(--signature); }
 .callers summary { cursor: pointer; }

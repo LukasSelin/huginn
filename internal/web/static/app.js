@@ -418,6 +418,21 @@ function callerRows(cs) {
       c.test && h('span', { class: 'tag' }, 'test'))));
 }
 
+// memberList shows a type's member changes as before/after lines.
+function memberList(ms) {
+  if (!ms || !ms.length) return null;
+  return h('ul', { class: 'members mono small' }, ms.flatMap((m) => {
+    const notes = [m.flags.split('|').filter((f) => f !== 'added' && f !== 'removed').join(', '),
+      m.breaks && `breaks ${m.breaks}`, m.uses > 0 && plural(m.uses, 'field use') + (m.approximate ? ' (approx.)' : '')]
+      .filter(Boolean).join(' · ');
+    const note = notes && h('span', { class: `mnote${m.breaks ? ' warn' : ''}` }, notes);
+    const rows = [];
+    if (m.oldDecl) rows.push(h('li', { class: 'm-old' }, h('span', { class: 'sign', 'aria-hidden': 'true' }, '−'), m.oldDecl, !m.newDecl && note));
+    if (m.newDecl) rows.push(h('li', { class: 'm-new' }, h('span', { class: 'sign', 'aria-hidden': 'true' }, '+'), m.newDecl, note));
+    return rows;
+  }));
+}
+
 function card(c) {
   let sig;
   if (c.kinds.includes('signature') && c.oldSignature) sig = [sigBlock('sig-old', '−', c.oldSignature), sigBlock('sig-new', '+', c.newSignature)];
@@ -436,6 +451,7 @@ function card(c) {
     h('span', { class: 'muted small mono' }, loc(c.path, c.line), was),
     sig,
     c.summary && h('span', { class: 'summary mono' }, c.summary),
+    memberList(c.members),
     h('span', { class: `impact${c.apiChange ? ' warn' : ''}` }, c.impact, c.apiChange ? ' · API change' : ''),
     c.callers.length > 0 && h('details', { class: 'callers' },
       h('summary', { class: 'small muted' }, plural(c.callers.length, 'caller')),

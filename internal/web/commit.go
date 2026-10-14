@@ -97,6 +97,34 @@ type changeJSON struct {
 	Approximate bool         `json:"approximate"`
 	Similarity  float64      `json:"similarity"`
 	Callers     []callerJSON `json:"callers"`
+	Members     []memberJSON `json:"members,omitempty"`
+}
+
+// memberJSON is one changed field, method, embedded type or type term of a
+// struct or interface type.
+type memberJSON struct {
+	Flags       string `json:"flags"` // "added", "retyped|tag", ...
+	Member      string `json:"member"`
+	Name        string `json:"name,omitempty"`
+	OldName     string `json:"oldName,omitempty"`
+	OldDecl     string `json:"oldDecl,omitempty"`
+	NewDecl     string `json:"newDecl,omitempty"`
+	Exported    bool   `json:"exported"`
+	Breaks      string `json:"breaks,omitempty"` // whose code the change breaks
+	Uses        int    `json:"uses"`
+	Approximate bool   `json:"approximate"`
+}
+
+func membersJSON(ms []semdiff.MemberChange) []memberJSON {
+	var out []memberJSON
+	for _, m := range ms {
+		out = append(out, memberJSON{
+			Flags: m.Flags.String(), Member: m.Member, Name: m.Name, OldName: m.OldName,
+			OldDecl: m.OldDecl, NewDecl: m.NewDecl, Exported: m.Exported, Breaks: m.Breaks,
+			Uses: m.Uses, Approximate: m.Approximate,
+		})
+	}
+	return out
 }
 
 type callerJSON struct {
@@ -199,7 +227,7 @@ func newCommitJSON(c *git.Commit, r *semdiff.Report, warnings []string) *commitJ
 			ComplexityBefore: ch.ComplexityBefore, ComplexityAfter: ch.ComplexityAfter, ComplexityDelta: ch.ComplexityAfter - ch.ComplexityBefore,
 			Summary: ch.Summary, Impact: ch.Impact, Exported: ch.Exported, APIChange: ch.APIChange,
 			CallSites: ch.CallSites, Approximate: ch.Approximate, Similarity: ch.Similarity,
-			Callers: callersJSON(ch.Callers),
+			Callers: callersJSON(ch.Callers), Members: membersJSON(ch.Members),
 		})
 	}
 	b := r.Blast

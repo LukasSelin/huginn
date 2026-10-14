@@ -63,6 +63,27 @@ type Ref struct {
 // and may stand for any method of that name.
 func (r Ref) Approximate() bool { return r.Kind == RefMethod && r.Recv == "" }
 
+// FieldRef is one struct field that a function or method body uses by name,
+// as a selector x.Name or as a key of a struct literal, with all its
+// occurrences in that body folded together.
+//
+// Like Refs, FieldRefs are syntactic. The struct type is known for keyed
+// literals that spell their type (T{Name: v}, pkg.T{Name: v}) and for
+// selectors on the enclosing method's receiver; otherwise only the field
+// name is, and a method value x.M can be mistaken for a field.
+type FieldRef struct {
+	Pkg  string // import path, for a literal of an imported type
+	Type string // the struct type's name when known: "Config"
+	Name string // field name
+
+	Count int // occurrences
+	Line  int // first occurrence
+}
+
+// Approximate reports that the struct type is unknown and the reference may
+// stand for any field of that name.
+func (r FieldRef) Approximate() bool { return r.Type == "" }
+
 // Import is one import declaration of a file.
 type Import struct {
 	Name string // explicit name ("_", ".", or an alias); empty when absent
@@ -127,9 +148,9 @@ func fileImports(f *goast.File) []Import {
 // parameter) hides the package-level symbol of that name everywhere in it.
 // That can drop a reference that is made before a shadowing declaration, but
 // never invents one.
-func funcRefs(fset *token.FileSet, imports map[string]string, d *goast.FuncDecl) []Ref {
+func funcRefs(fset *token.FileSet, imports map[string]string, d *goast.FuncDecl) ([]Ref, []FieldRef) {
 	if d.Body == nil {
-		return nil
+		return nil, nil
 	}
 	r := refCollector{
 		fset:     fset,
@@ -138,6 +159,7 @@ func funcRefs(fset *token.FileSet, imports map[string]string, d *goast.FuncDecl)
 		skip:     map[*goast.Ident]bool{},
 		called:   map[goast.Expr]bool{},
 		refs:     map[refKey]*Ref{},
+		fields:   map[refKey]*FieldRef{},
 	}
 	if d.Recv != nil && len(d.Recv.List) > 0 {
 		r.recvType, _ = recvBase(d.Recv.List[0].Type)
@@ -157,7 +179,15 @@ func funcRefs(fset *token.FileSet, imports map[string]string, d *goast.FuncDecl)
 	slices.SortFunc(out, func(a, b Ref) int {
 		return cmp.Or(cmp.Compare(a.Kind, b.Kind), cmp.Compare(a.Pkg, b.Pkg), cmp.Compare(a.Recv, b.Recv), cmp.Compare(a.Name, b.Name))
 	})
-	return out
+
+	var fields []FieldRef
+	for _, f := range r.fields {
+		fields = append(fields, *f)
+	}
+	slices.SortFunc(fields, func(a, b FieldRef) int {
+		return cmp.Or(cmp.Compare(a.Pkg, b.Pkg), cmp.Compare(a.Type, b.Type), cmp.Compare(a.Name, b.Name))
+	})
+	return out, fields
 }
 
 type refKey struct {
@@ -175,6 +205,7 @@ type refCollector struct {
 	skip     map[*goast.Ident]bool // identifiers that are not references
 	called   map[goast.Expr]bool   // callees of call expressions
 	refs     map[refKey]*Ref
+	fields   map[refKey]*FieldRef // kind is unused; recv holds the struct type
 }
 
 // declare records the names a node declares and the identifiers that name
@@ -221,10 +252,12 @@ func (r *refCollector) declare(n goast.Node) bool {
 		// Keys of struct literals are field names. Map keys are expressions,
 		// but the literal's type is only recognizable as a map when spelled out.
 		if _, isMap := x.Type.(*goast.MapType); !isMap {
+			pkg, typ := r.literalType(x.Type)
 			for _, e := range x.Elts {
 				if kv, ok := e.(*goast.KeyValueExpr); ok {
 					if id, ok := kv.Key.(*goast.Ident); ok {
 						r.skip[id] = true
+						r.addField(refKey{pkg: pkg, recv: typ, name: id.Name}, id)
 					}
 				}
 			}
@@ -268,6 +301,13 @@ func (r *refCollector) visit(n goast.Node) bool {
 				return true
 			}
 		}
+		if !r.called[x] {
+			key := refKey{name: x.Sel.Name}
+			if id, ok := x.X.(*goast.Ident); ok && id.Name == r.recvName && r.recvName != "" && r.recvName != "_" {
+				key.recv = r.recvType
+			}
+			r.addField(key, x)
+		}
 		if r.called[x] {
 			key := refKey{kind: RefMethod, name: x.Sel.Name}
 			if id, ok := x.X.(*goast.Ident); ok && id.Name == r.recvName && r.recvName != "" && r.recvName != "_" {
@@ -297,6 +337,34 @@ func (r *refCollector) add(k refKey, n goast.Expr) {
 	if r.called[n] {
 		ref.Calls++
 	}
+}
+
+func (r *refCollector) addField(k refKey, n goast.Node) {
+	f := r.fields[k]
+	if f == nil {
+		f = &FieldRef{Pkg: k.pkg, Type: k.recv, Name: k.name, Line: r.fset.Position(n.Pos()).Line}
+		r.fields[k] = f
+	}
+	f.Count++
+}
+
+// literalType resolves the spelled-out type of a struct literal to a type
+// name, and an import path for an imported type. Both are empty when the
+// type is elided, local to the function or not a named type.
+func (r *refCollector) literalType(e goast.Expr) (pkg, name string) {
+	switch x := callee(e).(type) {
+	case *goast.Ident:
+		if !r.declared[x.Name] {
+			return "", x.Name
+		}
+	case *goast.SelectorExpr:
+		if id, ok := x.X.(*goast.Ident); ok && !r.declared[id.Name] {
+			if path, ok := r.imports[id.Name]; ok {
+				return path, x.Sel.Name
+			}
+		}
+	}
+	return "", ""
 }
 
 // callee strips parentheses and type arguments from a call's function

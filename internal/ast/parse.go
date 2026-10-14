@@ -52,7 +52,7 @@ func ParseSource(path string, src []byte) (*File, error) {
 		switch d := decl.(type) {
 		case *goast.FuncDecl:
 			s := funcSymbol(d)
-			s.Refs = funcRefs(fset, imports, d)
+			s.Refs, s.FieldRefs = funcRefs(fset, imports, d)
 			add(s, d)
 		case *goast.GenDecl:
 			for _, spec := range d.Specs {
@@ -63,7 +63,9 @@ func ParseSource(path string, src []byte) (*File, error) {
 				}
 				switch sp := spec.(type) {
 				case *goast.TypeSpec:
-					add(typeSymbol(sp), node)
+					s := typeSymbol(sp)
+					s.Members = typeMembers(fset, sp)
+					add(s, node)
 				case *goast.ValueSpec:
 					for _, s := range valueSymbols(d.Tok, sp) {
 						add(s, node)

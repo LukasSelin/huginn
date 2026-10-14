@@ -8,6 +8,7 @@ import (
 	"strings"
 	"unicode/utf8"
 
+	"huginn/internal/ast"
 	"huginn/internal/git"
 	"huginn/internal/semdiff"
 )
@@ -129,6 +130,7 @@ func (p *printer) report(c *git.Commit, r *semdiff.Report) {
 		if ch.Summary != "" {
 			p.printf("    %s\n", ch.Summary)
 		}
+		p.members(ch.Members)
 		impact := ch.Impact
 		if ch.APIChange {
 			impact += " · API change"
@@ -164,6 +166,46 @@ func (p *printer) report(c *git.Commit, r *semdiff.Report) {
 		}
 		for _, n := range r.Noise {
 			p.printf("  %s  %s  %s\n", pad(n.Path, width), pad(fmt.Sprintf("+%d −%d", n.Added, n.Removed), 10), n.Reason)
+		}
+	}
+}
+
+// members lists a type's member changes, one line per side, the notes on
+// the last: "+ field UserID int  renamed · breaks callers · 4 field uses".
+func (p *printer) members(ms []semdiff.MemberChange) {
+	for _, m := range ms {
+		var notes []string
+		if m.Flags.Has(ast.MemberRenamed) {
+			notes = append(notes, "renamed")
+		}
+		if m.Flags.Has(ast.MemberRetyped) {
+			notes = append(notes, "retyped")
+		}
+		if m.Flags.Has(ast.MemberTagChanged) {
+			notes = append(notes, "tag changed")
+		}
+		if m.Breaking {
+			notes = append(notes, "breaks "+m.Breaks)
+		}
+		if m.Uses > 0 {
+			uses := plural(m.Uses, "field use")
+			if m.Approximate {
+				uses += " (approx.)"
+			}
+			notes = append(notes, uses)
+		}
+		note := ""
+		if len(notes) > 0 {
+			note = "  " + strings.Join(notes, " · ")
+		}
+		switch {
+		case m.OldDecl == "":
+			p.printf("      + %s %s%s\n", m.Member, m.NewDecl, note)
+		case m.NewDecl == "":
+			p.printf("      - %s %s%s\n", m.Member, m.OldDecl, note)
+		default:
+			p.printf("      - %s %s\n", m.Member, m.OldDecl)
+			p.printf("      + %s %s%s\n", m.Member, m.NewDecl, note)
 		}
 	}
 }

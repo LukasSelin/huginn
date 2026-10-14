@@ -22,6 +22,9 @@ type index struct {
 	exact    map[string][]site // by symbol id, see symID
 	byMethod map[string][]site // calls x.Name() with unknown x, by Name
 	imports  map[*ast.File]map[string]bool
+
+	fields      map[string][]site // field uses by symID of "Type.Field"
+	fieldByName map[string][]site // field uses x.Name with unknown x, by Name
 }
 
 // symID identifies a symbol across a tree: its package import path and its
@@ -36,6 +39,9 @@ func newIndex(tree []*ast.File, pkgOf func(path, pkg string) string) *index {
 		exact:    map[string][]site{},
 		byMethod: map[string][]site{},
 		imports:  map[*ast.File]map[string]bool{},
+
+		fields:      map[string][]site{},
+		fieldByName: map[string][]site{},
 	}
 	methods := map[string]bool{}
 	for _, f := range tree {
@@ -76,6 +82,20 @@ func newIndex(tree []*ast.File, pkgOf func(path, pkg string) string) *index {
 					}
 					st.approx = true
 					idx.byMethod[ref.Name] = append(idx.byMethod[ref.Name], st)
+				}
+			}
+			for _, ref := range s.FieldRefs {
+				st := site{caller: s, file: f, pkg: pkg, uses: ref.Count}
+				switch {
+				case ref.Approximate():
+					st.approx = true
+					idx.fieldByName[ref.Name] = append(idx.fieldByName[ref.Name], st)
+				case ref.Pkg != "":
+					id := symID(ref.Pkg, ref.Type+"."+ref.Name)
+					idx.fields[id] = append(idx.fields[id], st)
+				default:
+					id := symID(pkg, ref.Type+"."+ref.Name)
+					idx.fields[id] = append(idx.fields[id], st)
 				}
 			}
 		}
@@ -136,4 +156,22 @@ func (idx *index) callers(s *ast.Symbol, pkg string, record func(callerID, Calle
 	}
 	sortCallers(out)
 	return out, approx
+}
+
+// fieldUses counts the uses of field name of struct type typ, declared in
+// package pkg, and reports whether some were matched by field name only.
+// Like method calls, such uses are only searched in pkg itself and in the
+// files that import it.
+func (idx *index) fieldUses(typ, name, pkg string) (uses int, approx bool) {
+	for _, st := range idx.fields[symID(pkg, typ+"."+name)] {
+		uses += st.uses
+	}
+	importable := strings.TrimSuffix(pkg, "_test")
+	for _, st := range idx.fieldByName[name] {
+		if st.pkg == pkg || idx.imports[st.file][importable] {
+			uses += st.uses
+			approx = true
+		}
+	}
+	return uses, approx
 }
