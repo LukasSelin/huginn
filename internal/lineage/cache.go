@@ -13,7 +13,7 @@ import (
 // cacheVersion identifies the cache format. Bump it whenever the encoding
 // changes, or the ast or git packages start producing different changes for
 // the same commit, so that stale caches are discarded rather than trusted.
-const cacheVersion = 1
+const cacheVersion = 2
 
 // Cache keeps walked revisions on disk, keyed by commit hash, so that a later
 // Build only walks the commits it has not seen. A revision depends only on
