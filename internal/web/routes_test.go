@@ -3,6 +3,7 @@ package web
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -172,7 +173,10 @@ func TestAPI(t *testing.T) {
 		}
 		edit := sym.Events[1]
 		if edit.SHA != hashes[2] || edit.Author != "Ada" || edit.Kind != "signature" ||
-			!slices.Equal(edit.Flags, []string{"signature", "body"}) || edit.Stmts != 2 {
+			!slices.Equal(edit.Flags, []string{"signature", "body"}) || edit.Stmts != 2 ||
+			edit.Rev != 2 || edit.Path != "geo/point.go" || edit.Name != "(*Point).Move" ||
+			edit.Signature != "func (*Point) Move(dx, dy int)" || edit.OldPath != "geo/point.go" || edit.OldName != "(*Point).Move" ||
+			sym.Events[0].OldName != "" {
 			t.Errorf("edit event = %+v", edit)
 		}
 
@@ -233,6 +237,71 @@ func TestAPI(t *testing.T) {
 			t.Errorf("default step %q, %d frames", j.Step, len(j.Frames))
 		}
 		getJSON(t, h, "/api/journey?step=day", http.StatusBadRequest, nil)
+	})
+
+	t.Run("journey package", func(t *testing.T) {
+		var v symViewJSON
+		getJSON(t, h, "/api/journey/package/geo?step=commit", http.StatusOK, &v)
+		if v.Dir != "geo" || v.Step != "commit" || v.Total != 4 || v.Truncated || len(v.Symbols) != 4 || len(v.Frames) != 3 {
+			t.Fatalf("view = %+v", v)
+		}
+		name := func(i int) string { return v.Symbols[i].Name }
+		var got []string
+		for _, f := range v.Frames {
+			var s []string
+			for _, z := range f.Set {
+				s = append(s, fmt.Sprintf("+%s:%d", name(z[0]), z[1]))
+			}
+			for _, k := range f.Gone {
+				s = append(s, "-"+name(k))
+			}
+			for _, e := range f.Ev {
+				s = append(s, e.Kind+" "+e.Name+" "+e.OldSig+e.Sig)
+			}
+			got = append(got, strings.Join(s, ", "))
+		}
+		// Symbols are in file order: hello.go, then point.go.
+		want := []string{
+			"+Point:0, +(*Point).Move:1, born Point , born (*Point).Move ",
+			"+Hello:1, +Bye:0, born Hello , born Bye ",
+			"+(*Point).Move:2, -Bye, died Bye , signature (*Point).Move func (*Point) Move(dx int)func (*Point) Move(dx, dy int)",
+		}
+		if !slices.Equal(got, want) {
+			t.Errorf("frames:\n%q\nwant\n%q", got, want)
+		}
+
+		var root symViewJSON
+		getJSON(t, h, "/api/journey/package/?step=week", http.StatusOK, &root)
+		if root.Dir != "." || len(root.Symbols) != 1 || root.Symbols[0].Name != "main" {
+			t.Errorf("root = %+v", root)
+		}
+		getJSON(t, h, "/api/journey/package/nowhere", http.StatusNotFound, nil)
+		getJSON(t, h, "/api/journey/package/geo?step=day", http.StatusBadRequest, nil)
+	})
+
+	t.Run("journey symbols", func(t *testing.T) {
+		var hits []symHitJSON
+		getJSON(t, h, "/api/journey/symbols?q=MO", http.StatusOK, &hits)
+		if len(hits) != 1 || hits[0].Name != "(*Point).Move" || hits[0].Dir != "geo" || !hits[0].Alive || hits[0].Kind != "method" {
+			t.Errorf("hits for MO = %+v", hits)
+		}
+		// Exact before prefix before the rest; live before deleted.
+		getJSON(t, h, "/api/journey/symbols?q=point", http.StatusOK, &hits)
+		var names []string
+		for _, x := range hits {
+			names = append(names, x.Name)
+		}
+		if !slices.Equal(names, []string{"Point", "(*Point).Move"}) {
+			t.Errorf("hits for point = %q", names)
+		}
+		getJSON(t, h, "/api/journey/symbols?q=b", http.StatusOK, &hits)
+		if len(hits) != 1 || hits[0].Name != "Bye" || hits[0].Alive {
+			t.Errorf("hits for b = %+v", hits)
+		}
+		getJSON(t, h, "/api/journey/symbols?q=", http.StatusOK, &hits)
+		if len(hits) != 0 {
+			t.Errorf("hits for nothing = %+v", hits)
+		}
 	})
 
 	t.Run("ui", func(t *testing.T) {

@@ -1,12 +1,18 @@
 package web
 
 import (
+	"cmp"
 	"context"
 	"net/http"
+	"path"
+	"slices"
+	"strconv"
+	"strings"
 	"sync"
 
 	"huginn/internal/git"
 	"huginn/internal/journey"
+	"huginn/internal/lineage"
 	"huginn/internal/story"
 )
 
@@ -211,9 +217,144 @@ func (s *Server) journeyAPI(ix *index, w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, out)
 }
 
-func nonNil(s []string) []string {
+func nonNil[T any](s []T) []T {
 	if s == nil {
-		return []string{}
+		return []T{}
 	}
 	return s
+}
+
+// packageSymbolLimit bounds the symbols a package view sends; big packages
+// show their biggest symbols.
+const packageSymbolLimit = 600
+
+type symViewJSON struct {
+	Dir       string         `json:"dir"`
+	Step      string         `json:"step"`
+	Total     int            `json:"total"` // symbols ever in the package
+	Truncated bool           `json:"truncated"`
+	Symbols   []symPlaceJSON `json:"symbols"`
+	Frames    []symFrameJSON `json:"frames"` // parallel to /api/journey's frames for the step
+}
+
+type symPlaceJSON struct {
+	ID   lineage.ID `json:"id"`
+	Name string     `json:"name"` // as first seen in the package
+	Kind string     `json:"kind"`
+	File string     `json:"file"`
+	Peak int        `json:"peak"` // most statements
+	X    float64    `json:"x"`    // in the unit square, inside the inscribed circle
+	Y    float64    `json:"y"`
+}
+
+// symFrameJSON is a frame as changes to the previous one: replaying from
+// the first frame gives the live symbols of each.
+type symFrameJSON struct {
+	Set  [][2]int       `json:"set"`  // [symbol, stmts] that became live or changed size
+	Gone []int          `json:"gone"` // symbols that left
+	Ev   []symEventJSON `json:"ev"`
+}
+
+type symEventJSON struct {
+	S      int    `json:"s"` // index into symbols
+	Rev    int    `json:"rev"`
+	Kind   string `json:"k"` // born, died, renamed, in, out, signature
+	Name   string `json:"name"`
+	From   string `json:"from,omitempty"`
+	To     string `json:"to,omitempty"`
+	Sig    string `json:"sig,omitempty"`
+	OldSig string `json:"oldSig,omitempty"`
+}
+
+// journeyPackage serves the symbols of one package directory frame by
+// frame, for ?step= as /api/journey. An empty directory is the root. ?keep=
+// names a symbol ID to include even in a truncated view.
+func (s *Server) journeyPackage(ix *index, w http.ResponseWriter, r *http.Request) {
+	dir := r.PathValue("dir")
+	if dir == "" {
+		dir = "."
+	}
+	q := r.URL.Query()
+	step, ok := journey.ParseStep(cmp.Or(q.Get("step"), "week"))
+	if !ok {
+		http.Error(w, "step must be commit, week or month", http.StatusBadRequest)
+		return
+	}
+	keep, _ := strconv.ParseInt(q.Get("keep"), 10, 64)
+	v := s.journey(ix, step).Symbols(ix.h, dir, journey.SymbolOptions{Tests: s.opts.Tests, Limit: packageSymbolLimit, Keep: lineage.ID(keep)})
+	if v.Total == 0 {
+		http.Error(w, "no symbols in that directory", http.StatusNotFound)
+		return
+	}
+	out := symViewJSON{Dir: dir, Step: step.String(), Total: v.Total, Truncated: v.Truncated, Symbols: []symPlaceJSON{}, Frames: make([]symFrameJSON, 0, len(v.Frames))}
+	for _, p := range v.Symbols {
+		out.Symbols = append(out.Symbols, symPlaceJSON{ID: p.ID, Name: p.Name, Kind: p.Kind.String(), File: p.File, Peak: p.PeakStmts, X: p.X, Y: p.Y})
+	}
+	for _, f := range v.Frames {
+		fj := symFrameJSON{Set: [][2]int{}, Gone: nonNil(f.Gone), Ev: []symEventJSON{}}
+		for _, z := range f.Set {
+			fj.Set = append(fj.Set, [2]int{z.Symbol, z.Stmts})
+		}
+		for _, e := range f.Events {
+			fj.Ev = append(fj.Ev, symEventJSON{S: e.Symbol, Rev: e.Rev, Kind: e.Kind.String(), Name: e.Name, From: e.From, To: e.To, Sig: e.Sig, OldSig: e.OldSig})
+		}
+		out.Frames = append(out.Frames, fj)
+	}
+	writeJSON(w, out)
+}
+
+// symbolSearchLimit bounds the symbols a search returns.
+const symbolSearchLimit = 20
+
+type symHitJSON struct {
+	ID    lineage.ID `json:"id"`
+	Name  string     `json:"name"` // latest qualified name
+	Kind  string     `json:"kind"`
+	Dir   string     `json:"dir"` // of the latest declaration
+	Alive bool       `json:"alive"`
+}
+
+// journeySymbols finds symbols to follow by ?q=, a case-insensitive part of
+// their latest qualified name: exact matches first, then prefixes, then the
+// rest; live before deleted; then by name and ID.
+func (s *Server) journeySymbols(ix *index, w http.ResponseWriter, r *http.Request) {
+	q := strings.ToLower(strings.TrimSpace(r.URL.Query().Get("q")))
+	out := []symHitJSON{}
+	if q == "" {
+		writeJSON(w, out)
+		return
+	}
+	type hit struct {
+		symHitJSON
+		rank int
+	}
+	var hits []hit
+	for sym := range ix.h.All() {
+		cur := sym.Latest()
+		name := cur.QualifiedName()
+		low, bare := strings.ToLower(name), strings.ToLower(cur.Name)
+		rank := 2
+		switch {
+		case low == q || bare == q:
+			rank = 0
+		case strings.HasPrefix(low, q) || strings.HasPrefix(bare, q):
+			rank = 1
+		case !strings.Contains(low, q):
+			continue
+		}
+		hits = append(hits, hit{symHitJSON{ID: sym.ID, Name: name, Kind: cur.Kind.String(), Dir: path.Dir(cur.Path), Alive: sym.Alive()}, rank})
+	}
+	slices.SortFunc(hits, func(a, b hit) int {
+		if a.Alive != b.Alive {
+			if a.Alive {
+				return -1
+			}
+			return 1
+		}
+		return cmp.Or(cmp.Compare(a.rank, b.rank), cmp.Compare(a.Name, b.Name), cmp.Compare(a.ID, b.ID))
+	})
+	for _, h := range hits[:min(len(hits), symbolSearchLimit)] {
+		out = append(out, h.symHitJSON)
+	}
+	writeJSON(w, out)
 }

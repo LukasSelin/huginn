@@ -101,6 +101,8 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /api/map/{dir...}", s.ready(s.mapDir))
 	mux.HandleFunc("GET /api/health", s.ready(s.health))
 	mux.HandleFunc("GET /api/journey", s.ready(s.journeyAPI))
+	mux.HandleFunc("GET /api/journey/package/{dir...}", s.ready(s.journeyPackage))
+	mux.HandleFunc("GET /api/journey/symbols", s.ready(s.journeySymbols))
 	mux.HandleFunc("GET /api/commit/{rev...}", s.commit)
 	return mux
 }
@@ -244,6 +246,16 @@ type eventJSON struct {
 	Summary    string   `json:"summary"`
 	Stmts      int      `json:"stmts"` // after the event; 0 once deleted
 	Complexity int      `json:"complexity"`
+
+	// Rev is the revision's index, oldest first. Path, Name and Signature
+	// are the declaration after the event; before it for a deletion.
+	// OldPath and OldName are the declaration before it, unless added.
+	Rev       int    `json:"rev"`
+	Path      string `json:"path"`
+	Name      string `json:"name"`
+	Signature string `json:"signature"`
+	OldPath   string `json:"oldPath,omitempty"`
+	OldName   string `json:"oldName,omitempty"`
 }
 
 func (s *Server) symbol(ix *index, w http.ResponseWriter, r *http.Request) {
@@ -269,6 +281,12 @@ func (s *Server) symbol(ix *index, w http.ResponseWriter, r *http.Request) {
 		}
 		if e.New != nil {
 			ej.Stmts, ej.Complexity = e.New.Stmts, e.New.Complexity
+		}
+		ej.Rev, _ = ix.h.Position(e.SHA)
+		decl := cmp.Or(e.New, e.Old)
+		ej.Path, ej.Name, ej.Signature = decl.Path, decl.QualifiedName(), decl.Signature
+		if e.Old != nil {
+			ej.OldPath, ej.OldName = e.Old.Path, e.Old.QualifiedName()
 		}
 		out.Events = append(out.Events, ej)
 	}
