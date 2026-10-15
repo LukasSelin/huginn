@@ -204,3 +204,40 @@ func TestEmpty(t *testing.T) {
 		t.Errorf("%+v", j)
 	}
 }
+
+// TestLayoutCoupling checks that distance follows coupling: core and api
+// share many references, cli imports api once, and misc is unrelated.
+func TestLayoutCoupling(t *testing.T) {
+	var changes []ast.Change
+	add := func(s *ast.Symbol) { changes = append(changes, ast.Change{Flags: ast.Added, New: s}) }
+	for _, n := range []string{"A", "B", "C", "D"} {
+		add(fn("core/core.go", n))
+		add(fn("misc/misc.go", n))
+	}
+	for _, n := range []string{"E", "F", "G", "H", "I", "J"} {
+		add(fn("api/api.go", n, "example.com/m/core"))
+	}
+	add(fn("cli/cli.go", "Main", "example.com/m/api"))
+	add(fn("cli/cli.go", "Run"))
+	h := lineage.New()
+	h.Apply(lineage.Revision{SHA: "a", Time: day("2026-03-02"), Changes: changes})
+	j := Build(h, codemap.Build(h), Week, Options{})
+
+	at := map[string]Package{}
+	for _, p := range j.Packages {
+		at[p.Path] = p
+	}
+	gap := func(a, b string) float64 {
+		p, q := at[a], at[b]
+		return math.Hypot(p.X-q.X, p.Y-q.Y) - p.R - q.R
+	}
+	if !(gap("api", "core") < gap("api", "cli")) {
+		t.Errorf("api–core %.3f not closer than api–cli %.3f", gap("api", "core"), gap("api", "cli"))
+	}
+	if !(gap("api", "cli") < gap("api", "misc")) {
+		t.Errorf("api–cli %.3f not closer than api–misc %.3f", gap("api", "cli"), gap("api", "misc"))
+	}
+	if !(gap("core", "cli") < gap("core", "misc")) {
+		t.Errorf("core–cli %.3f (through api) not closer than core–misc %.3f", gap("core", "cli"), gap("core", "misc"))
+	}
+}

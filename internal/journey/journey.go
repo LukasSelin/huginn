@@ -10,6 +10,7 @@ package journey
 
 import (
 	"cmp"
+	"math"
 	"path"
 	"slices"
 	"strings"
@@ -219,7 +220,7 @@ func Build(h *lineage.History, m *codemap.Map, step Step, opts Options) *Journey
 		slices.SortFunc(f.Deps, func(a, b Dep) int { return cmp.Or(cmp.Compare(a.From, b.From), cmp.Compare(a.To, b.To)) })
 	}
 	j.Frames = frames
-	layout(j)
+	layout(j, r.coupling(idx))
 	return j
 }
 
@@ -235,6 +236,11 @@ type replay struct {
 	refs   map[[2]string]int // live symbols in [0] referring to [1]
 	module *resolver
 
+	// peakRefs is the most refs ever held between two directories at the
+	// end of a revision; dirty holds the pairs the current revision moved.
+	peakRefs map[[2]string]int
+	dirty    [][2]string
+
 	// names numbers directories for the frames until they are sorted.
 	names []string
 	num   map[string]int
@@ -249,6 +255,7 @@ func newReplay(h *lineage.History, tests bool) *replay {
 	r := &replay{
 		tests: tests, byRev: make([][]change, h.Revisions()), syms: map[lineage.ID]*ast.Symbol{},
 		live: map[string]int{}, peak: map[string]int{}, refs: map[[2]string]int{}, num: map[string]int{},
+		peakRefs: map[[2]string]int{},
 	}
 	var all []*ast.Symbol
 	for sym := range h.All() {
@@ -283,6 +290,10 @@ func (r *replay) apply(rev int) {
 			r.add(s, 1)
 		}
 	}
+	for _, k := range r.dirty {
+		r.peakRefs[k] = max(r.peakRefs[k], r.refs[k])
+	}
+	r.dirty = r.dirty[:0]
 }
 
 // add counts s in or, with delta -1, out.
@@ -298,11 +309,40 @@ func (r *replay) add(s *ast.Symbol, delta int) {
 			continue
 		}
 		k := [2]string{dir, to}
+		r.dirty = append(r.dirty, k)
 		r.refs[k] += delta
 		if r.refs[k] == 0 {
 			delete(r.refs, k)
 		}
 	}
+}
+
+// coupling weighs every pair of directories that ever referred to each
+// other: one for each direction that imports the other, plus the log of the
+// most references, both ways, that ever held between them at once. It is
+// taken per revision, so it does not depend on the step.
+func (r *replay) coupling(idx map[string]int) []spring {
+	type pair struct{ dirs, refs int }
+	pairs := map[[2]int]pair{}
+	for k, n := range r.peakRefs {
+		a, okA := idx[k[0]]
+		b, okB := idx[k[1]]
+		if !okA || !okB || n == 0 {
+			continue
+		}
+		key := [2]int{min(a, b), max(a, b)}
+		p := pairs[key]
+		p.dirs++
+		p.refs += n
+		pairs[key] = p
+	}
+	var out []spring
+	for k, p := range pairs {
+		out = append(out, spring{k[0], k[1], float64(p.dirs) + math.Log1p(float64(p.refs))})
+	}
+	// Map order is random; the layout must not depend on it.
+	slices.SortFunc(out, func(p, q spring) int { return cmp.Or(cmp.Compare(p.a, q.a), cmp.Compare(p.b, q.b)) })
+	return out
 }
 
 func (r *replay) id(dir string) int {
