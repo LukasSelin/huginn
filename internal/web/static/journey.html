@@ -76,11 +76,12 @@
       </div>
       <p class="ov ov-bl caption" id="caption" aria-live="polite"></p>
       <div class="ov ov-bl card" id="card" role="region" aria-label="Key moment" aria-live="polite" hidden></div>
-      <div class="ov ov-br legend" aria-label="Activity scale">
+      <div class="ov ov-br legend" id="actLegend" aria-label="Activity scale">
         <span class="muted small">quiet</span>
         <span class="swatches" id="swatches"></span>
         <span class="muted small">busy</span>
       </div>
+      <div class="ov ov-br legend know" id="knowLegend" aria-label="Who knows the code at the playhead" hidden></div>
     </section>
 
     <section class="panel playbar" aria-label="Playback">
@@ -112,6 +113,13 @@
           <button type="button" data-v="week">Week</button>
           <button type="button" data-v="month">Month</button>
         </div>
+        <div class="seg" role="group" aria-label="Colour by" id="colorBy">
+          <button type="button" data-v="edits" title="Colour packages by how much they were edited">Edits</button>
+          <button type="button" data-v="knowledge" title="Ring each package by who knows it">Knowledge</button>
+        </div>
+        <select class="who" id="who" aria-label="Dim packages by one author's share of them">
+          <option value="">All authors</option>
+        </select>
         <button type="button" class="toggle" id="storyMode" aria-pressed="true" title="Pause at key moments and show what changed">
           <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20V3H6.5A2.5 2.5 0 0 0 4 5.5z"></path><path d="M4 19.5V21h16"></path></svg>
           Story mode

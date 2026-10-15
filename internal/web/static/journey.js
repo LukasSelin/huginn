@@ -48,6 +48,8 @@
     follow: null, // the followed symbol: { id, sym, moments }
     switching: null, // the package a followed symbol is being chased into
     folDir: undefined, // the followed symbol's package at the last render
+    colorBy: 'edits', // or 'knowledge': ring the packages by who knows them
+    who: '', // the author whose share of each package dims it, if one
   };
 
   const fmtShort = (t) => new Date(t * 1000).toLocaleDateString(undefined, { month: 'short', day: 'numeric', timeZone: 'UTC' });
@@ -56,6 +58,52 @@
   const dirOf = (p) => (p.includes('/') ? p.slice(0, p.lastIndexOf('/')) : '.');
   const encDir = (d) => (d === '.' ? '' : d.split('/').map(encodeURIComponent).join('/'));
   const shortName = (n) => n.slice(n.lastIndexOf('.') + 1);
+
+  // Every author keeps one colour, whatever the step or the frame: a hue
+  // from their name. Departed authors are grey.
+  const GONE = '#5A5F68', OTHERS = '#2E343D', RING_IN = '#14181E';
+  const hues = new Map();
+  function authorColor(name) {
+    let c = hues.get(name);
+    if (!c) {
+      let x = 2166136261;
+      for (let i = 0; i < name.length; i++) x = Math.imul(x ^ name.charCodeAt(i), 16777619);
+      c = `hsl(${(x >>> 0) % 360} 62% 62%)`;
+      hues.set(name, c);
+    }
+    return c;
+  }
+  const pct = (x) => `${Math.round(100 * x)}%`;
+
+  // ring draws a package's knowers as a ring: one arc per knower by share,
+  // grey for departed ones, dark for everyone below the top few.
+  function ring(knowers) {
+    const stops = [];
+    let at = 0;
+    for (const [a, share, gone] of knowers) {
+      const c = gone ? GONE : authorColor(state.data.authors[a]);
+      stops.push(`${c} ${(100 * at).toFixed(2)}% ${(100 * (at + share)).toFixed(2)}%`);
+      at += share;
+    }
+    if (at < 0.999) stops.push(`${OTHERS} ${(100 * at).toFixed(2)}% 100%`);
+    return `radial-gradient(closest-side, ${RING_IN} 64%, transparent 66%), conic-gradient(${stops.join(', ')})`;
+  }
+
+  // shareOf is an author's share of a package in a frame, 0 when they are
+  // not among its top knowers.
+  function shareOf(s, a) {
+    if (!s || !s.knowers) return 0;
+    const k = s.knowers.find((x) => x[0] === a);
+    return k ? k[1] : 0;
+  }
+
+  function knowersText(s) {
+    if (!s || !s.knowers) return '';
+    const names = s.knowers.slice(0, 3).map(([a, share, gone]) => `${state.data.authors[a]}${gone ? ' (left)' : ''} ${pct(share)}`);
+    let t = ` · knows it: ${names.join(', ')} · bus factor ${s.bus}`;
+    if (s.orphaned > 0) t += ` · ${pct(s.orphaned)} orphaned`;
+    return t;
+  }
 
   // The revision index the playhead is at: the last one in the frame.
   const rev = () => state.data.frames[state.frame].total - 1;
@@ -93,6 +141,7 @@
       for (const dep of f.deps) maxRefs = Math.max(maxRefs, dep[2] || 0);
     }
     state.maxEdits = max;
+    buildAuthors();
     state.refs = d3.scaleSqrt().domain([0, maxRefs]).range([0.8, 3.2]).clamp(true);
     // Moments are per step; so is the card's.
     state.card = null;
@@ -204,6 +253,8 @@
     const focus = state.card && state.card.pkg != null ? state.pathIdx.get(state.card.pkg) : undefined;
     const fol = followNow();
     const folPkg = fol.dir != null ? state.pathIdx.get(fol.dir) : undefined;
+    const know = state.colorBy === 'knowledge';
+    const who = state.who ? state.data.authors.indexOf(state.who) : -1;
     packages.forEach((p, i) => {
       const el = state.bubbles[i];
       const s = now.get(i);
@@ -212,9 +263,14 @@
       const d = live > 0 ? Math.max(8, 2 * p.r * size * Math.sqrt(live / Math.max(1, p.peak))) : Math.max(8, p.r * size);
       state.diam[i] = d;
       el.style.width = el.style.height = `${d}px`;
-      el.style.backgroundColor = ACT[a];
-      el.className = `bubble a${a}${live > 0 ? '' : ' gone'}${a >= 3 ? ' busy' : ''}${d * state.zt.k < 44 ? ' small' : ''}${i === focus ? ' focus' : ''}${i === folPkg ? ' followed' : ''}`;
-      const label = live > 0 ? `${p.path} · ${plural(live, 'symbol')}${s && s.kinds ? ` · ${describeKinds(s.kinds)}` : ''}` : p.path;
+      const ringed = know && live > 0 && s.knowers;
+      el.style.backgroundColor = know ? RING_IN : ACT[a];
+      el.style.backgroundImage = ringed ? ring(s.knowers) : '';
+      // An author picked dims each package by their share of it.
+      el.style.opacity = live > 0 && state.who ? String(0.12 + 0.88 * Math.min(1, shareOf(s, who) / 0.5)) : '';
+      const cls = know ? `know${live > 0 ? '' : ' gone'}` : `a${a}${live > 0 ? '' : ' gone'}${a >= 3 ? ' busy' : ''}`;
+      el.className = `bubble ${cls}${d * state.zt.k < 44 ? ' small' : ''}${i === focus ? ' focus' : ''}${i === folPkg ? ' followed' : ''}`;
+      const label = live > 0 ? `${p.path} · ${plural(live, 'symbol')}${s && s.kinds ? ` · ${describeKinds(s.kinds)}` : ''}${knowersText(s)}` : p.path;
       el.title = label;
       el.setAttribute('aria-label', `${label}. Look inside`);
       el.tabIndex = live > 0 && !state.drill ? 0 : -1;
@@ -349,6 +405,7 @@
     count('cCommits', f.total);
     count('cLive', f.live);
     count('cPkgs', f.pkgs.filter((p) => p.live > 0).length);
+    renderKnowLegend(f);
     $('caption').textContent = caption(f);
     $('caption').hidden = !!state.card;
     const label = state.step === 'commit' ? `${f.sha.slice(0, 7)} · ` : '';
@@ -392,7 +449,8 @@
   // ---------- Key moments ----------
 
   const KIND_LABEL = { birth: 'New package', death: 'Package gone', rename: 'Rename', move: 'Move', signature: 'Signature change', quiet: 'After a pause', busiest: 'Busiest week',
-    release: 'Release', newcomer: 'New author', 'dep-added': 'New dependency', 'dep-removed': 'Dependency dropped', cycle: 'Import cycle', 'cycle-gone': 'Cycle broken' };
+    release: 'Release', newcomer: 'New author', 'dep-added': 'New dependency', 'dep-removed': 'Dependency dropped', cycle: 'Import cycle', 'cycle-gone': 'Cycle broken',
+    handoff: 'Handoff', orphaned: 'Orphaned' };
 
   function mergeMoments() {
     const all = [...state.data.moments, ...(state.follow ? state.follow.moments : [])];
@@ -1017,6 +1075,59 @@
     }
   }
 
+  // ---------- Knowledge ----------
+
+  // buildAuthors fills the author picker, keeping the author picked when
+  // they are still there.
+  function buildAuthors() {
+    const sel = $('who');
+    const authors = state.data.authors || [];
+    if (state.who && !authors.includes(state.who)) state.who = '';
+    sel.replaceChildren(h('option', { value: '' }, 'All authors'), ...authors.map((a) => h('option', { value: a }, a)));
+    sel.value = state.who;
+    sel.disabled = authors.length === 0;
+  }
+
+  // renderKnowLegend names who knows the code at the playhead: each
+  // author's share of the live packages, weighed by their symbols.
+  function renderKnowLegend(f) {
+    const know = state.colorBy === 'knowledge';
+    $('actLegend').hidden = know;
+    const el = $('knowLegend');
+    el.hidden = !know;
+    if (!know) return;
+    const by = new Map();
+    let total = 0;
+    for (const p of f.pkgs) {
+      if (!p.live || !p.knowers) continue;
+      total += p.live;
+      for (const [a, share, gone] of p.knowers) {
+        const k = by.get(a) || { share: 0, gone };
+        k.share += share * p.live;
+        k.gone = gone;
+        by.set(a, k);
+      }
+    }
+    const top = [...by.entries()].sort((x, y) => y[1].share - x[1].share || x[0] - y[0]).slice(0, 6);
+    el.replaceChildren(...top.map(([a, k]) => {
+      const name = state.data.authors[a];
+      return h('span', { class: `kn${k.gone ? ' gone' : ''}`, title: `${name}${k.gone ? ', no commits for six months' : ''}: ${pct(k.share / total)} of what is known` },
+        h('i', { style: `background:${k.gone ? GONE : authorColor(name)}` }), `${name} ${pct(k.share / total)}`);
+    }), h('span', { class: 'kn' }, h('i', { style: `background:${GONE}` }), 'departed'));
+  }
+
+  function setColorBy(v) {
+    state.colorBy = v === 'knowledge' ? 'knowledge' : 'edits';
+    for (const b of $('colorBy').querySelectorAll('button')) b.setAttribute('aria-pressed', String(b.dataset.v === state.colorBy));
+    if (state.data) render(false);
+  }
+
+  function setWho(name) {
+    state.who = name || '';
+    $('who').value = state.who;
+    if (state.data) render(false);
+  }
+
   // ---------- Playback ----------
 
   // render draws the current frame. animate plays the package's symbol
@@ -1123,6 +1234,8 @@
     if (state.drill) p.set('pkg', state.drill.dir);
     if (state.follow) p.set('sym', String(state.follow.id));
     if (!state.story) p.set('story', '0');
+    if (state.colorBy !== 'edits') p.set('color', state.colorBy);
+    if (state.who) p.set('who', state.who);
     const s = `#${p.toString().replaceAll('%2F', '/')}`;
     if (s !== location.hash) {
       try { history.replaceState(null, '', s); } catch { /* ignore */ }
@@ -1139,6 +1252,10 @@
       await setStep(step);
     }
     setStory(p.get('story') !== '0');
+    state.colorBy = p.get('color') === 'knowledge' ? 'knowledge' : 'edits';
+    for (const b of $('colorBy').querySelectorAll('button')) b.setAttribute('aria-pressed', String(b.dataset.v === state.colorBy));
+    state.who = state.data.authors.includes(p.get('who')) ? p.get('who') : '';
+    $('who').value = state.who;
     if (!state.data.frames.length) return;
     const f = Number.parseInt(p.get('f'), 10), ch = Number.parseInt(p.get('ch'), 10);
     if (Number.isInteger(f)) seek(f);
@@ -1169,6 +1286,8 @@
     $('speed').addEventListener('click', (e) => { const b = e.target.closest('button'); if (b) setSpeed(Number(b.dataset.v)); });
     $('step').addEventListener('click', (e) => { const b = e.target.closest('button'); if (b) setStep(b.dataset.v).catch(fail); });
     $('storyMode').addEventListener('click', () => setStory(!state.story));
+    $('colorBy').addEventListener('click', (e) => { const b = e.target.closest('button'); if (b) setColorBy(b.dataset.v); });
+    $('who').addEventListener('change', (e) => setWho(e.target.value));
     $('narrate').addEventListener('click', () => setNarrate(!state.narrate));
     $('back').addEventListener('click', undrill);
     setupZoom();

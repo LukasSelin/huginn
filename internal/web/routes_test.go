@@ -229,6 +229,15 @@ func TestAPI(t *testing.T) {
 		if !slices.Equal(lives, []int{3, 5, 4}) || j.Frames[2].SHA != hashes[2] || j.Frames[2].Total != 3 {
 			t.Errorf("frames = %+v", j.Frames)
 		}
+		// One author knows every live package wholly.
+		if len(j.Authors) != 1 {
+			t.Errorf("authors = %q", j.Authors)
+		}
+		for _, p := range j.Frames[2].Pkgs {
+			if p.Live > 0 && (len(p.Knowers) != 1 || p.Knowers[0] != [3]float64{0, 1, 0} || p.Bus != 1 || p.Orphaned != 0) {
+				t.Errorf("package %d knowers %v bus %d orphaned %v", p.P, p.Knowers, p.Bus, p.Orphaned)
+			}
+		}
 		if len(j.Chapters) != 3 || j.Chapters[0].FirstRev != 0 || j.Chapters[2].LastRev != 2 || j.Chapters[0].Title == "" {
 			t.Errorf("chapters = %+v", j.Chapters)
 		}

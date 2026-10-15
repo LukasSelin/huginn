@@ -86,6 +86,13 @@ type PackageState struct {
 	Package int // index into Journey.Packages
 	Live    int // symbols at the end of the frame
 	Edits   codemap.Kinds
+
+	// Who knows the package at the end of the frame, for one with live
+	// symbols: the top knowers, most first; the share held by departed
+	// authors; and the fewest authors who together hold more than half.
+	Knowers   []Knower
+	Orphaned  float64
+	BusFactor int
 }
 
 // Dep is a dependency between two packages: Refs live symbols in From refer
@@ -115,6 +122,7 @@ type Frame struct {
 type Journey struct {
 	Step     Step
 	Packages []Package // sorted by path
+	Authors  []string  // commit authors, sorted
 	Frames   []Frame
 }
 
@@ -133,7 +141,7 @@ type Options struct {
 // in order.
 func Build(h *lineage.History, m *codemap.Map, step Step, opts Options) *Journey {
 	r := newReplay(h, opts.Tests)
-	j := &Journey{Step: step}
+	j := &Journey{Step: step, Authors: r.know.authors}
 	if h.Revisions() == 0 {
 		return j
 	}
@@ -167,6 +175,7 @@ func Build(h *lineage.History, m *codemap.Map, step Step, opts Options) *Journey
 	}
 
 	var frames []Frame
+	var now time.Time
 	for _, w := range windows {
 		for i := w.from; i < w.to; i++ {
 			r.apply(i)
@@ -190,7 +199,10 @@ func Build(h *lineage.History, m *codemap.Map, step Step, opts Options) *Journey
 				edits[d.Path] = k
 			}
 		}
-		f.Packages = r.snapshot(edits)
+		// Departures are judged at the frame's end, or at the latest
+		// commit so far when author times run backwards.
+		now = later(now, w.end)
+		f.Packages = r.snapshot(edits, now)
 		f.Deps = r.deps()
 		frames = append(frames, f)
 	}
@@ -241,6 +253,8 @@ type replay struct {
 	peakRefs map[[2]string]int
 	dirty    [][2]string
 
+	know *knowledge
+
 	// names numbers directories for the frames until they are sorted.
 	names []string
 	num   map[string]int
@@ -255,7 +269,7 @@ func newReplay(h *lineage.History, tests bool) *replay {
 	r := &replay{
 		tests: tests, byRev: make([][]change, h.Revisions()), syms: map[lineage.ID]*ast.Symbol{},
 		live: map[string]int{}, peak: map[string]int{}, refs: map[[2]string]int{}, num: map[string]int{},
-		peakRefs: map[[2]string]int{},
+		peakRefs: map[[2]string]int{}, know: newKnowledge(h),
 	}
 	var all []*ast.Symbol
 	for sym := range h.All() {
@@ -281,14 +295,18 @@ func (r *replay) counts(s *ast.Symbol) bool {
 
 func (r *replay) apply(rev int) {
 	for _, c := range r.byRev[rev] {
-		if old := r.syms[c.id]; old != nil {
+		old := r.syms[c.id]
+		if old != nil {
 			r.add(old, -1)
 			delete(r.syms, c.id)
 		}
+		cur := false
 		if s := c.e.New; s != nil && r.counts(s) {
 			r.syms[c.id] = s
 			r.add(s, 1)
+			cur = true
 		}
+		r.know.apply(c.id, c.e, old, cur)
 	}
 	for _, k := range r.dirty {
 		r.peakRefs[k] = max(r.peakRefs[k], r.refs[k])
@@ -356,12 +374,16 @@ func (r *replay) id(dir string) int {
 }
 
 // snapshot returns the directories with live symbols or edits, numbered by
-// r.id.
-func (r *replay) snapshot(edits map[string]codemap.Kinds) []PackageState {
+// r.id, with who knows them at now.
+func (r *replay) snapshot(edits map[string]codemap.Kinds, now time.Time) []PackageState {
 	var out []PackageState
 	for dir, n := range r.live {
 		if n > 0 || edits[dir].Total() > 0 {
-			out = append(out, PackageState{Package: r.id(dir), Live: n, Edits: edits[dir]})
+			p := PackageState{Package: r.id(dir), Live: n, Edits: edits[dir]}
+			if n > 0 {
+				p.Knowers, p.Orphaned, p.BusFactor = r.know.state(dir, now)
+			}
+			out = append(out, p)
 		}
 	}
 	for dir, k := range edits {
@@ -459,4 +481,11 @@ func (r *resolver) targets(s *ast.Symbol) []string {
 	}
 	slices.Sort(out)
 	return out
+}
+
+func later(a, b time.Time) time.Time {
+	if b.After(a) {
+		return b
+	}
+	return a
 }
