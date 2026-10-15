@@ -2,6 +2,7 @@ package journey
 
 import (
 	"math"
+	"path"
 	"reflect"
 	"testing"
 	"time"
@@ -206,26 +207,27 @@ func TestEmpty(t *testing.T) {
 }
 
 // TestLayoutCoupling checks that distance follows coupling: core and api
-// share many references, cli imports api once, and misc is unrelated.
+// share many references, cli imports api once, and misc, in another
+// directory tree, is unrelated.
 func TestLayoutCoupling(t *testing.T) {
 	var changes []ast.Change
 	add := func(s *ast.Symbol) { changes = append(changes, ast.Change{Flags: ast.Added, New: s}) }
 	for _, n := range []string{"A", "B", "C", "D"} {
-		add(fn("core/core.go", n))
-		add(fn("misc/misc.go", n))
+		add(fn("app/core/core.go", n))
+		add(fn("tools/misc/misc.go", n))
 	}
 	for _, n := range []string{"E", "F", "G", "H", "I", "J"} {
-		add(fn("api/api.go", n, "example.com/m/core"))
+		add(fn("app/api/api.go", n, "example.com/m/app/core"))
 	}
-	add(fn("cli/cli.go", "Main", "example.com/m/api"))
-	add(fn("cli/cli.go", "Run"))
+	add(fn("app/cli/cli.go", "Main", "example.com/m/app/api"))
+	add(fn("app/cli/cli.go", "Run"))
 	h := lineage.New()
 	h.Apply(lineage.Revision{SHA: "a", Time: day("2026-03-02"), Changes: changes})
 	j := Build(h, codemap.Build(h), Week, Options{})
 
 	at := map[string]Package{}
 	for _, p := range j.Packages {
-		at[p.Path] = p
+		at[path.Base(p.Path)] = p
 	}
 	gap := func(a, b string) float64 {
 		p, q := at[a], at[b]

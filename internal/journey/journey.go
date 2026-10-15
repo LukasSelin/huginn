@@ -340,8 +340,7 @@ func (r *replay) coupling(idx map[string]int) []spring {
 	for k, p := range pairs {
 		out = append(out, spring{k[0], k[1], float64(p.dirs) + math.Log1p(float64(p.refs))})
 	}
-	// Map order is random; the layout must not depend on it.
-	slices.SortFunc(out, func(p, q spring) int { return cmp.Or(cmp.Compare(p.a, q.a), cmp.Compare(p.b, q.b)) })
+	sortSprings(out)
 	return out
 }
 

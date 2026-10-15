@@ -201,9 +201,24 @@
       el.tabIndex = live > 0 && !state.drill ? 0 : -1;
     });
 
-    // Dependencies; the ones the card's moment is about are lit up.
+    // Dependencies; the ones the card's moment is about are lit up. Each
+    // is drawn by its references relative to all of both ends' references,
+    // so the many links into a package everything uses, like a logger,
+    // fade and the distinctive ones stand out.
     const svg = $('deps');
     const want = new Set(), hot = new Set();
+    const out = new Map(), into = new Map();
+    for (const [a, b, n] of f.deps) {
+      out.set(a, (out.get(a) || 0) + n);
+      into.set(b, (into.get(b) || 0) + n);
+    }
+    const rel = f.deps.map(([a, b, n]) => n / Math.sqrt(out.get(a) * into.get(b)));
+    const maxRel = Math.max(1e-9, ...rel);
+    const strength = new Map();
+    f.deps.forEach(([a, b], k) => {
+      const key = `${Math.min(a, b)}-${Math.max(a, b)}`;
+      strength.set(key, Math.max(strength.get(key) || 0, Math.sqrt(rel[k] / maxRel)));
+    });
     for (const [a, b] of f.deps) {
       const key = `${Math.min(a, b)}-${Math.max(a, b)}`;
       want.add(key);
@@ -217,6 +232,11 @@
       }
     }
     for (const [key, line] of state.lines) {
+      const t = strength.get(key);
+      if (t !== undefined) {
+        line.style.setProperty('--o', (0.06 + 0.6 * t).toFixed(3));
+        line.style.setProperty('--w', (0.6 + 1.4 * t).toFixed(2));
+      }
       line.classList.toggle('off', !want.has(key));
       line.classList.toggle('hot', hot.has(key));
     }
