@@ -1,6 +1,7 @@
 package story
 
 import (
+	"cmp"
 	"context"
 	"fmt"
 	"reflect"
@@ -19,10 +20,14 @@ import (
 
 // synth writes a synthetic history commit by commit.
 type synth struct {
-	h    *lineage.History
-	t    time.Time
-	n    int
-	live map[string]*ast.Symbol // by dir/name
+	h        *lineage.History
+	t        time.Time
+	n        int
+	live     map[string]*ast.Symbol // by dir/name
+	releases []Release
+
+	// The next commit's author ("ann" if empty) and message.
+	author, subject, detail string
 }
 
 func newSynth() *synth {
@@ -37,7 +42,9 @@ func fn(dir, name string, exported bool) *ast.Symbol {
 func (s *synth) commit(gap time.Duration, changes ...ast.Change) {
 	s.t = s.t.Add(gap)
 	s.n++
-	s.h.Apply(lineage.Revision{SHA: fmt.Sprintf("c%03d", s.n), Time: s.t, Author: "ann", Changes: changes})
+	s.h.Apply(lineage.Revision{SHA: fmt.Sprintf("c%03d", s.n), Time: s.t, Author: cmp.Or(s.author, "ann"),
+		Subject: s.subject, Detail: s.detail, Changes: changes})
+	s.author, s.subject, s.detail = "", "", ""
 }
 
 func (s *synth) add(dir, name string) ast.Change {
@@ -90,7 +97,7 @@ func (s *synth) story(t *testing.T) *Story {
 	t.Helper()
 	m := codemap.Build(s.h)
 	j := journey.Build(s.h, m, journey.Commit, journey.Options{})
-	st, err := Build(context.Background(), s.h, j, Templates{})
+	st, err := Build(context.Background(), s.h, j, s.releases, Templates{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -210,14 +217,39 @@ func TestThreeActs(t *testing.T) {
 }
 
 func TestNarrativeStatesOnlyFacts(t *testing.T) {
+	statesOnlyFacts(t, release().story(t))
 	st := threeActs().story(t)
+	statesOnlyFacts(t, st)
+	got := st.Chapters[1].Text
+	want := "Between Jan 19, 2025 and Jan 30, 2025, 12 commits landed. Most of the 17 semantic edits (100%) were in api. " +
+		"4 symbols were added and 0 removed, leaving 10 live symbols in 2 packages. New package: api. 3 symbols renamed, including Del → Remove."
+	if got != want {
+		t.Errorf("chapter 2:\n got %s\nwant %s", got, want)
+	}
+}
+
+func statesOnlyFacts(t *testing.T, st *Story) {
+	t.Helper()
 	for _, c := range st.Chapters {
 		// Every number in the text is one of the chapter's facts, or a
-		// percentage of edits, or part of a date or a moment.
+		// percentage of edits, or part of a date, a moment or a release.
 		allowed := map[int]bool{}
 		for _, n := range []int{c.Commits, c.Added, c.Removed, c.Live, c.LivePackages, c.Edits,
-			percent(c.HottestEdits, c.Edits), percent(c.RunnerEdits, c.Edits)} {
+			percent(c.HottestEdits, c.Edits), percent(c.RunnerEdits, c.Edits),
+			c.Authors, c.Themes.Typed, c.Themes.PullRequests, c.Themes.LeadScopeCount} {
 			allowed[n] = true
+		}
+		for _, th := range slices.Concat(c.Themes.Types, c.Themes.Scopes, c.Themes.Terms) {
+			allowed[th.Count] = true
+		}
+		for _, p := range c.Contributors {
+			allowed[p.Edits] = true
+		}
+		for _, r := range c.Releases {
+			for _, d := range regexp.MustCompile(`\d+`).FindAllString(r, -1) {
+				n, _ := strconv.Atoi(d)
+				allowed[n] = true
+			}
 		}
 		for _, tm := range []time.Time{c.From, c.To} {
 			allowed[tm.Day()], allowed[tm.Year()] = true, true
@@ -244,12 +276,6 @@ func TestNarrativeStatesOnlyFacts(t *testing.T) {
 				t.Errorf("chapter %d names %q: %s", c.Number, w, c.Text)
 			}
 		}
-	}
-	got := st.Chapters[1].Text
-	want := "Between Jan 19, 2025 and Jan 30, 2025, 12 commits landed. Most of the 17 semantic edits (100%) were in api. " +
-		"4 symbols were added and 0 removed, leaving 10 live symbols in 2 packages. New package: api. 3 symbols renamed, including Del → Remove."
-	if got != want {
-		t.Errorf("chapter 2:\n got %s\nwant %s", got, want)
 	}
 }
 
@@ -349,7 +375,7 @@ func (e echo) Narrate(ctx context.Context, f Facts) (Narration, error) {
 func TestNarratorIsPluggable(t *testing.T) {
 	s := threeActs()
 	j := journey.Build(s.h, codemap.Build(s.h), journey.Commit, journey.Options{})
-	st, err := Build(context.Background(), s.h, j, echo{Templates{}})
+	st, err := Build(context.Background(), s.h, j, nil, echo{Templates{}})
 	if err != nil {
 		t.Fatal(err)
 	}

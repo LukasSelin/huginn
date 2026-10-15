@@ -13,7 +13,7 @@ import (
 // cacheVersion identifies the cache format. Bump it whenever the encoding
 // changes, or the ast or git packages start producing different changes for
 // the same commit, so that stale caches are discarded rather than trusted.
-const cacheVersion = 2
+const cacheVersion = 3
 
 // Cache keeps walked revisions on disk, keyed by commit hash, so that a later
 // Build only walks the commits it has not seen. A revision depends only on
@@ -51,6 +51,8 @@ type cachedRevision struct {
 	SHA     string
 	Time    time.Time
 	Author  string
+	Subject string
+	Detail  string
 	Changes []cachedChange
 }
 
@@ -94,7 +96,7 @@ func (c *Cache) load(includeGenerated bool) map[string]Revision {
 		return &b.Symbols[i-1], true
 	}
 	for _, cr := range b.Revisions {
-		r := Revision{SHA: cr.SHA, Time: cr.Time, Author: cr.Author}
+		r := Revision{SHA: cr.SHA, Time: cr.Time, Author: cr.Author, Subject: cr.Subject, Detail: cr.Detail}
 		for _, cc := range cr.Changes {
 			old, ok1 := sym(cc.Old)
 			new, ok2 := sym(cc.New)
@@ -125,7 +127,7 @@ func (c *Cache) save(includeGenerated bool, revs map[string]Revision) (err error
 		return len(b.Symbols)
 	}
 	for _, r := range revs {
-		cr := cachedRevision{SHA: r.SHA, Time: r.Time, Author: r.Author}
+		cr := cachedRevision{SHA: r.SHA, Time: r.Time, Author: r.Author, Subject: r.Subject, Detail: r.Detail}
 		for _, ch := range r.Changes {
 			cr.Changes = append(cr.Changes, cachedChange{Flags: ch.Flags, Old: ref(ch.Old), New: ref(ch.New), Similarity: ch.Similarity})
 		}

@@ -26,6 +26,8 @@ type Revision struct {
 	SHA     string
 	Time    time.Time
 	Author  string
+	Subject string // the first line of the commit message
+	Detail  string // the next non-empty line: for a merged pull request, its title
 	Changes []ast.Change
 }
 
@@ -105,6 +107,8 @@ type History struct {
 	revisions int
 	shas      []string       // applied revisions, oldest first
 	times     []time.Time    // of shas
+	authors   []string       // of shas
+	subjects  [][2]string    // of shas: subject and detail
 	pos       map[string]int // index into shas
 	first     time.Time
 	last      time.Time
@@ -127,6 +131,8 @@ func (h *History) Apply(r Revision) {
 	h.pos[r.SHA] = len(h.shas)
 	h.shas = append(h.shas, r.SHA)
 	h.times = append(h.times, r.Time)
+	h.authors = append(h.authors, r.Author)
+	h.subjects = append(h.subjects, [2]string{r.Subject, r.Detail})
 	if h.first.IsZero() {
 		h.first = r.Time
 	}
@@ -235,6 +241,14 @@ func (h *History) Position(sha string) (i int, ok bool) {
 // RevisionAt returns the hash and time of the i-th applied revision, oldest
 // first, for 0 <= i < Revisions().
 func (h *History) RevisionAt(i int) (sha string, t time.Time) { return h.shas[i], h.times[i] }
+
+// AuthorAt returns the author of the i-th applied revision.
+func (h *History) AuthorAt(i int) string { return h.authors[i] }
+
+// MessageAt returns the subject and detail of the i-th applied revision.
+func (h *History) MessageAt(i int) (subject, detail string) {
+	return h.subjects[i][0], h.subjects[i][1]
+}
 
 // Span returns the times of the first and last applied revisions.
 func (h *History) Span() (first, last time.Time) { return h.first, h.last }

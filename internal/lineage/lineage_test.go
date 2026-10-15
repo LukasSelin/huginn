@@ -1,6 +1,7 @@
 package lineage
 
 import (
+	"strings"
 	"testing"
 
 	"huginn/internal/ast"
@@ -192,5 +193,19 @@ func TestUntouchedFilesAreLeftAlone(t *testing.T) {
 	h.commit(map[string]string{"a.go": "package p\n\nfunc A() { x() }\n"})
 	if h.id("b.go", "B") != b {
 		t.Fatal("untouched symbol lost its id")
+	}
+}
+
+func TestSubjects(t *testing.T) {
+	for _, c := range []struct{ msg, subject, detail string }{
+		{"Fix the parser", "Fix the parser", ""},
+		{"Merge pull request #12 from a/b\n\nAdd the journey view\n\nLong body.", "Merge pull request #12 from a/b", "Add the journey view"},
+		{"  padded  \n  next  ", "padded", "next"},
+		{strings.Repeat("é", 150), strings.Repeat("é", 100), ""},
+	} {
+		s, d := Subjects(c.msg)
+		if s != c.subject || d != c.detail {
+			t.Errorf("Subjects(%q) = %q, %q; want %q, %q", c.msg, s, d, c.subject, c.detail)
+		}
 	}
 }

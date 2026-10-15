@@ -268,7 +268,7 @@
     }));
 
     const cs = state.data.chapters;
-    $('bands').replaceChildren(...cs.map((c, i) => {
+    const bands = cs.map((c, i) => {
       const from = i === 0 ? ax.lo : c.from;
       const to = i + 1 < cs.length ? cs[i + 1].from : ax.hi;
       const b = h('button', {
@@ -278,7 +278,20 @@
         onclick: () => seekRev(c.firstRev),
       }, `${i + 1} · ${c.title}`);
       return b;
-    }));
+    });
+    $('bands').replaceChildren(...bands, ...releaseMarkers(pct));
+  }
+
+  // Releases sit on the chapter track as ticks; a chapter often ends with one.
+  function releaseMarkers(pct) {
+    return (state.data.releases || []).map((m) => {
+      const label = `${m.tag} · ${fmtBig(m.t)}`;
+      return h('button', {
+        type: 'button', class: `rel${m.weight >= 3.5 ? ' major' : ''}`, title: m.text, 'aria-label': `Release ${label}`,
+        style: `left:${pct(m.t)}`,
+        onclick: () => seekRev(m.rev),
+      });
+    });
   }
 
   function firstRevAfter(t) {
@@ -296,6 +309,8 @@
       b.classList.toggle('future', i > ci);
       b.setAttribute('aria-current', i === ci ? 'step' : 'false');
     });
+    const r = rev();
+    $('bands').querySelectorAll('.rel').forEach((b, i) => b.classList.toggle('past', state.data.releases[i].rev <= r));
     $('periods').querySelectorAll('.period').forEach((b) => {
       const p = ax.periods[b.dataset.i];
       const cur = t >= p.start && t < p.end;
@@ -334,7 +349,12 @@
       stat(c.commits.toLocaleString(), 'commits'),
       h('div', { class: 'stat' }, h('span', { class: 'sv' }, h('span', { class: 'pos' }, `+${c.added}`), ' ', h('span', { class: 'neg' }, `−${c.removed}`)), h('span', { class: 'sl' }, 'symbols')),
       h('div', { class: 'stat', title: c.hottest || '' }, h('span', { class: 'sv mono' }, c.hottest ? base(c.hottest) : '—'), h('span', { class: 'sl' }, 'hottest package')),
+      stat((c.authors ?? 0).toLocaleString(), c.authors === 1 ? 'author' : 'authors'),
+      stat((c.themes?.pullRequests ?? 0).toLocaleString(), 'merged pull requests'),
+      h('div', { class: 'stat', title: (c.releases || []).join(', ') }, h('span', { class: 'sv mono' }, c.releases?.length ? c.releases[c.releases.length - 1] : '—'),
+        h('span', { class: 'sl' }, c.releases?.length > 1 ? `last of ${c.releases.length} releases` : 'release')),
     );
+    renderThemes(c);
 
     // The last four moments up to the playhead.
     const f = state.data.frames[state.frame];
@@ -350,6 +370,19 @@
     });
 
     if (state.narrate && state.spoken !== ci) speak(ci);
+  }
+
+  // What the chapter's commit messages talk about, as counted chips.
+  function renderThemes(c) {
+    const th = c.themes || {};
+    const chip = (kind, t) => h('li', { class: `chip ${kind}`, title: `${plural(t.count, 'commit')}` }, t.name, h('span', { class: 'cc' }, String(t.count)));
+    const group = (label, kind, ts) => (ts && ts.length ? [h('li', { class: 'tl eyebrow' }, label), ...ts.map((t) => chip(kind, t))] : []);
+    const items = [
+      ...group('Types', 'type', th.types),
+      ...group('Scopes', 'scope', th.scopes),
+      ...group('Words', 'term', th.terms),
+    ];
+    $('chapThemes').replaceChildren(...(items.length ? [h('ul', { 'aria-label': 'Commit message themes' }, ...items)] : []));
   }
 
   // ---------- Narration ----------
