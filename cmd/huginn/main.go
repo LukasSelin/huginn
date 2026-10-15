@@ -10,7 +10,11 @@
 // indexes the history and serves the symbol timeline and the semantic diff
 // of each commit in a browser.
 //
-// Both keep the walked history in .git/huginn, so that the next run only
+//	huginn story [-C dir] [-branch rev] [-tests] [-no-cache] [-moments]
+//
+// prints the history told in chapters, as the journey page tells it.
+//
+// They keep the walked history in .git/huginn, so that the next run only
 // walks commits it has not seen; -no-cache walks everything afresh.
 //
 //	huginn semdiff [-C dir] [-include-generated] [-callers n] rev
@@ -39,6 +43,7 @@ import (
 const usage = `usage:
   huginn symbols [-C dir] [-branch rev] [-max-count n] [-tests] [-no-cache] name
   huginn serve [-C dir] [-branch rev] [-tests] [-no-cache] [-addr host:port]
+  huginn story [-C dir] [-branch rev] [-tests] [-no-cache] [-moments]
   huginn semdiff [-C dir] [-include-generated] [-callers n] rev`
 
 func main() {
@@ -46,6 +51,7 @@ func main() {
 		"symbols": symbols,
 		"serve":   serve,
 		"semdiff": semanticDiff,
+		"story":   tell,
 	}
 	if len(os.Args) < 2 || cmds[os.Args[1]] == nil {
 		fmt.Fprintln(os.Stderr, usage)
