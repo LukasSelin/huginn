@@ -50,6 +50,9 @@
     folDir: undefined, // the followed symbol's package at the last render
     colorBy: 'edits', // or 'knowledge': ring the packages by who knows them
     who: '', // the author whose share of each package dims it, if one
+    edges: null, // the stage's dependencies by key, at the current frame
+    hover: null, // the package under the pointer
+    focused: null, // the package with keyboard focus
   };
 
   const fmtShort = (t) => new Date(t * 1000).toLocaleDateString(undefined, { month: 'short', day: 'numeric', timeZone: 'UTC' });
@@ -189,14 +192,20 @@
     const { packages } = state.data;
     const wrap = $('bubbles');
     wrap.replaceChildren();
-    state.bubbles = packages.map((p) => {
+    state.hover = state.focused = null;
+    state.bubbles = packages.map((p, i) => {
       const el = h('button', { type: 'button', class: 'bubble gone', tabindex: '-1', onclick: () => drill(p.path).catch(fail) },
         h('span', { class: 'bname' }, base(p.path)));
+      el.addEventListener('pointerenter', (e) => { if (e.pointerType !== 'touch') setLit('hover', i); });
+      el.addEventListener('pointerleave', () => setLit('hover', null));
+      el.addEventListener('focus', () => setLit('focused', i));
+      el.addEventListener('blur', () => setLit('focused', null));
       wrap.append(el);
       return el;
     });
     state.diam = [];
     $('deps').replaceChildren();
+    buildMarkers();
     place();
   }
 
@@ -216,7 +225,7 @@
       el.style.top = `${y0 + p.y * size}px`;
     });
     $('deps').setAttribute('viewBox', `0 0 ${W} ${H}`);
-    d3.select('#deps').selectAll('path').attr('d', (e) => edgePath(e.a, e.b));
+    d3.select('#deps').selectAll(':scope > path').attr('d', (e) => edgePath(e.a, e.b));
     placeDisc({ x: x0 + size / 2, y: y0 + size / 2, r: 0.48 * size });
     state.zoom.extent([[0, 0], [W, H]]).translateExtent([[0, 0], [W, H]]);
     if (state.data.frames.length) render(false);
@@ -234,9 +243,14 @@
     let nx = (ay - by) / len, ny = (bx - ax) / len;
     if ((mx - x0 - size / 2) * nx + (my - y0 - size / 2) * ny < 0) { nx = -nx; ny = -ny; }
     const bend = 0.18 * len;
+    const cx = mx + nx * bend, cy = my + ny * bend;
+    // Drawn as two halves meeting mid-curve, where the arrow marking the
+    // direction of a lit dependency goes; its ends are under the bubbles.
+    const hx = (ax + 2 * cx + bx) / 4, hy = (ay + 2 * cy + by) / 4;
     const p = d3.path();
     p.moveTo(ax, ay);
-    p.quadraticCurveTo(mx + nx * bend, my + ny * bend, bx, by);
+    p.quadraticCurveTo((ax + cx) / 2, (ay + cy) / 2, hx, hy);
+    p.quadraticCurveTo((cx + bx) / 2, (cy + by) / 2, bx, by);
     return p.toString();
   }
 
@@ -283,12 +297,14 @@
     for (const [a, b, refs] of f.deps) {
       const key = `${Math.min(a, b)}-${Math.max(a, b)}`;
       let e = edges.get(key);
-      if (!e) edges.set(key, e = { key, a: Math.min(a, b), b: Math.max(a, b), refs: 0, hot: false });
+      if (!e) edges.set(key, e = { key, a: Math.min(a, b), b: Math.max(a, b), refs: 0, ab: 0, ba: 0, hot: false });
       e.refs += refs || 0;
+      if (a < b) e.ab += refs || 0;
+      else e.ba += refs || 0;
       if (focus !== undefined && (state.card.kind === 'signature' ? b === focus : a === focus || b === focus)) e.hot = true;
     }
     const ms = tweenMs();
-    d3.select('#deps').selectAll('path').data([...edges.values()], (e) => e.key).join(
+    d3.select('#deps').selectAll(':scope > path').data([...edges.values()], (e) => e.key).join(
       (enter) => enter.append('path')
         .attr('d', (e) => edgePath(e.a, e.b))
         .attr('pathLength', 1).attr('stroke-dasharray', '1 1').attr('stroke-dashoffset', 1)
@@ -298,6 +314,91 @@
         .call((ex) => ex.transition().duration(ms).style('opacity', 0).remove()))
       .classed('hot', (e) => e.hot)
       .style('stroke-width', (e) => `${e.hot ? Math.max(2.2, state.refs(e.refs)) : state.refs(e.refs)}px`);
+    state.edges = edges;
+    renderLit();
+  }
+
+  // ---------- A package's dependencies ----------
+
+  // The package hovered, or else the one focused, has its dependencies lit:
+  // the packages it uses and the ones using it stay, marked with the
+  // references across, and the rest of the map fades.
+  const litPkg = () => (state.drill ? null : state.hover ?? state.focused);
+
+  function setLit(key, pi) {
+    if (state[key] === pi) return;
+    state[key] = pi;
+    renderLit();
+    if (state.data && state.data.frames.length) $('caption').textContent = caption(state.data.frames[state.frame]);
+  }
+
+  // litDeps returns, for each package the lit one shares a dependency with,
+  // the references from it to the lit one (in) and from the lit one to it
+  // (out).
+  function litDeps(lit) {
+    const near = new Map();
+    for (const e of (state.edges || new Map()).values()) {
+      if (e.a !== lit && e.b !== lit) continue;
+      const other = e.a === lit ? e.b : e.a;
+      near.set(other, e.a === lit ? { out: e.ab, in: e.ba } : { out: e.ba, in: e.ab });
+    }
+    return near;
+  }
+
+  function renderLit() {
+    const lit = litPkg();
+    const near = lit == null ? new Map() : litDeps(lit);
+    $('stage').classList.toggle('lit', lit != null);
+    state.bubbles.forEach((el, i) => {
+      const n = near.get(i);
+      el.classList.toggle('lit', i === lit);
+      el.classList.toggle('near', !!n);
+      let badge = el.querySelector('.nref');
+      if (!n) {
+        if (badge) badge.remove();
+        return;
+      }
+      if (!badge) el.append(badge = h('span', { class: 'nref', 'aria-hidden': 'true' }));
+      badge.className = `nref ${n.out && n.in ? 'both' : n.out ? 'out' : 'in'}`;
+      badge.textContent = [n.out ? `→ ${n.out}` : '', n.in ? `← ${n.in}` : ''].filter(Boolean).join('  ');
+    });
+    // An arrow mid-curve points the way the references go; edges run from
+    // the lower package index to the higher.
+    d3.select('#deps').selectAll(':scope > path')
+      .each(function (e) {
+        const on = lit != null && (e.a === lit || e.b === lit);
+        const out = on ? (e.a === lit ? e.ab : e.ba) : 0, inn = on ? (e.a === lit ? e.ba : e.ab) : 0;
+        const dir = !on ? '' : out && inn ? 'both' : out ? 'out' : 'in';
+        // Which way along the path the arrow points: towards b is fwd.
+        const fwd = (e.a === lit) === (dir === 'out');
+        const sel = d3.select(this).classed('on', on).classed('out', dir === 'out').classed('in', dir === 'in').classed('both', dir === 'both');
+        sel.attr('marker-mid', !on ? null : dir === 'both' ? 'url(#arrow-both)' : `url(#arrow-${dir}-${fwd ? 'fwd' : 'back'})`);
+      });
+  }
+
+  // litCaption sums up the lit package's dependencies.
+  function litCaption(lit) {
+    let uses = 0, usesRefs = 0, by = 0, byRefs = 0;
+    for (const n of litDeps(lit).values()) {
+      if (n.out) { uses++; usesRefs += n.out; }
+      if (n.in) { by++; byRefs += n.in; }
+    }
+    const part = (n, refs) => (n ? `${plural(n, 'package')} (${plural(refs, 'reference')})` : 'none');
+    return `${state.data.packages[lit].path} · uses → ${part(uses, usesRefs)} · used by ← ${part(by, byRefs)}`;
+  }
+
+  // The arrowheads, one per colour and direction; they keep their size on
+  // screen as the map zooms.
+  function buildMarkers() {
+    const defs = d3.select('#deps').append('defs');
+    const marks = [['out-fwd', 'M2,1 L9,5 L2,9 z'], ['out-back', 'M8,1 L1,5 L8,9 z'], ['in-fwd', 'M2,1 L9,5 L2,9 z'], ['in-back', 'M8,1 L1,5 L8,9 z'], ['both', 'M0,5 L4,1 L4,9 z M10,5 L6,1 L6,9 z']];
+    for (const [id, d] of marks) {
+      defs.append('marker').attr('id', `arrow-${id}`).attr('class', `arrow ${id.split('-')[0]}`)
+        .attr('viewBox', '0 0 10 10').attr('refX', 5).attr('refY', 5)
+        .attr('markerUnits', 'userSpaceOnUse').attr('orient', 'auto')
+        .attr('markerWidth', 14 / state.zt.k).attr('markerHeight', 14 / state.zt.k)
+        .append('path').attr('d', d);
+    }
   }
 
   // ---------- Zoom ----------
@@ -333,6 +434,7 @@
     const w = $('world');
     w.style.transform = `translate(${t.x}px, ${t.y}px) scale(${t.k})`;
     w.style.setProperty('--k', String(t.k));
+    d3.selectAll('#deps marker').attr('markerWidth', 14 / t.k).attr('markerHeight', 14 / t.k);
     $('zoomIn').disabled = t.k >= MAX_ZOOM - 1e-6;
     $('zoomOut').disabled = t.k <= 1 + 1e-6;
     $('zoomReset').disabled = t.k <= 1 + 1e-6 && Math.abs(t.x) < 0.5 && Math.abs(t.y) < 0.5;
@@ -431,6 +533,8 @@
 
   // The frame's key moment, or else what happened in it.
   function caption(f) {
+    const lit = litPkg();
+    if (lit != null) return litCaption(lit);
     let best = null;
     for (const m of state.moments) {
       if (inFrame(m, state.frame) && (!best || m.weight > best.weight)) best = m;
