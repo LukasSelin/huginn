@@ -196,7 +196,11 @@ func (r *Repo) walk(ctx context.Context, opts Options, fn func(*Commit, []fileSi
 	}
 	defer func() {
 		if err != nil {
-			cancel() // stop git log early; its exit status no longer matters
+			// Stop git log early; its exit status no longer matters. Closing
+			// the pipe also stops a child git that outlives the killed
+			// process, as with the git.exe launcher on Windows.
+			cancel()
+			stdout.Close()
 			cmd.Wait()
 			return
 		}

@@ -310,13 +310,6 @@ function renderScale() {
 
 // ---- timeline ----
 
-const NS = 'http://www.w3.org/2000/svg';
-function svg(tag, attrs) {
-  const el = document.createElementNS(NS, tag);
-  for (const [k, v] of Object.entries(attrs)) el.setAttribute(k, v);
-  return el;
-}
-
 // lanes picks the busiest packages under the current zoom, plus the
 // selected one.
 function lanes() {
