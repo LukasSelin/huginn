@@ -21,6 +21,7 @@ import (
 	"huginn/internal/ast"
 	"huginn/internal/codemap"
 	"huginn/internal/git"
+	"huginn/internal/health"
 	"huginn/internal/lineage"
 )
 
@@ -42,11 +43,12 @@ type Server struct {
 
 // index is the read-only view the API serves once indexing is done.
 type index struct {
-	h     *lineage.History
-	dirs  map[string][]*lineage.Symbol // by the directory of the latest declaration
-	order []string                     // directories, sorted
-	cmap  *codemap.Map
-	took  time.Duration
+	h      *lineage.History
+	dirs   map[string][]*lineage.Symbol // by the directory of the latest declaration
+	order  []string                     // directories, sorted
+	cmap   *codemap.Map
+	health *health.Report
+	took   time.Duration
 
 	journeys journeys // built on first request
 }
@@ -69,7 +71,7 @@ func (s *Server) Index(ctx context.Context) error {
 		s.err.Store(&err)
 		return err
 	}
-	ix := &index{h: h, dirs: map[string][]*lineage.Symbol{}, cmap: codemap.Build(h)}
+	ix := &index{h: h, dirs: map[string][]*lineage.Symbol{}, cmap: codemap.Build(h), health: health.Build(h, health.Options{})}
 	for sym := range h.All() {
 		d := path.Dir(sym.Latest().Path)
 		ix.dirs[d] = append(ix.dirs[d], sym)
@@ -89,6 +91,7 @@ func (s *Server) Handler() http.Handler {
 	ui, _ := fs.Sub(static, "static")
 	mux.Handle("GET /", http.FileServerFS(ui))
 	mux.HandleFunc("GET /symbols", func(w http.ResponseWriter, r *http.Request) { http.ServeFileFS(w, r, ui, "symbols.html") })
+	mux.HandleFunc("GET /health", func(w http.ResponseWriter, r *http.Request) { http.ServeFileFS(w, r, ui, "health.html") })
 	mux.HandleFunc("GET /journey", func(w http.ResponseWriter, r *http.Request) { http.ServeFileFS(w, r, ui, "journey.html") })
 	mux.HandleFunc("GET /api/status", s.status)
 	mux.HandleFunc("GET /api/dirs", s.ready(s.dirList))
@@ -96,6 +99,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /api/symbol/{id}", s.ready(s.symbol))
 	mux.HandleFunc("GET /api/map", s.ready(s.codeMap))
 	mux.HandleFunc("GET /api/map/{dir...}", s.ready(s.mapDir))
+	mux.HandleFunc("GET /api/health", s.ready(s.health))
 	mux.HandleFunc("GET /api/journey", s.ready(s.journeyAPI))
 	mux.HandleFunc("GET /api/commit/{rev...}", s.commit)
 	return mux
