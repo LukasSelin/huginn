@@ -49,6 +49,8 @@ const (
 	DepRemoved                       // a package stopped depending on another
 	CycleIn                          // the first dependency cycle appeared
 	CycleOut                         // the last dependency cycle went
+	Handoff                          // a package's top knower changed
+	Orphaned                         // most of what is known of a package is held by departed authors
 )
 
 func (k MomentKind) String() string {
@@ -79,6 +81,10 @@ func (k MomentKind) String() string {
 		return "cycle"
 	case CycleOut:
 		return "cycle-gone"
+	case Handoff:
+		return "handoff"
+	case Orphaned:
+		return "orphaned"
 	}
 	return "unknown"
 }
@@ -172,6 +178,7 @@ func Build(ctx context.Context, h *lineage.History, j *journey.Journey, rels []R
 	all = append(all, st.Releases...)
 	all = append(all, newcomerMoments(j, first)...)
 	all = append(all, depMoments(j, pkgs, life)...)
+	all = append(all, knowledgeMoments(j, pkgs)...)
 	slices.SortStableFunc(all, byRev)
 
 	us := units(j, life)
@@ -208,6 +215,7 @@ func Build(ctx context.Context, h *lineage.History, j *journey.Journey, rels []R
 var limits = map[MomentKind]int{
 	Rename: 3, Move: 3, Signature: 3, Quiet: 3,
 	Tagged: 4, Newcomer: 3, DepAdded: 3, DepRemoved: 3,
+	Handoff: 3, Orphaned: 3,
 }
 
 // keyMoments picks a chapter's key moments from all moments, by time: every

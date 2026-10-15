@@ -3,6 +3,7 @@ package web
 import (
 	"cmp"
 	"context"
+	"math"
 	"net/http"
 	"path"
 	"slices"
@@ -51,6 +52,7 @@ func (s *Server) story(ix *index) (*story.Story, error) {
 type journeyJSON struct {
 	Step     string        `json:"step"`
 	Packages []packageJSON `json:"packages"`
+	Authors  []string      `json:"authors"` // sorted; knowers index into it
 	Frames   []frameJSON   `json:"frames"`
 	Chapters []chapterJSON `json:"chapters"`
 	Moments  []momentJSON  `json:"moments"`  // every chapter's key moments, by time
@@ -81,6 +83,13 @@ type pkgJSON struct {
 	P     int            `json:"p"` // index into packages
 	Live  int            `json:"live"`
 	Kinds map[string]int `json:"kinds,omitempty"` // semantic edits in the frame
+
+	// Who knows the package at the end of the frame: [author, share,
+	// departed (1) or not (0)], most first; the share held by departed
+	// authors; and the fewest authors who hold more than half.
+	Knowers  [][3]float64 `json:"knowers,omitempty"`
+	Orphaned float64      `json:"orphaned,omitempty"`
+	Bus      int          `json:"bus,omitempty"`
 }
 
 type chapterJSON struct {
@@ -175,7 +184,7 @@ func (s *Server) journeyAPI(ix *index, w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	j := s.journey(ix, step)
-	out := journeyJSON{Step: step.String(), Packages: []packageJSON{}, Frames: []frameJSON{}, Chapters: []chapterJSON{}, Moments: momentsJSON(st.Moments), Releases: momentsJSON(st.Releases)}
+	out := journeyJSON{Step: step.String(), Packages: []packageJSON{}, Authors: nonNil(j.Authors), Frames: []frameJSON{}, Chapters: []chapterJSON{}, Moments: momentsJSON(st.Moments), Releases: momentsJSON(st.Releases)}
 	out.RevTimes = make([]int64, ix.h.Revisions())
 	for i := range out.RevTimes {
 		_, t := ix.h.RevisionAt(i)
@@ -194,6 +203,14 @@ func (s *Server) journeyAPI(ix *index, w http.ResponseWriter, r *http.Request) {
 			if p.Edits.Total() > 0 {
 				pj.Kinds = kindsJSON(p.Edits)
 			}
+			for _, k := range p.Knowers {
+				gone := 0.0
+				if k.Departed {
+					gone = 1
+				}
+				pj.Knowers = append(pj.Knowers, [3]float64{float64(k.Author), round3(k.Share), gone})
+			}
+			pj.Orphaned, pj.Bus = round3(p.Orphaned), p.BusFactor
 			fj.Pkgs = append(fj.Pkgs, pj)
 		}
 		for _, d := range f.Deps {
@@ -216,6 +233,10 @@ func (s *Server) journeyAPI(ix *index, w http.ResponseWriter, r *http.Request) {
 	}
 	writeJSON(w, out)
 }
+
+// round3 rounds a share to three decimals, which is all a ring can show,
+// to keep the frames small.
+func round3(x float64) float64 { return math.Round(x*1000) / 1000 }
 
 func nonNil[T any](s []T) []T {
 	if s == nil {

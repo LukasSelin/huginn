@@ -2,6 +2,7 @@ package story
 
 import (
 	"cmp"
+	"fmt"
 	"math"
 	"slices"
 
@@ -92,3 +93,47 @@ func editsIn(f journey.Frame) int {
 	}
 	return n
 }
+
+const (
+	// handoffShare is the share of a package its new top knower must hold
+	// for a change of top knower to be a handoff.
+	handoffShare = 0.4
+	// orphanedShare is the share departed authors must hold of a package
+	// for it to count as orphaned.
+	orphanedShare = 0.5
+)
+
+// knowledgeMoments finds where a package changes hands, its top knower
+// changing to one who holds at least handoffShare of it, and where a
+// package is first orphaned, departed authors holding more than
+// orphanedShare of it.
+func knowledgeMoments(j *journey.Journey, pkgs []string) []Moment {
+	var out []Moment
+	top := make([]int, len(pkgs)) // top knower + 1, 0 for none yet
+	orphaned := make([]bool, len(pkgs))
+	for rev, f := range j.Frames {
+		for _, p := range f.Packages {
+			if len(p.Knowers) == 0 {
+				continue
+			}
+			k := p.Knowers[0]
+			if prev := top[p.Package] - 1; prev >= 0 && prev != k.Author && k.Share >= handoffShare {
+				out = append(out, Moment{Kind: Handoff, Time: f.Start, Rev: rev, SHA: f.SHA, Package: pkgs[p.Package],
+					Count:  pct(k.Share),
+					Text:   fmt.Sprintf("%s now knows %s best, holding %d%%; %s did before", j.Authors[k.Author], pkgName(pkgs[p.Package]), pct(k.Share), j.Authors[prev]),
+					Weight: 1.5 + k.Share})
+			}
+			top[p.Package] = k.Author + 1
+			if p.Orphaned > orphanedShare && !orphaned[p.Package] {
+				orphaned[p.Package] = true
+				out = append(out, Moment{Kind: Orphaned, Time: f.Start, Rev: rev, SHA: f.SHA, Package: pkgs[p.Package],
+					Count:  pct(p.Orphaned),
+					Text:   fmt.Sprintf("%d%% of what is known of %s is held by people who have not committed in six months", pct(p.Orphaned), pkgName(pkgs[p.Package])),
+					Weight: 2 + p.Orphaned})
+			}
+		}
+	}
+	return out
+}
+
+func pct(share float64) int { return int(math.Round(100 * share)) }
