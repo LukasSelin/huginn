@@ -5,10 +5,12 @@
 // prints the life of every symbol whose qualified name is name, e.g.
 // "ParseFile" or "(*Indexer).Visit", newest change first.
 //
-//	huginn serve [-C dir] [-branch rev] [-tests] [-no-cache] [-addr host:port]
+//	huginn serve [-C dir] [-branch rev] [-tests] [-no-cache] [-addr host:port] [-narrator templates|claude] [-narrator-model id]
 //
 // indexes the history and serves the symbol timeline and the semantic diff
-// of each commit in a browser.
+// of each commit in a browser. With -narrator=claude, the chapters of the
+// history's story are retold by a Claude model after indexing; that needs
+// ANTHROPIC_API_KEY.
 //
 // Both keep the walked history in .git/huginn, so that the next run only
 // walks commits it has not seen; -no-cache walks everything afresh.
@@ -33,12 +35,13 @@ import (
 
 	"huginn/internal/git"
 	"huginn/internal/lineage"
+	"huginn/internal/story"
 	"huginn/internal/web"
 )
 
 const usage = `usage:
   huginn symbols [-C dir] [-branch rev] [-max-count n] [-tests] [-no-cache] name
-  huginn serve [-C dir] [-branch rev] [-tests] [-no-cache] [-addr host:port]
+  huginn serve [-C dir] [-branch rev] [-tests] [-no-cache] [-addr host:port] [-narrator templates|claude] [-narrator-model id]
   huginn semdiff [-C dir] [-include-generated] [-callers n] rev`
 
 func main() {
@@ -103,6 +106,9 @@ func symbols(ctx context.Context, stdout, stderr io.Writer, args []string) error
 	return nil
 }
 
+// narrateWorkers is how many chapters the narrator narrates at a time.
+const narrateWorkers = 3
+
 // buildOptions returns the options for indexing repo, with the cache in its
 // git directory unless noCache is set.
 func buildOptions(ctx context.Context, repo *git.Repo, branch string, tests, noCache bool) (lineage.BuildOptions, error) {
@@ -147,8 +153,19 @@ func serve(ctx context.Context, stdout, stderr io.Writer, args []string) error {
 	tests := fs.Bool("tests", false, "include symbols declared in _test.go files")
 	noCache := fs.Bool("no-cache", false, "walk all history instead of reusing .git/huginn")
 	addr := fs.String("addr", "localhost:7878", "address to listen on")
+	narrator := fs.String("narrator", "templates", "who narrates the story: templates, or claude (needs ANTHROPIC_API_KEY)")
+	model := fs.String("narrator-model", story.DefaultModel, "the Claude model -narrator=claude uses")
 	if err := fs.Parse(args); err != nil {
 		return err
+	}
+	switch *narrator {
+	case "templates":
+	case "claude":
+		if os.Getenv("ANTHROPIC_API_KEY") == "" {
+			return fmt.Errorf("-narrator=claude needs ANTHROPIC_API_KEY")
+		}
+	default:
+		return fmt.Errorf("-narrator must be templates or claude, not %q", *narrator)
 	}
 	repo, err := git.Open(*dir)
 	if err != nil {
@@ -163,6 +180,19 @@ func serve(ctx context.Context, stdout, stderr io.Writer, args []string) error {
 		return err
 	}
 	srv := web.New(repo, filepath.Base(abs), opts)
+	if *narrator == "claude" {
+		cache := ""
+		if opts.Cache != nil {
+			gitDir, err := repo.GitDir(ctx)
+			if err != nil {
+				return err
+			}
+			cache = filepath.Join(gitDir, "huginn")
+		}
+		n := story.NewClaude(*model, cache)
+		n.Log = func(format string, args ...any) { fmt.Fprintf(stderr, "huginn: narrator: "+format+"\n", args...) }
+		srv.SetNarrator(n, narrateWorkers)
+	}
 
 	ln, err := net.Listen("tcp", *addr)
 	if err != nil {

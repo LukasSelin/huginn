@@ -94,6 +94,7 @@
 .toggle[aria-pressed="true"] { border-color: var(--accent); color: var(--accent); background: var(--accent-bg); }
 .ctitle { margin: 2px 0 4px; font: 500 26px/1.15 'Newsreader', Georgia, serif; }
 .narrative { margin: 0; font: 400 17px/1.55 'Newsreader', Georgia, serif; color: var(--text-2); }
+.by { margin: 0; color: var(--muted); font-size: 11px; letter-spacing: .02em; }
 .stats { display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; }
 .stat { display: flex; flex-direction: column; gap: 2px; padding: 10px; background: var(--bg); border: 1px solid var(--line); border-radius: 8px; min-width: 0; }
 .stat .sv { font-size: 16px; font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }

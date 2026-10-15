@@ -36,6 +36,7 @@ go test ./...
 ```
 huginn symbols [-C dir] [-branch rev] [-tests] [-no-cache] name
 huginn serve [-C dir] [-branch rev] [-tests] [-no-cache] [-addr host:port]
+             [-narrator templates|claude] [-narrator-model id]
 huginn semdiff [-C dir] [-include-generated] [-callers n] rev
 ```
 
@@ -77,11 +78,61 @@ The UI is backed by a small JSON API:
 | `GET /api/dirs` | every directory with its live symbols and number of changes |
 | `GET /api/dir?d=internal/git` | the lanes of one directory: each symbol with its change markers |
 | `GET /api/symbol/{id}` | one symbol's declaration and its full list of events |
+| `GET /api/journey?step=week` | the history as frames of a commit, week or month, with the story's chapters |
+| `GET /api/story` | just the chapters, and whether the narrator is still retelling them |
 
 ```
 $ curl -s localhost:7878/api/dirs
 [{"dir":"cmd/huginn","live":14,"changes":16},{"dir":"internal/ast","live":62,"changes":65},{"dir":"internal/git","live":46,"changes":50},…]
 ```
+
+#### Story narration
+
+`/journey` plays the history back and tells it as a handful of chapters. By
+default each chapter is narrated by templates that state its facts (dates,
+commits, symbols added and removed, the busiest packages, key moments) and
+nothing else. With `-narrator=claude`, a Claude model retells the chapters in
+plainer prose once indexing is done:
+
+```bash
+export ANTHROPIC_API_KEY=sk-ant-...
+huginn serve -narrator=claude
+```
+
+| Flag | Default | Meaning |
+| --- | --- | --- |
+| `-narrator` | `templates` | `templates`, or `claude` (needs `ANTHROPIC_API_KEY`) |
+| `-narrator-model` | `claude-opus-5-5` | the model `-narrator=claude` uses |
+
+The page works at once with the templated chapters, labeled "template
+narration", and swaps in the model's when they arrive, labeled "narrated by
+Claude". Each chapter is one request to the Messages API with the chapter's
+facts as JSON, the templated narration as a baseline, and the templated titles
+of the chapters before it (templated, so that chapters can be narrated in
+parallel and cached independently). Up to three chapters are narrated at a
+time. For the current Opus, Sonnet and Fable models the request opts into the
+API's server-side fallback, which has another model answer if the first
+declines.
+
+The model's answer is checked before it is used: every number and every
+package or symbol name in it must appear in the facts, it may name no people
+the facts do not name, and the title (at most 6 words) and paragraph (2 to 4
+sentences) must fit their limits. An answer that fails is sent back once with
+the problems listed; if it fails again, or the API cannot be reached, the
+chapter keeps its templated narration and the server logs which chapter fell
+back and why.
+
+Accepted narrations are cached in `.git/huginn/narrations`, keyed by a hash of
+the facts, the model and the prompt's version, so restarting the server does
+not call the API again for chapters it has narrated. `-no-cache` skips this
+cache as well; delete the directory to narrate everything afresh. The fixed
+instructions are marked for prompt caching.
+
+**Privacy:** with `-narrator=claude`, each chapter's facts are sent to the
+Anthropic API: dates, commit counts and revision numbers, abbreviated commit
+hashes, package paths, and the names of the symbols in its key moments (for
+example `(*Repo).Walk`). No source code is sent. The default, `templates`,
+makes no network calls.
 
 ### `huginn semdiff`
 
@@ -160,6 +211,9 @@ git log / cat-file ──► internal/git ──► internal/ast ──► inter
   each declaration a stable ID when it first appears, carrying it across
   renames, moves and edits. `Build` walks first-parent history; with a
   `Cache`, it only walks commits it has not seen before (see below).
+- **internal/story** cuts the history into chapters and narrates them, with
+  templates or, optionally, a Claude model whose prose is checked against the
+  facts.
 - **internal/web** serves the timeline UI (embedded static files) and its
   JSON API from an in-memory index built once at startup.
 - **internal/semdiff** reports one commit: changed symbols, the callers of

@@ -10,10 +10,12 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+	"time"
 
 	"huginn/internal/git"
 	"huginn/internal/gittest"
 	"huginn/internal/lineage"
+	"huginn/internal/story"
 )
 
 // newServer returns a server over a small repository, not yet indexed, and
@@ -70,7 +72,7 @@ func TestBeforeIndex(t *testing.T) {
 	if st.Ready || st.Repo != "demo" {
 		t.Errorf("status = %+v, want not ready for demo", st)
 	}
-	for _, url := range []string{"/api/dirs", "/api/dir?d=geo", "/api/symbol/1", "/api/journey"} {
+	for _, url := range []string{"/api/dirs", "/api/dir?d=geo", "/api/symbol/1", "/api/journey", "/api/story"} {
 		getJSON(t, h, url, http.StatusServiceUnavailable, nil)
 	}
 }
@@ -183,6 +185,9 @@ func TestAPI(t *testing.T) {
 	t.Run("journey", func(t *testing.T) {
 		var j journeyJSON
 		getJSON(t, h, "/api/journey?step=commit", http.StatusOK, &j)
+		if j.Narrating || len(j.Chapters) == 0 || j.Chapters[0].Narrator != "templates" {
+			t.Errorf("without a narrator: narrating %v, chapters %+v", j.Narrating, j.Chapters)
+		}
 		if j.Step != "commit" || len(j.Frames) != 3 || len(j.Packages) != 2 {
 			t.Fatalf("journey = %+v", j)
 		}
@@ -214,4 +219,58 @@ func TestAPI(t *testing.T) {
 			}
 		}
 	})
+}
+
+// gated narrates every chapter as "model" once its gate opens.
+type gated struct{ open chan struct{} }
+
+func (g gated) Narrate(ctx context.Context, f story.Facts) (story.Narration, error) {
+	select {
+	case <-g.open:
+	case <-ctx.Done():
+		return story.Narration{}, ctx.Err()
+	}
+	return story.Narration{Title: "Retold " + strconv.Itoa(f.Number), Text: "Retold.", Model: "test-model"}, nil
+}
+
+func TestNarrator(t *testing.T) {
+	srv, _ := newServer(t)
+	g := gated{open: make(chan struct{})}
+	srv.SetNarrator(g, 2)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	if err := srv.Index(ctx); err != nil {
+		t.Fatal(err)
+	}
+	h := srv.Handler()
+
+	// Templates first, while the narrator works.
+	var j journeyJSON
+	getJSON(t, h, "/api/journey?step=commit", http.StatusOK, &j)
+	if !j.Narrating || len(j.Chapters) == 0 || j.Chapters[0].Narrator != "templates" || j.Chapters[0].Model != "" {
+		t.Fatalf("before narration: narrating %v, chapters %+v", j.Narrating, j.Chapters)
+	}
+
+	close(g.open)
+	var st storyJSON
+	deadline := time.Now().Add(10 * time.Second)
+	for {
+		getJSON(t, h, "/api/story", http.StatusOK, &st)
+		if !st.Narrating || time.Now().After(deadline) {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if st.Narrating || len(st.Chapters) != len(j.Chapters) {
+		t.Fatalf("after narration: %+v", st)
+	}
+	for i, c := range st.Chapters {
+		if c.Narrator != "claude" || c.Model != "test-model" || c.Title != "Retold "+strconv.Itoa(i+1) || c.FirstRev != j.Chapters[i].FirstRev {
+			t.Errorf("chapter %d = %+v", i, c)
+		}
+	}
+	getJSON(t, h, "/api/journey?step=week", http.StatusOK, &j)
+	if j.Narrating || j.Chapters[0].Narrator != "claude" {
+		t.Errorf("journey after narration: narrating %v, chapter %+v", j.Narrating, j.Chapters[0])
+	}
 }

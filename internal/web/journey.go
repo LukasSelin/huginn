@@ -4,6 +4,7 @@ import (
 	"context"
 	"net/http"
 	"sync"
+	"sync/atomic"
 
 	"huginn/internal/journey"
 	"huginn/internal/story"
@@ -17,6 +18,11 @@ type journeys struct {
 	storyOnce sync.Once
 	story     *story.Story
 	storyErr  error
+
+	// The story as the server's narrator retells it, once it has, and
+	// whether it still is.
+	retold    atomic.Pointer[story.Story]
+	narrating atomic.Bool
 }
 
 func (s *Server) journey(ix *index, step journey.Step) *journey.Journey {
@@ -26,22 +32,45 @@ func (s *Server) journey(ix *index, step journey.Step) *journey.Journey {
 	return ix.journeys.steps[step]
 }
 
+// story returns the story as narrated so far: by templates, until the
+// server's narrator has retold it.
 func (s *Server) story(ix *index) (*story.Story, error) {
+	if st := ix.journeys.retold.Load(); st != nil {
+		return st, nil
+	}
+	return s.templateStory(ix)
+}
+
+func (s *Server) templateStory(ix *index) (*story.Story, error) {
 	ix.journeys.storyOnce.Do(func() {
-		// Templated narration needs no context of its own; a narrator that
-		// calls out would get one from the request instead.
+		// Templated narration needs no context of its own; the narrator
+		// retells it afterwards, in narrate.
 		ix.journeys.story, ix.journeys.storyErr = story.Build(context.Background(), ix.h, s.journey(ix, journey.Commit), story.Templates{})
 	})
 	return ix.journeys.story, ix.journeys.storyErr
 }
 
+// narrate retells the story with the server's narrator. The page shows the
+// templated story meanwhile and picks up the retold one when it is done.
+func (s *Server) narrate(ctx context.Context, ix *index) {
+	defer ix.journeys.narrating.Store(false)
+	st, err := s.templateStory(ix)
+	if err != nil {
+		return
+	}
+	if retold, err := story.Retell(ctx, st, s.narrator, s.workers); err == nil {
+		ix.journeys.retold.Store(retold)
+	}
+}
+
 type journeyJSON struct {
-	Step     string        `json:"step"`
-	Packages []packageJSON `json:"packages"`
-	Frames   []frameJSON   `json:"frames"`
-	Chapters []chapterJSON `json:"chapters"`
-	Moments  []momentJSON  `json:"moments"`  // every chapter's key moments, by time
-	RevTimes []int64       `json:"revTimes"` // unix seconds of every commit, oldest first
+	Step      string        `json:"step"`
+	Narrating bool          `json:"narrating"` // the narrator is still retelling the chapters
+	Packages  []packageJSON `json:"packages"`
+	Frames    []frameJSON   `json:"frames"`
+	Chapters  []chapterJSON `json:"chapters"`
+	Moments   []momentJSON  `json:"moments"`  // every chapter's key moments, by time
+	RevTimes  []int64       `json:"revTimes"` // unix seconds of every commit, oldest first
 }
 
 type packageJSON struct {
@@ -87,6 +116,8 @@ type chapterJSON struct {
 	Live      int          `json:"live"`
 	LivePkgs  int          `json:"livePackages"`
 	EditCount int          `json:"edits"`
+	Narrator  string       `json:"narrator"`        // "claude" or "templates"
+	Model     string       `json:"model,omitempty"` // the model that narrated it
 }
 
 type momentJSON struct {
@@ -125,7 +156,7 @@ func (s *Server) journeyAPI(ix *index, w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	j := s.journey(ix, step)
-	out := journeyJSON{Step: step.String(), Packages: []packageJSON{}, Frames: []frameJSON{}, Chapters: []chapterJSON{}, Moments: momentsJSON(st.Moments)}
+	out := journeyJSON{Step: step.String(), Narrating: ix.journeys.narrating.Load(), Packages: []packageJSON{}, Frames: []frameJSON{}, Chapters: chaptersJSON(st), Moments: momentsJSON(st.Moments)}
 	out.RevTimes = make([]int64, ix.h.Revisions())
 	for i := range out.RevTimes {
 		_, t := ix.h.RevisionAt(i)
@@ -151,15 +182,40 @@ func (s *Server) journeyAPI(ix *index, w http.ResponseWriter, r *http.Request) {
 		}
 		out.Frames = append(out.Frames, fj)
 	}
+	writeJSON(w, out)
+}
+
+type storyJSON struct {
+	Narrating bool          `json:"narrating"`
+	Chapters  []chapterJSON `json:"chapters"`
+}
+
+// storyAPI serves just the chapters, for the page to pick up the narrator's
+// retelling without reloading the frames.
+func (s *Server) storyAPI(ix *index, w http.ResponseWriter, r *http.Request) {
+	st, err := s.story(ix)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	writeJSON(w, storyJSON{Narrating: ix.journeys.narrating.Load(), Chapters: chaptersJSON(st)})
+}
+
+func chaptersJSON(st *story.Story) []chapterJSON {
+	out := make([]chapterJSON, 0, len(st.Chapters))
 	for _, c := range st.Chapters {
-		out.Chapters = append(out.Chapters, chapterJSON{
+		cj := chapterJSON{
 			Title: c.Title, Text: c.Text, From: c.From.Unix(), To: c.To.Unix(), FirstRev: c.FirstRev, LastRev: c.LastRev,
 			Commits: c.Commits, Added: c.Added, Removed: c.Removed, Hottest: c.Hottest, HotEdits: c.HottestEdits,
 			Births: nonNil(c.Births), Deaths: nonNil(c.Deaths), Moments: momentsJSON(c.Moments),
-			Live: c.Live, LivePkgs: c.LivePackages, EditCount: c.Edits,
-		})
+			Live: c.Live, LivePkgs: c.LivePackages, EditCount: c.Edits, Narrator: "templates", Model: c.Model,
+		}
+		if c.Model != "" {
+			cj.Narrator = "claude"
+		}
+		out = append(out, cj)
 	}
-	writeJSON(w, out)
+	return out
 }
 
 func nonNil(s []string) []string {

@@ -22,6 +22,7 @@ import (
 	"huginn/internal/codemap"
 	"huginn/internal/git"
 	"huginn/internal/lineage"
+	"huginn/internal/story"
 )
 
 //go:embed static
@@ -35,6 +36,9 @@ type Server struct {
 	index atomic.Pointer[index]
 	done  atomic.Int64 // commits applied so far while indexing
 	err   atomic.Pointer[error]
+
+	narrator story.Narrator // retells the story after indexing; nil for none
+	workers  int            // chapters it narrates at a time
 
 	reports *reportCache                                       // commit reports by hash
 	build   func(context.Context, string) (*commitJSON, error) // buildReport, or a test's stand-in
@@ -58,8 +62,15 @@ func New(repo *git.Repo, name string, opts lineage.BuildOptions) *Server {
 	return s
 }
 
+// SetNarrator has the story retold by n, up to workers chapters at a time,
+// once the history is indexed. Call it before Index.
+func (s *Server) SetNarrator(n story.Narrator, workers int) {
+	s.narrator, s.workers = n, workers
+}
+
 // Index builds the history. It blocks until done; run it in a goroutine to
-// serve progress meanwhile.
+// serve progress meanwhile. With a narrator, the story is then retold in the
+// background until done or ctx ends; the templated story is served meanwhile.
 func (s *Server) Index(ctx context.Context) error {
 	start := time.Now()
 	opts := s.opts
@@ -79,7 +90,13 @@ func (s *Server) Index(ctx context.Context) error {
 	}
 	slices.Sort(ix.order)
 	ix.took = time.Since(start)
+	if s.narrator != nil {
+		ix.journeys.narrating.Store(true)
+	}
 	s.index.Store(ix)
+	if s.narrator != nil {
+		go s.narrate(ctx, ix)
+	}
 	return nil
 }
 
@@ -97,6 +114,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /api/map", s.ready(s.codeMap))
 	mux.HandleFunc("GET /api/map/{dir...}", s.ready(s.mapDir))
 	mux.HandleFunc("GET /api/journey", s.ready(s.journeyAPI))
+	mux.HandleFunc("GET /api/story", s.ready(s.storyAPI))
 	mux.HandleFunc("GET /api/commit/{rev...}", s.commit)
 	return mux
 }

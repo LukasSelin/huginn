@@ -3,7 +3,9 @@ package story
 import (
 	"context"
 	"fmt"
+	"slices"
 	"strings"
+	"sync"
 )
 
 // Templates narrates chapters by filling sentence templates with their
@@ -14,6 +16,32 @@ type Templates struct{}
 // Narrate implements Narrator.
 func (Templates) Narrate(_ context.Context, f Facts) (Narration, error) {
 	return Narration{Title: title(f), Text: paragraph(f)}, nil
+}
+
+// Retell narrates st's chapters again with n, up to workers at a time, and
+// returns the retold story; st is left as it is. A chapter n fails on keeps
+// its narration. The error is the context's, if it ended first.
+func Retell(ctx context.Context, st *Story, n Narrator, workers int) (*Story, error) {
+	out := &Story{Chapters: slices.Clone(st.Chapters), Moments: st.Moments}
+	sem := make(chan struct{}, max(1, workers))
+	var wg sync.WaitGroup
+	for i := range out.Chapters {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			select {
+			case sem <- struct{}{}:
+			case <-ctx.Done():
+				return
+			}
+			defer func() { <-sem }()
+			if nar, err := n.Narrate(ctx, out.Chapters[i].Facts); err == nil {
+				out.Chapters[i].Narration = nar
+			}
+		}()
+	}
+	wg.Wait()
+	return out, ctx.Err()
 }
 
 // title names the chapter after its strongest signal, in this order: new

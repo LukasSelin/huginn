@@ -17,6 +17,7 @@
     timer: null,
     narrate: false,
     spoken: -1, // chapter last narrated
+    polling: false, // for the server's narrator to finish
     maxEdits: 1,
     bubbles: [], // elements by package index
     lines: new Map(), // "a-b" → <line>
@@ -329,6 +330,9 @@
     $('chapTitle').textContent = c.title;
     $('chapDates').textContent = c.from === c.to ? fmtBig(c.from) : `${fmtBig(c.from)} – ${fmtBig(c.to)}`;
     $('chapText').textContent = c.text;
+    $('chapBy').textContent = (c.narrator === 'claude' ? 'narrated by Claude' : 'template narration') +
+      (state.data.narrating ? ' · Claude is narrating…' : '');
+    $('chapBy').title = c.model || '';
     const stat = (v, l, cls) => h('div', { class: 'stat' }, h('span', { class: `sv ${cls || ''}` }, v), h('span', { class: 'sl' }, l));
     $('chapStats').replaceChildren(
       stat(c.commits.toLocaleString(), 'commits'),
@@ -350,6 +354,28 @@
     });
 
     if (state.narrate && state.spoken !== ci) speak(ci);
+  }
+
+  // While the server's narrator retells the story, poll for its chapters and
+  // swap them in when it is done.
+  async function awaitNarration() {
+    if (state.polling || !state.data.narrating) return;
+    state.polling = true;
+    try {
+      for (;;) {
+        await new Promise((r) => setTimeout(r, 4000));
+        const st = await api('/api/story');
+        if (st.narrating) continue;
+        for (const d of Object.values(state.cache)) { d.chapters = st.chapters; d.narrating = false; }
+        buildRows();
+        buildChapterList();
+        render();
+        state.spoken = -1;
+        return;
+      }
+    } finally {
+      state.polling = false;
+    }
   }
 
   // ---------- Narration ----------
@@ -458,6 +484,7 @@
     if (!state.data.frames.length) {
       $('caption').textContent = 'No history to play back.';
     }
+    awaitNarration().catch(fail);
   }
 
   main().catch(fail);

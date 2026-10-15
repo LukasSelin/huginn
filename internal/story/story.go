@@ -64,6 +64,9 @@ func (k MomentKind) String() string {
 	return "unknown"
 }
 
+// MarshalText names the kind, so that facts read well as JSON.
+func (k MomentKind) MarshalText() ([]byte, error) { return []byte(k.String()), nil }
+
 // Moment is one key moment in the history.
 type Moment struct {
 	Kind    MomentKind
@@ -93,12 +96,18 @@ type Facts struct {
 	Births, Deaths     []string // packages, by path
 	Live, LivePackages int      // at the end of the chapter
 	Moments            []Moment // by time
+
+	// Previous are the titles of the chapters before this one, as Templates
+	// titles them, for a narrator that wants continuity. They are not facts
+	// about this chapter, so they stay out of its JSON.
+	Previous []string `json:"-"`
 }
 
 // Narration is a narrated chapter.
 type Narration struct {
 	Title string
 	Text  string
+	Model string // the language model that wrote it; empty for Templates
 }
 
 // A Narrator turns a chapter's facts into prose. It must not state anything
@@ -139,6 +148,7 @@ func Build(ctx context.Context, h *lineage.History, j *journey.Journey, n Narrat
 
 	us := units(j, life)
 	cuts := segment(us)
+	var titles []string
 	for c := range cuts {
 		a, b := cuts[c], len(us)
 		if c+1 < len(cuts) {
@@ -147,6 +157,8 @@ func Build(ctx context.Context, h *lineage.History, j *journey.Journey, n Narrat
 		f := facts(j, pkgs, life, us[a].from, us[b-1].to)
 		f.Number, f.Of = c+1, len(cuts)
 		f.Moments = keyMoments(all, f.FirstRev, f.LastRev)
+		f.Previous = slices.Clone(titles)
+		titles = append(titles, title(f))
 		st.Moments = append(st.Moments, f.Moments...)
 		nar, err := n.Narrate(ctx, f)
 		if err != nil {
