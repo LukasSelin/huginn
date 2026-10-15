@@ -35,12 +35,15 @@
     </div>
 
     <section class="panel stage" id="stage" aria-label="Packages over time">
-      <svg class="deps" id="deps" aria-hidden="true"></svg>
-      <div class="bubbles" id="bubbles" role="group" aria-label="Packages; choose one to look inside"></div>
-      <div class="syms" id="syms" role="group" aria-label="Symbols of the package" inert>
-        <div class="disc" id="disc" aria-hidden="true"></div>
-        <div class="dots" id="dots"></div>
-        <div class="tags" id="tags" aria-hidden="true"></div>
+      <div class="world" id="world">
+        <svg class="deps" id="deps" aria-hidden="true"></svg>
+        <div class="bubbles" id="bubbles" role="group" aria-label="Packages; choose one to look inside"></div>
+        <div class="syms" id="syms" role="group" aria-label="Symbols of the package" inert>
+          <div class="disc" id="disc" aria-hidden="true"></div>
+          <div class="files" id="files" aria-hidden="true"></div>
+          <div class="dots" id="dots"></div>
+          <div class="tags" id="tags" aria-hidden="true"></div>
+        </div>
       </div>
       <div class="foltag" id="folTag" aria-hidden="true" hidden></div>
       <div class="ov ov-tl">
@@ -60,6 +63,17 @@
         <div><dt>Live symbols</dt><dd id="cLive">0</dd></div>
         <div><dt>Packages</dt><dd id="cPkgs">0</dd></div>
       </dl>
+      <div class="ov ov-zoom" role="group" aria-label="Zoom">
+        <button type="button" class="icon zb" id="zoomIn" aria-label="Zoom in" title="Zoom in (+, or Ctrl+scroll)">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" aria-hidden="true"><path d="M12 5v14M5 12h14"></path></svg>
+        </button>
+        <button type="button" class="icon zb" id="zoomOut" aria-label="Zoom out" title="Zoom out (−)">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" aria-hidden="true"><path d="M5 12h14"></path></svg>
+        </button>
+        <button type="button" class="icon zb" id="zoomReset" aria-label="Fit the whole map" title="Fit the whole map (0)" disabled>
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 9V4h5M20 9V4h-5M4 15v5h5M20 15v5h-5"></path></svg>
+        </button>
+      </div>
       <p class="ov ov-bl caption" id="caption" aria-live="polite"></p>
       <div class="ov ov-bl card" id="card" role="region" aria-label="Key moment" aria-live="polite" hidden></div>
       <div class="ov ov-br legend" aria-label="Activity scale">
@@ -148,6 +162,7 @@
     </section>
   </aside>
 </div>
+<script src="vendor/d3.min.js"></script>
 <script src="common.js"></script>
 <script src="journey.js"></script>
 </body>

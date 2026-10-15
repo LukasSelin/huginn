@@ -4,7 +4,8 @@
 // package, with the story told alongside. In story mode playback pauses at
 // key moments to show what the commit changed; a package can be opened to
 // watch its symbols, and one symbol followed through renames and moves.
-// common.js provides KINDS, h, $, mark, api, plural, waitReady and fail.
+// common.js provides KINDS, h, $, mark, api, plural, waitReady and fail;
+// vendor/d3.min.js provides d3, for zooming, tweens, edges and packing.
 (() => {
   const ACT = ['#2A2418', '#4A3A1E', '#7A5A26', '#B07F33', '#F0A64A'];
   const BASE_MS = 1100; // per frame at 1×
@@ -13,7 +14,11 @@
   const TAG_MS = 1800; // how long event tags stay on a package's symbols
   const MAX_TAGS = 8; // event tags per frame
   const DAY = 86400;
+  const MAX_ZOOM = 8;
   const reduced = matchMedia('(prefers-reduced-motion: reduce)');
+  // How long size, colour, edge and counter changes take, at the current speed.
+  const tweenMs = () => (reduced.matches ? 0 : 600 / state.speed);
+  const zoomMs = () => (reduced.matches ? 0 : 650);
 
   const state = {
     step: 'week',
@@ -28,14 +33,18 @@
     narrate: false,
     spoken: -1, // chapter last narrated
     maxEdits: 1,
+    refs: null, // dependency stroke width by references between two packages
     bubbles: [], // elements by package index
-    lines: new Map(), // "a-b" → <line>
+    diam: [], // bubble diameters by package index, before zooming
+    zoom: null, // the stage's d3 zoom behaviour
+    zt: d3.zoomIdentity, // its current transform
+    outer: null, // the transform of the package map while a package is open
     story: true, // pause at key moments
     moments: [], // the story's key moments and the followed symbol's, by revision
     card: null, // the moment on the card
     reports: new Map(), // sha → promise of its /api/commit report
     views: new Map(), // "step dir keep" → /api/journey/package response
-    drill: null, // the package looked into: { dir, pi, v, cur, names, at, dots, peak }
+    drill: null, // the package looked into: { dir, pi, v, cur, names, at, dots, peak, pos, files, fileAt }
     follow: null, // the followed symbol: { id, sym, moments }
     switching: null, // the package a followed symbol is being chased into
     folDir: undefined, // the followed symbol's package at the last render
@@ -78,9 +87,13 @@
     state.data = await load(step);
     state.pathIdx = new Map(state.data.packages.map((p, i) => [p.path, i]));
     for (const b of $('step').querySelectorAll('button')) b.setAttribute('aria-pressed', String(b.dataset.v === step));
-    let max = 1;
-    for (const f of state.data.frames) for (const p of f.pkgs) max = Math.max(max, editsOf(p));
+    let max = 1, maxRefs = 1;
+    for (const f of state.data.frames) {
+      for (const p of f.pkgs) max = Math.max(max, editsOf(p));
+      for (const dep of f.deps) maxRefs = Math.max(maxRefs, dep[2] || 0);
+    }
     state.maxEdits = max;
+    state.refs = d3.scaleSqrt().domain([0, maxRefs]).range([0.8, 3.2]).clamp(true);
     // Moments are per step; so is the card's.
     state.card = null;
     $('card').hidden = true;
@@ -133,8 +146,8 @@
       wrap.append(el);
       return el;
     });
+    state.diam = [];
     $('deps').replaceChildren();
-    state.lines = new Map();
     place();
   }
 
@@ -154,23 +167,28 @@
       el.style.top = `${y0 + p.y * size}px`;
     });
     $('deps').setAttribute('viewBox', `0 0 ${W} ${H}`);
-    for (const [key, line] of state.lines) setLine(line, key);
-    const disc = $('disc');
-    disc.style.left = `${x0 + 0.02 * size}px`;
-    disc.style.top = `${y0 + 0.02 * size}px`;
-    disc.style.width = disc.style.height = `${0.96 * size}px`;
-    if (state.drill) placeDots();
+    d3.select('#deps').selectAll('path').attr('d', (e) => edgePath(e.a, e.b));
+    placeDisc({ x: x0 + size / 2, y: y0 + size / 2, r: 0.48 * size });
+    state.zoom.extent([[0, 0], [W, H]]).translateExtent([[0, 0], [W, H]]);
     if (state.data.frames.length) render(false);
   }
 
-  function setLine(line, key) {
-    const [a, b] = key.split('-').map(Number);
+  // edgePath curves a dependency away from the middle of the map, so that
+  // edges between packages on the rim keep clear of the busy center.
+  function edgePath(a, b) {
     const { size, x0, y0 } = state.geom;
     const pa = state.data.packages[a], pb = state.data.packages[b];
-    line.setAttribute('x1', x0 + pa.x * size);
-    line.setAttribute('y1', y0 + pa.y * size);
-    line.setAttribute('x2', x0 + pb.x * size);
-    line.setAttribute('y2', y0 + pb.y * size);
+    const ax = x0 + pa.x * size, ay = y0 + pa.y * size;
+    const bx = x0 + pb.x * size, by = y0 + pb.y * size;
+    const mx = (ax + bx) / 2, my = (ay + by) / 2;
+    const len = Math.hypot(bx - ax, by - ay) || 1;
+    let nx = (ay - by) / len, ny = (bx - ax) / len;
+    if ((mx - x0 - size / 2) * nx + (my - y0 - size / 2) * ny < 0) { nx = -nx; ny = -ny; }
+    const bend = 0.18 * len;
+    const p = d3.path();
+    p.moveTo(ax, ay);
+    p.quadraticCurveTo(mx + nx * bend, my + ny * bend, bx, by);
+    return p.toString();
   }
 
   function actStep(e) {
@@ -192,33 +210,102 @@
       const live = s ? s.live : 0;
       const a = actStep(s ? editsOf(s) : 0);
       const d = live > 0 ? Math.max(8, 2 * p.r * size * Math.sqrt(live / Math.max(1, p.peak))) : Math.max(8, p.r * size);
+      state.diam[i] = d;
       el.style.width = el.style.height = `${d}px`;
       el.style.backgroundColor = ACT[a];
-      el.className = `bubble a${a}${live > 0 ? '' : ' gone'}${a >= 3 ? ' busy' : ''}${d < 44 ? ' small' : ''}${i === focus ? ' focus' : ''}${i === folPkg ? ' followed' : ''}`;
+      el.className = `bubble a${a}${live > 0 ? '' : ' gone'}${a >= 3 ? ' busy' : ''}${d * state.zt.k < 44 ? ' small' : ''}${i === focus ? ' focus' : ''}${i === folPkg ? ' followed' : ''}`;
       const label = live > 0 ? `${p.path} · ${plural(live, 'symbol')}${s && s.kinds ? ` · ${describeKinds(s.kinds)}` : ''}` : p.path;
       el.title = label;
       el.setAttribute('aria-label', `${label}. Look inside`);
       el.tabIndex = live > 0 && !state.drill ? 0 : -1;
     });
 
-    // Dependencies; the ones the card's moment is about are lit up.
-    const svg = $('deps');
-    const want = new Set(), hot = new Set();
-    for (const [a, b] of f.deps) {
+    // Dependencies, as wide as the references across them; the ones the
+    // card's moment is about are lit up. New ones draw themselves from end
+    // to end, dropped ones fade.
+    const edges = new Map();
+    for (const [a, b, refs] of f.deps) {
       const key = `${Math.min(a, b)}-${Math.max(a, b)}`;
-      want.add(key);
-      if (focus !== undefined && (state.card.kind === 'signature' ? b === focus : a === focus || b === focus)) hot.add(key);
-      let line = state.lines.get(key);
-      if (!line) {
-        line = document.createElementNS('http://www.w3.org/2000/svg', 'line');
-        state.lines.set(key, line);
-        setLine(line, key);
-        svg.append(line);
-      }
+      let e = edges.get(key);
+      if (!e) edges.set(key, e = { key, a: Math.min(a, b), b: Math.max(a, b), refs: 0, hot: false });
+      e.refs += refs || 0;
+      if (focus !== undefined && (state.card.kind === 'signature' ? b === focus : a === focus || b === focus)) e.hot = true;
     }
-    for (const [key, line] of state.lines) {
-      line.classList.toggle('off', !want.has(key));
-      line.classList.toggle('hot', hot.has(key));
+    const ms = tweenMs();
+    d3.select('#deps').selectAll('path').data([...edges.values()], (e) => e.key).join(
+      (enter) => enter.append('path')
+        .attr('d', (e) => edgePath(e.a, e.b))
+        .attr('pathLength', 1).attr('stroke-dasharray', '1 1').attr('stroke-dashoffset', 1)
+        .call((en) => en.transition().duration(ms).ease(d3.easeCubicOut).attr('stroke-dashoffset', 0)),
+      (update) => update.call((u) => u.filter('.leaving').interrupt().classed('leaving', false).style('opacity', null).attr('stroke-dashoffset', 0)),
+      (exit) => exit.filter(':not(.leaving)').classed('leaving', true)
+        .call((ex) => ex.transition().duration(ms).style('opacity', 0).remove()))
+      .classed('hot', (e) => e.hot)
+      .style('stroke-width', (e) => `${e.hot ? Math.max(2.2, state.refs(e.refs)) : state.refs(e.refs)}px`);
+  }
+
+  // ---------- Zoom ----------
+
+  // The stage zooms with Ctrl+scroll or a pinch and pans by dragging; plain
+  // scrolling still scrolls the page. Labels keep their size on screen, so
+  // zooming in names more of the packages and symbols.
+  function setupZoom() {
+    const st = $('stage');
+    state.zoom = d3.zoom()
+      .scaleExtent([1, MAX_ZOOM])
+      .filter((e) => {
+        if (e.target.closest && e.target.closest('.ov')) return false;
+        if (e.type === 'wheel') return e.ctrlKey || e.metaKey;
+        if (e.touches) return e.touches.length > 1 || state.zt.k > 1;
+        return !e.button;
+      })
+      // A pinch arrives as small Ctrl+wheel steps; a mouse wheel's steps are
+      // large and need no boost.
+      .wheelDelta((e) => -e.deltaY * (e.deltaMode === 1 ? 0.05 : e.deltaMode ? 1 : 0.002) * (Math.abs(e.deltaY) < 50 ? 10 : 1))
+      .on('start', () => st.classList.add('zooming'))
+      .on('end', () => st.classList.remove('zooming'))
+      .on('zoom', (e) => {
+        state.zt = e.transform;
+        applyZoom();
+      });
+    d3.select(st).call(state.zoom).on('dblclick.zoom', null);
+    st.style.touchAction = 'pan-y';
+  }
+
+  function applyZoom() {
+    const t = state.zt;
+    const w = $('world');
+    w.style.transform = `translate(${t.x}px, ${t.y}px) scale(${t.k})`;
+    w.style.setProperty('--k', String(t.k));
+    $('zoomIn').disabled = t.k >= MAX_ZOOM - 1e-6;
+    $('zoomOut').disabled = t.k <= 1 + 1e-6;
+    $('zoomReset').disabled = t.k <= 1 + 1e-6 && Math.abs(t.x) < 0.5 && Math.abs(t.y) < 0.5;
+    relabel();
+    if (state.data) placeFolTag();
+  }
+
+  function zoomTo(t, ms = zoomMs()) {
+    d3.select('#stage').transition('zoom').duration(ms).ease(d3.easeCubicInOut).call(state.zoom.transform, t);
+  }
+
+  function zoomBy(f) {
+    d3.select('#stage').transition('zoom').duration(reduced.matches ? 0 : 300).call(state.zoom.scaleBy, f);
+  }
+
+  // relabel names the bubbles and symbols big enough on screen to hold a name.
+  function relabel() {
+    const k = state.zt.k;
+    state.bubbles.forEach((el, i) => el.classList.toggle('small', (state.diam[i] || 0) * k < 44));
+    const d = state.drill;
+    if (!d) return;
+    d.dots.forEach((el, i) => {
+      const on = d.cur.has(i) && 2 * d.pos[i].r * k >= 34;
+      el.classList.toggle('labeled', on);
+      el.firstChild.textContent = on ? shortName(d.names[i]) : '';
+    });
+    for (const [file, el] of d.files) {
+      const p = d.fileAt.get(file);
+      el.classList.toggle('named', !!p && p.r * k >= 44);
     }
   }
 
@@ -235,23 +322,20 @@
     let x, y, r;
     if (fol.e && state.drill && state.drill.dir === fol.dir) {
       const i = state.drill.v.symbols.findIndex((s) => s.id === state.follow.id);
-      if (i >= 0 && state.drill.cur.has(i)) {
-        const s = state.drill.v.symbols[i];
-        x = x0 + s.x * size;
-        y = y0 + s.y * size;
-        r = state.drill.dots[i].offsetWidth / 2;
-      }
+      if (i >= 0 && state.drill.cur.has(i)) ({ x, y, r } = state.drill.pos[i]);
     } else if (fol.e && !state.drill && pi !== undefined) {
       const p = state.data.packages[pi];
       x = x0 + p.x * size;
       y = y0 + p.y * size;
-      r = state.bubbles[pi].offsetWidth / 2 || p.r * size;
+      r = (state.diam[pi] || 2 * p.r * size) / 2;
     }
     tag.hidden = x === undefined;
     if (tag.hidden) return;
+    // The tag sits outside the zoomed world, so that it keeps its size.
+    const t = state.zt;
     tag.textContent = fol.e.name;
-    tag.style.left = `${x}px`;
-    tag.style.top = `${y - r - 6}px`;
+    tag.style.left = `${t.applyX(x)}px`;
+    tag.style.top = `${t.applyY(y) - r * t.k - 6}px`;
   }
 
   // ---------- Overlays ----------
@@ -262,13 +346,30 @@
     const ci = chapterAt(rev());
     const c = chapters[ci];
     $('chapLabel').textContent = c ? `Chapter ${ci + 1} of ${chapters.length} · ${c.title}` : '';
-    $('cCommits').textContent = f.total.toLocaleString();
-    $('cLive').textContent = f.live.toLocaleString();
-    $('cPkgs').textContent = f.pkgs.filter((p) => p.live > 0).length.toLocaleString();
+    count('cCommits', f.total);
+    count('cLive', f.live);
+    count('cPkgs', f.pkgs.filter((p) => p.live > 0).length);
     $('caption').textContent = caption(f);
     $('caption').hidden = !!state.card;
     const label = state.step === 'commit' ? `${f.sha.slice(0, 7)} · ` : '';
     $('frameLabel').textContent = `${label}frame ${state.frame + 1} of ${state.data.frames.length}`;
+  }
+
+  // count rolls a counter from the number it shows to v.
+  function count(id, v) {
+    const el = $(id);
+    const from = el.shown ?? v;
+    const sel = d3.select(el).interrupt('count');
+    if (from === v || !tweenMs()) {
+      el.shown = v;
+      el.textContent = v.toLocaleString();
+      return;
+    }
+    const i = d3.interpolateRound(from, v);
+    sel.transition('count').duration(tweenMs()).ease(d3.easeCubicOut).tween('text', () => (t) => {
+      el.shown = i(t);
+      el.textContent = el.shown.toLocaleString();
+    });
   }
 
   // The frame's key moment, or else what happened in it.
@@ -406,8 +507,16 @@
     const st = $('stage');
     st.style.setProperty('--ox', `${x0 + p.x * size}px`);
     st.style.setProperty('--oy', `${y0 + p.y * size}px`);
-    state.drill = { dir, pi, v, cur: new Map(), names: [], at: -1, dots: [], peak: Math.max(1, ...v.symbols.map((s) => s.peak)) };
+    // The package map's zoom is kept for coming back; the package opens whole.
+    if (!state.drill) state.outer = state.zt;
+    // Until a symbol is first packed it sits where the server placed it.
+    const pos = v.symbols.map((s) => ({ x: x0 + s.x * size, y: y0 + s.y * size, r: 3 }));
+    state.drill = { dir, pi, v, cur: new Map(), names: [], at: -1, dots: [], peak: Math.max(1, ...v.symbols.map((s) => s.peak)), pos, files: new Map(), fileAt: new Map() };
     state.switching = null;
+    for (const s of v.symbols) {
+      if (!state.drill.files.has(s.file)) state.drill.files.set(s.file, h('div', { class: 'file gone' }, h('span', { class: 'fname' }, s.file)));
+    }
+    $('files').replaceChildren(...state.drill.files.values());
     $('dots').replaceChildren(...v.symbols.map((s) => {
       const el = h('button', { type: 'button', class: `sym gone k-${s.kind}`, tabindex: '-1', onclick: () => followSym(s.id).catch(fail) }, h('span', { class: 'sname' }));
       state.drill.dots.push(el);
@@ -419,7 +528,7 @@
     $('syms').inert = false;
     $('bubbles').inert = true;
     st.classList.add('drilled');
-    placeDots();
+    zoomTo(d3.zoomIdentity);
     render();
     if (document.activeElement && document.activeElement.closest('#bubbles')) $('back').focus();
   }
@@ -433,18 +542,47 @@
     $('drillBar').hidden = true;
     $('syms').inert = true;
     $('bubbles').inert = false;
+    zoomTo(state.outer || d3.zoomIdentity);
+    state.outer = null;
     render();
     if (state.bubbles[pi].tabIndex === 0) state.bubbles[pi].focus();
   }
 
-  function placeDots() {
-    const d = state.drill;
-    const { size, x0, y0 } = state.geom;
-    d.v.symbols.forEach((s, i) => {
-      d.dots[i].style.left = `${x0 + s.x * size}px`;
-      d.dots[i].style.top = `${y0 + s.y * size}px`;
-    });
+  function placeDisc(p) {
+    const disc = $('disc');
+    disc.style.left = `${p.x - p.r}px`;
+    disc.style.top = `${p.y - p.r}px`;
+    disc.style.width = disc.style.height = `${2 * p.r}px`;
   }
+
+  // pack lays the live symbols out as circles sized by their statements,
+  // packed inside a circle per file, packed inside the package's. It returns
+  // the package's circle, or null while nothing is live.
+  function pack(d, minD, maxD) {
+    const live = [...d.cur.keys()].sort((a, b) => a - b);
+    d.fileAt = new Map();
+    if (!live.length) return null;
+    const byFile = d3.group(live, (i) => d.v.symbols[i].file);
+    const root = d3.hierarchy({ children: [...byFile].map(([file, ids]) => ({ file, children: ids.map((i) => ({ i })) })) });
+    d3.pack()
+      .radius((n) => (minD + (maxD - minD) * Math.sqrt((d.cur.get(n.data.i) || 0) / d.peak)) / 2)
+      .padding((n) => (n.depth ? 2 : 8))(root);
+    // Scale down to fit the disc, never up: sizes stay comparable between frames.
+    const { size, x0, y0 } = state.geom;
+    const s = Math.min(1, (0.48 * size) / root.r);
+    const at = (n) => ({ x: x0 + size / 2 + (n.x - root.x) * s, y: y0 + size / 2 + (n.y - root.y) * s, r: n.r * s });
+    for (const f of root.children) {
+      d.fileAt.set(f.data.file, at(f));
+      for (const leaf of f.children) d.pos[leaf.data.i] = at(leaf);
+    }
+    return at(root);
+  }
+
+  const setCircle = (el, p) => {
+    el.style.left = `${p.x}px`;
+    el.style.top = `${p.y}px`;
+    el.style.width = el.style.height = `${2 * p.r}px`;
+  };
 
   // replayTo brings the package's live symbols and their names to frame fi.
   function replayTo(fi) {
@@ -466,26 +604,38 @@
   function renderDrill(animate) {
     const d = state.drill;
     replayTo(state.frame);
-    const { size } = state.geom;
+    const { size, x0, y0 } = state.geom;
     const n = Math.max(1, d.v.symbols.length);
     const maxD = Math.max(6, Math.min(64, (0.8 * size) / Math.sqrt(n)));
     const minD = Math.min(6, maxD);
     const fid = state.follow ? state.follow.id : 0;
+    placeDisc(pack(d, minD, maxD) || { x: x0 + size / 2, y: y0 + size / 2, r: 0.48 * size });
+    for (const [file, el] of d.files) {
+      const p = d.fileAt.get(file);
+      if (p) setCircle(el, p);
+      el.classList.toggle('gone', !p);
+    }
     d.v.symbols.forEach((s, i) => {
       const el = d.dots[i];
       const live = d.cur.has(i);
       const stmts = d.cur.get(i) || 0;
-      const dd = minD + (maxD - minD) * Math.sqrt(stmts / d.peak);
-      if (live) el.style.width = el.style.height = `${dd}px`;
+      if (live && el.classList.contains('gone')) {
+        // A symbol coming to life appears in its place rather than gliding there.
+        el.classList.add('jump');
+        setCircle(el, d.pos[i]);
+        void el.offsetWidth;
+        el.classList.remove('jump');
+      } else if (live) {
+        setCircle(el, d.pos[i]);
+      }
       el.classList.toggle('gone', !live);
       el.classList.toggle('followed', s.id === fid);
-      el.classList.toggle('labeled', live && dd >= 34);
-      el.firstChild.textContent = live && dd >= 34 ? shortName(d.names[i]) : '';
       const label = `${d.names[i]} · ${s.kind} · ${plural(stmts, 'statement')}`;
       el.title = label;
       el.setAttribute('aria-label', `${label}. Follow`);
       el.tabIndex = live ? 0 : -1;
     });
+    relabel();
     const live = d.cur.size;
     $('drillNote').textContent = `${plural(live, 'live symbol')}${d.v.truncated ? ` · the biggest ${d.v.symbols.length.toLocaleString()} of ${d.v.total.toLocaleString()} shown` : ''}`;
     if (animate) animateEvents(d.v.frames[state.frame].ev);
@@ -512,12 +662,11 @@
   // signatures flash.
   function animateEvents(evs) {
     const d = state.drill;
-    const { size, x0, y0 } = state.geom;
     const motion = !reduced.matches;
     let tags = 0;
     for (const e of evs) {
-      const el = d.dots[e.s], s = d.v.symbols[e.s];
-      const x = x0 + s.x * size, y = y0 + s.y * size;
+      const el = d.dots[e.s];
+      const { x, y } = d.pos[e.s];
       const more = tags < MAX_TAGS;
       if (e.k === 'out' || e.k === 'in') {
         const r = rim(e.k === 'out' ? e.to : e.from);
@@ -1022,6 +1171,10 @@
     $('storyMode').addEventListener('click', () => setStory(!state.story));
     $('narrate').addEventListener('click', () => setNarrate(!state.narrate));
     $('back').addEventListener('click', undrill);
+    setupZoom();
+    $('zoomIn').addEventListener('click', () => zoomBy(1.6));
+    $('zoomOut').addEventListener('click', () => zoomBy(1 / 1.6));
+    $('zoomReset').addEventListener('click', () => zoomTo(d3.zoomIdentity));
     if (!('speechSynthesis' in window)) {
       $('narrate').disabled = true;
       $('narrate').title = 'This browser cannot speak';
@@ -1063,6 +1216,16 @@
           break;
         case ']':
           stepMoment(1);
+          break;
+        case '+':
+        case '=':
+          zoomBy(1.6);
+          break;
+        case '-':
+          zoomBy(1 / 1.6);
+          break;
+        case '0':
+          zoomTo(d3.zoomIdentity);
           break;
         case 'Escape':
           if (state.card) hideCard();
