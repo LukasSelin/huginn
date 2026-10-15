@@ -1,98 +1,131 @@
 package journey
 
 import (
-	"cmp"
 	"math"
-	"slices"
 )
 
 // layout places every package once for the whole journey: a bubble whose
-// area is its peak size, pulled towards the packages it depends on and
-// pushed off the others. It is a force simulation with a fixed start and a
-// fixed number of steps, so the same history always gets the same layout.
-func layout(j *Journey) {
+// area is its peak size, placed so that the distance between two packages
+// follows how tightly they are coupled. Packages that import each other and
+// share many references sit side by side; packages linked only through
+// others sit as far apart as that chain is long; unrelated ones keep to the
+// edge.
+//
+// It is stress majorization over coupling distances, from a fixed start
+// and for a fixed number of steps, so the same history always gets the
+// same layout.
+func layout(j *Journey, coupling []spring) {
 	n := len(j.Packages)
 	if n == 0 {
 		return
 	}
 	r := make([]float64, n)
+	mean := 0.0
 	for i, p := range j.Packages {
 		r[i] = math.Sqrt(float64(max(p.Peak, 1)))
+		mean += r[i]
 	}
+	mean /= float64(n)
+	const gap = 0.6
+	clear := func(a, b int) float64 { return r[a] + r[b] + gap*mean }
 
-	// Dependencies at any point in the history, weighted by how long and
-	// how strongly they held.
-	weight := map[[2]int]float64{}
-	for _, f := range j.Frames {
-		for _, d := range f.Deps {
-			a, b := min(d.From, d.To), max(d.From, d.To)
-			weight[[2]int{a, b}] += math.Log1p(float64(d.Refs))
+	// The tightest pair is wanted just clear of each other, the loosest
+	// a few bubbles further.
+	maxW := 0.0
+	for _, s := range coupling {
+		maxW = max(maxW, s.w)
+	}
+	adj := make([][]spring, n)
+	for _, s := range coupling {
+		s.w = clear(s.a, s.b) + 3*mean*(1-s.w/maxW)
+		adj[s.a] = append(adj[s.a], s)
+		adj[s.b] = append(adj[s.b], spring{s.b, s.a, s.w})
+	}
+	d := distances(adj)
+	far := 0.0
+	for i := range n {
+		for k := range n {
+			if !math.IsInf(d[i][k], 1) {
+				far = max(far, d[i][k])
+			}
 		}
 	}
-	var springs []spring
-	maxW := 0.0
-	for k, w := range weight {
-		springs = append(springs, spring{k[0], k[1], w})
-		maxW = max(maxW, w)
+	for i := range n {
+		for k := range n {
+			if math.IsInf(d[i][k], 1) {
+				d[i][k] = max(far, clear(i, k)) + 2*mean
+			}
+			if i != k {
+				// A path can be shorter than the bubbles at its ends.
+				d[i][k] = max(d[i][k], clear(i, k))
+			}
+		}
 	}
-	// Map order is random; the sum of forces must not depend on it.
-	slices.SortFunc(springs, func(p, q spring) int { return cmp.Or(cmp.Compare(p.a, q.a), cmp.Compare(p.b, q.b)) })
 
 	// Start on a sunflower spiral in path order, so siblings start close.
 	x, y := make([]float64, n), make([]float64, n)
-	mean := 0.0
-	for _, v := range r {
-		mean += v
-	}
-	mean /= float64(n)
 	const golden = 2.399963229728653 // radians
 	for i := range n {
-		d := 2 * mean * math.Sqrt(float64(i)+0.5)
-		x[i], y[i] = d*math.Cos(float64(i)*golden), d*math.Sin(float64(i)*golden)
+		s := 2 * mean * math.Sqrt(float64(i)+0.5)
+		x[i], y[i] = s*math.Cos(float64(i)*golden), s*math.Sin(float64(i)*golden)
 	}
 
-	const steps, gap = 300, 0.6
-	for step := range steps {
-		cool := 1 - float64(step)/steps
-		fx, fy := make([]float64, n), make([]float64, n)
-		for _, s := range springs {
-			dx, dy := x[s.b]-x[s.a], y[s.b]-y[s.a]
-			d := math.Hypot(dx, dy) + 1e-9
-			want := r[s.a] + r[s.b] + gap*mean
-			f := 0.05 * (s.w / maxW) * (d - want) / d
-			fx[s.a] += f * dx
-			fy[s.a] += f * dy
-			fx[s.b] -= f * dx
-			fy[s.b] -= f * dy
-		}
+	// Each step moves every package to where its distances to all the
+	// others, weighted by 1/d², are best met given where the others are.
+	nx, ny := make([]float64, n), make([]float64, n)
+	for range 300 {
 		for i := range n {
-			// Gravity keeps unconnected packages from drifting off.
-			fx[i] -= 0.02 * x[i]
-			fy[i] -= 0.02 * y[i]
+			sx, sy, sw := 0.0, 0.0, 0.0
+			for k := range n {
+				if k == i {
+					continue
+				}
+				w := 1 / (d[i][k] * d[i][k])
+				dx, dy := x[i]-x[k], y[i]-y[k]
+				l := math.Hypot(dx, dy)
+				if l < 1e-9 {
+					// Coincident: separate along a fixed direction.
+					dx, dy, l = float64(i-k), 1, math.Hypot(float64(i-k), 1)
+				}
+				sx += w * (x[k] + d[i][k]*dx/l)
+				sy += w * (y[k] + d[i][k]*dy/l)
+				sw += w
+			}
+			if sw == 0 {
+				nx[i], ny[i] = x[i], y[i]
+				continue
+			}
+			nx[i], ny[i] = sx/sw, sy/sw
 		}
-		for i := range n {
-			x[i] += cool * fx[i]
-			y[i] += cool * fy[i]
-		}
-		// Resolve overlaps directly; this is what keeps bubbles apart.
+		x, nx = nx, x
+		y, ny = ny, y
+	}
+
+	// Distances are only met on average; push any bubbles still overlapping
+	// apart until none do.
+	for range 500 {
+		moved := false
 		for i := range n {
 			for k := i + 1; k < n; k++ {
 				dx, dy := x[k]-x[i], y[k]-y[i]
-				d := math.Hypot(dx, dy)
-				want := r[i] + r[k] + gap*mean
-				if d >= want {
+				l := math.Hypot(dx, dy)
+				want := clear(i, k)
+				if l >= want {
 					continue
 				}
-				if d < 1e-9 {
-					// Coincident: separate along a fixed direction.
-					dx, dy, d = float64(k-i), 1, math.Hypot(float64(k-i), 1)
+				if l < 1e-9 {
+					dx, dy, l = float64(k-i), 1, math.Hypot(float64(k-i), 1)
 				}
-				push := (want - d) / d / 2
+				push := (want - l) / l / 2
 				x[i] -= dx * push
 				y[i] -= dy * push
 				x[k] += dx * push
 				y[k] += dy * push
+				moved = true
 			}
+		}
+		if !moved {
+			break
 		}
 	}
 
@@ -114,7 +147,42 @@ func layout(j *Journey) {
 	}
 }
 
+// spring links packages a and b with weight w: their coupling, or, once
+// laid out, the length it asks for.
 type spring struct {
 	a, b int
 	w    float64
+}
+
+// distances returns the shortest path lengths between all packages over
+// adj, +Inf where there is none. Packages are few and links sparse, so it
+// runs a simple Dijkstra from each.
+func distances(adj [][]spring) [][]float64 {
+	n := len(adj)
+	d := make([][]float64, n)
+	for src := range n {
+		dist := make([]float64, n)
+		for i := range dist {
+			dist[i] = math.Inf(1)
+		}
+		dist[src] = 0
+		done := make([]bool, n)
+		for {
+			u := -1
+			for i := range n {
+				if !done[i] && !math.IsInf(dist[i], 1) && (u < 0 || dist[i] < dist[u]) {
+					u = i
+				}
+			}
+			if u < 0 {
+				break
+			}
+			done[u] = true
+			for _, s := range adj[u] {
+				dist[s.b] = min(dist[s.b], dist[u]+s.w)
+			}
+		}
+		d[src] = dist
+	}
+	return d
 }
