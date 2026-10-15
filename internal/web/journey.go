@@ -10,6 +10,7 @@ import (
 	"strings"
 	"sync"
 
+	"huginn/internal/git"
 	"huginn/internal/journey"
 	"huginn/internal/lineage"
 	"huginn/internal/story"
@@ -36,7 +37,13 @@ func (s *Server) story(ix *index) (*story.Story, error) {
 	ix.journeys.storyOnce.Do(func() {
 		// Templated narration needs no context of its own; a narrator that
 		// calls out would get one from the request instead.
-		ix.journeys.story, ix.journeys.storyErr = story.Build(context.Background(), ix.h, s.journey(ix, journey.Commit), story.Templates{})
+		ctx := context.Background()
+		tags, err := s.repo.Tags(ctx, git.Options{Branch: s.opts.Branch})
+		if err != nil {
+			ix.journeys.storyErr = err
+			return
+		}
+		ix.journeys.story, ix.journeys.storyErr = story.Build(ctx, ix.h, s.journey(ix, journey.Commit), story.FromTags(tags), story.Templates{})
 	})
 	return ix.journeys.story, ix.journeys.storyErr
 }
@@ -47,6 +54,7 @@ type journeyJSON struct {
 	Frames   []frameJSON   `json:"frames"`
 	Chapters []chapterJSON `json:"chapters"`
 	Moments  []momentJSON  `json:"moments"`  // every chapter's key moments, by time
+	Releases []momentJSON  `json:"releases"` // every release, by time
 	RevTimes []int64       `json:"revTimes"` // unix seconds of every commit, oldest first
 }
 
@@ -93,6 +101,41 @@ type chapterJSON struct {
 	Live      int          `json:"live"`
 	LivePkgs  int          `json:"livePackages"`
 	EditCount int          `json:"edits"`
+	Releases  []string     `json:"releases"`
+	Themes    themesJSON   `json:"themes"`
+	Authors   int          `json:"authors"`
+	People    []personJSON `json:"contributors"` // most semantic edits first
+	Newcomers []string     `json:"newcomers"`
+}
+
+type themesJSON struct {
+	Types        []themeJSON `json:"types"`
+	Typed        int         `json:"typed"` // commits with a conventional type
+	Scopes       []themeJSON `json:"scopes"`
+	Terms        []themeJSON `json:"terms"`
+	PullRequests int         `json:"pullRequests"`
+}
+
+type themeJSON struct {
+	Name  string `json:"name"`
+	Count int    `json:"count"`
+}
+
+type personJSON struct {
+	Name    string `json:"name"`
+	Commits int    `json:"commits"`
+	Edits   int    `json:"edits"`
+}
+
+func themesOf(t story.Themes) themesJSON {
+	list := func(ts []story.Theme) []themeJSON {
+		out := make([]themeJSON, len(ts))
+		for i, x := range ts {
+			out[i] = themeJSON{x.Name, x.Count}
+		}
+		return out
+	}
+	return themesJSON{Types: list(t.Types), Typed: t.Typed, Scopes: list(t.Scopes), Terms: list(t.Terms), PullRequests: t.PullRequests}
 }
 
 type momentJSON struct {
@@ -101,6 +144,7 @@ type momentJSON struct {
 	Rev     int     `json:"rev"` // revision index, oldest first
 	SHA     string  `json:"sha"`
 	Package string  `json:"pkg,omitempty"`
+	Tag     string  `json:"tag,omitempty"` // for a release
 	Text    string  `json:"text"`
 	Weight  float64 `json:"weight"`
 }
@@ -108,7 +152,7 @@ type momentJSON struct {
 func momentsJSON(ms []story.Moment) []momentJSON {
 	out := make([]momentJSON, 0, len(ms))
 	for _, m := range ms {
-		out = append(out, momentJSON{Kind: m.Kind.String(), T: m.Time.Unix(), Rev: m.Rev, SHA: m.SHA, Package: m.Package, Text: m.Text, Weight: m.Weight})
+		out = append(out, momentJSON{Kind: m.Kind.String(), T: m.Time.Unix(), Rev: m.Rev, SHA: m.SHA, Package: m.Package, Tag: m.Tag, Text: m.Text, Weight: m.Weight})
 	}
 	return out
 }
@@ -131,7 +175,7 @@ func (s *Server) journeyAPI(ix *index, w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	j := s.journey(ix, step)
-	out := journeyJSON{Step: step.String(), Packages: []packageJSON{}, Frames: []frameJSON{}, Chapters: []chapterJSON{}, Moments: momentsJSON(st.Moments)}
+	out := journeyJSON{Step: step.String(), Packages: []packageJSON{}, Frames: []frameJSON{}, Chapters: []chapterJSON{}, Moments: momentsJSON(st.Moments), Releases: momentsJSON(st.Releases)}
 	out.RevTimes = make([]int64, ix.h.Revisions())
 	for i := range out.RevTimes {
 		_, t := ix.h.RevisionAt(i)
@@ -163,7 +207,12 @@ func (s *Server) journeyAPI(ix *index, w http.ResponseWriter, r *http.Request) {
 			Commits: c.Commits, Added: c.Added, Removed: c.Removed, Hottest: c.Hottest, HotEdits: c.HottestEdits,
 			Births: nonNil(c.Births), Deaths: nonNil(c.Deaths), Moments: momentsJSON(c.Moments),
 			Live: c.Live, LivePkgs: c.LivePackages, EditCount: c.Edits,
+			Releases: nonNil(c.Releases), Themes: themesOf(c.Themes), Authors: c.Authors, People: []personJSON{}, Newcomers: nonNil(c.Newcomers),
 		})
+		cj := &out.Chapters[len(out.Chapters)-1]
+		for _, p := range c.Contributors {
+			cj.People = append(cj.People, personJSON{p.Name, p.Commits, p.Edits})
+		}
 	}
 	writeJSON(w, out)
 }

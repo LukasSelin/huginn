@@ -28,6 +28,15 @@ function h(tag, attrs, ...kids) {
 }
 
 const $ = (id) => document.getElementById(id);
+
+// svg builds an SVG element; attribute values are set as given.
+const NS = 'http://www.w3.org/2000/svg';
+function svg(tag, attrs, ...kids) {
+  const el = document.createElementNS(NS, tag);
+  for (const [k, v] of Object.entries(attrs || {})) el.setAttribute(k, v);
+  el.append(...kids);
+  return el;
+}
 const mark = (kind) => h('span', { class: `mark m-${kind}${DIAMOND.has(kind) ? ' diamond' : ''}`, 'aria-hidden': 'true' });
 const fmtDate = (t) => new Date(t * 1000).toLocaleDateString(undefined, { year: 'numeric', month: 'short', day: 'numeric' });
 const plural = (n, word) => `${n.toLocaleString()} ${word}${n === 1 ? '' : 's'}`;

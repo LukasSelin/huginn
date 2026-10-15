@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"strings"
+	"unicode/utf8"
 
 	"huginn/internal/ast"
 	"huginn/internal/git"
@@ -11,7 +12,36 @@ import (
 
 // FromCommit converts a walked commit into a revision.
 func FromCommit(c *git.Commit) Revision {
-	return Revision{SHA: c.Hash, Time: c.AuthorTime, Author: c.Author, Changes: c.Changes}
+	subject, detail := Subjects(c.Message)
+	return Revision{SHA: c.Hash, Time: c.AuthorTime, Author: c.Author, Subject: subject, Detail: detail, Changes: c.Changes}
+}
+
+// maxSubject caps the length of the lines Subjects keeps, in bytes.
+const maxSubject = 200
+
+// Subjects returns the first line of a commit message and the next
+// non-empty one, each trimmed and capped.
+func Subjects(msg string) (subject, detail string) {
+	lines := strings.Split(msg, "\n")
+	subject = clip(lines[0])
+	for _, l := range lines[1:] {
+		if l = clip(l); l != "" {
+			return subject, l
+		}
+	}
+	return subject, ""
+}
+
+func clip(s string) string {
+	s = strings.TrimSpace(s)
+	if len(s) <= maxSubject {
+		return s
+	}
+	s = s[:maxSubject]
+	for len(s) > 0 && !utf8.ValidString(s) {
+		s = s[:len(s)-1]
+	}
+	return s
 }
 
 // BuildOptions tunes Build.

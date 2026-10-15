@@ -77,6 +77,7 @@ The UI is backed by a small JSON API:
 | `GET /api/dirs` | every directory with its live symbols and number of changes |
 | `GET /api/dir?d=internal/git` | the lanes of one directory: each symbol with its change markers |
 | `GET /api/symbol/{id}` | one symbol's declaration and its full list of events |
+| `GET /api/health` | trends over the whole history (exported symbols, complexity, restructuring, survival, test lines), hotspot files and owners |
 
 ```
 $ curl -s localhost:7878/api/dirs
