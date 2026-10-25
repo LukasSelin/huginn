@@ -15,6 +15,8 @@
   const MAX_TAGS = 8; // event tags per frame
   const DAY = 86400;
   const MAX_ZOOM = 8;
+  const MAX_GROW = 6; // how far past its place a package grows on a sparse map
+  const MAX_FIT = 4; // how far the map closes in on its first few packages
   const reduced = matchMedia('(prefers-reduced-motion: reduce)');
   // How long size, colour, edge and counter changes take, at the current speed.
   const tweenMs = () => (reduced.matches ? 0 : 600 / state.speed);
@@ -36,6 +38,7 @@
     refs: null, // dependency stroke width by references between two packages
     bubbles: [], // elements by package index
     diam: [], // bubble diameters by package index, before zooming
+    view: null, // the part of the map the frame shows: { cx, cy, z, fx, fy }
     zoom: null, // the stage's d3 zoom behaviour
     zt: d3.zoomIdentity, // its current transform
     outer: null, // the transform of the package map while a package is open
@@ -220,11 +223,7 @@
     const size = Math.max(120, Math.min(W - 40, H - top - bottom));
     const x0 = (W - size) / 2, y0 = top + (H - top - bottom - size) / 2;
     state.geom = { size, x0, y0 };
-    state.data.packages.forEach((p, i) => {
-      const el = state.bubbles[i];
-      el.style.left = `${x0 + p.x * size}px`;
-      el.style.top = `${y0 + p.y * size}px`;
-    });
+    state.data.packages.forEach((p, i) => placeBubble(i));
     $('deps').setAttribute('viewBox', `0 0 ${W} ${H}`);
     d3.select('#deps').selectAll(':scope > path').attr('d', (e) => edgePath(e.a, e.b));
     placeDisc({ x: x0 + size / 2, y: y0 + size / 2, r: 0.48 * size });
@@ -232,13 +231,55 @@
     if (state.data.frames.length) render(false);
   }
 
+  // fitView frames the packages live in frame f. Early on they huddle in a
+  // corner of the finished map, so the view closes in on them, and eases out
+  // to the whole map as it fills.
+  function fitView(f) {
+    const { packages } = state.data;
+    const box = (ps) => {
+      const b = { x0: Infinity, y0: Infinity, x1: -Infinity, y1: -Infinity };
+      for (const p of ps) {
+        b.x0 = Math.min(b.x0, p.x - p.r); b.x1 = Math.max(b.x1, p.x + p.r);
+        b.y0 = Math.min(b.y0, p.y - p.r); b.y1 = Math.max(b.y1, p.y + p.r);
+      }
+      return b;
+    };
+    const all = box(packages);
+    const fx = (all.x0 + all.x1) / 2, fy = (all.y0 + all.y1) / 2;
+    const live = box(f.pkgs.filter((s) => s.live > 0).map((s) => packages[s.p]));
+    if (live.x0 > live.x1) return { cx: fx, cy: fy, z: 1, fx, fy };
+    const pad = 1.3;
+    const z = Math.max(1, Math.min(MAX_FIT,
+      (all.x1 - all.x0) / (pad * (live.x1 - live.x0)), (all.y1 - all.y0) / (pad * (live.y1 - live.y0))));
+    // Keep the view inside the finished map, so that at z = 1 it is the map.
+    const keep = (c, lo, hi) => {
+      const half = (hi - lo) / 2 / z;
+      return Math.min(hi - half, Math.max(lo + half, c));
+    };
+    return { cx: keep((live.x0 + live.x1) / 2, all.x0, all.x1), cy: keep((live.y0 + live.y1) / 2, all.y0, all.y1), z, fx, fy };
+  }
+
+  // at places package pi on the stage, through the frame's view.
+  function at(pi) {
+    const { size, x0, y0 } = state.geom;
+    const p = state.data.packages[pi];
+    const v = state.view;
+    if (!v) return { x: x0 + p.x * size, y: y0 + p.y * size };
+    return { x: x0 + size * (v.fx + (p.x - v.cx) * v.z), y: y0 + size * (v.fy + (p.y - v.cy) * v.z) };
+  }
+
+  function placeBubble(i) {
+    const { x, y } = at(i);
+    const el = state.bubbles[i];
+    el.style.left = `${x}px`;
+    el.style.top = `${y}px`;
+  }
+
   // edgePath curves a dependency away from the middle of the map, so that
   // edges between packages on the rim keep clear of the busy center.
   function edgePath(a, b) {
     const { size, x0, y0 } = state.geom;
-    const pa = state.data.packages[a], pb = state.data.packages[b];
-    const ax = x0 + pa.x * size, ay = y0 + pa.y * size;
-    const bx = x0 + pb.x * size, by = y0 + pb.y * size;
+    const { x: ax, y: ay } = at(a), { x: bx, y: by } = at(b);
     const mx = (ax + bx) / 2, my = (ay + by) / 2;
     const len = Math.hypot(bx - ax, by - ay) || 1;
     let nx = (ay - by) / len, ny = (bx - ax) / len;
@@ -261,6 +302,31 @@
     return Math.min(4, Math.max(1, s));
   }
 
+  // growth returns, for frame f, how much of its place on the map each live
+  // package fills. Early on every package is a sliver of its peak and the map
+  // is mostly empty, so all of them grow alike: first until the fullest fills
+  // its place, then on into the room left until two live ones would touch.
+  function growth(f, z) {
+    const { packages } = state.data;
+    const live = f.pkgs.filter((s) => s.live > 0);
+    if (!live.length) return () => 0;
+    const grown = (s) => Math.sqrt(s.live / Math.max(1, packages[s.p].peak));
+    const boost = 1 / Math.max(0.05, ...live.map(grown));
+    const r = live.map((s) => packages[s.p].r * Math.min(1, boost * grown(s)));
+    let room = MAX_GROW;
+    for (let i = 0; i < live.length; i++) {
+      // No wider than a fifth of the stage.
+      room = Math.min(room, 0.1 / (r[i] * z));
+      const a = packages[live[i].p];
+      for (let j = i + 1; j < live.length; j++) {
+        const b = packages[live[j].p];
+        room = Math.min(room, (0.92 * Math.hypot(a.x - b.x, a.y - b.y)) / (r[i] + r[j]));
+      }
+    }
+    const k = Math.max(1, room);
+    return (s) => k * Math.min(1, boost * grown(s));
+  }
+
   function renderStage(f) {
     const { packages } = state.data;
     const { size } = state.geom;
@@ -270,12 +336,16 @@
     const folPkg = fol.dir != null ? state.pathIdx.get(fol.dir) : undefined;
     const know = state.colorBy === 'knowledge';
     const who = state.who ? state.data.authors.indexOf(state.who) : -1;
+    state.view = fitView(f);
+    const z = state.view.z;
+    const grow = growth(f, z);
     packages.forEach((p, i) => {
       const el = state.bubbles[i];
       const s = now.get(i);
       const live = s ? s.live : 0;
       const a = actStep(s ? editsOf(s) : 0);
-      const d = live > 0 ? Math.max(8, 2 * p.r * size * Math.sqrt(live / Math.max(1, p.peak))) : Math.max(8, p.r * size);
+      const d = live > 0 ? Math.max(8, 2 * p.r * size * z * grow(s)) : Math.max(8, p.r * size * z);
+      placeBubble(i);
       state.diam[i] = d;
       el.style.width = el.style.height = `${d}px`;
       const ringed = know && live > 0 && s.knowers;
@@ -310,7 +380,8 @@
         .attr('d', (e) => edgePath(e.a, e.b))
         .attr('pathLength', 1).attr('stroke-dasharray', '1 1').attr('stroke-dashoffset', 1)
         .call((en) => en.transition().duration(ms).ease(d3.easeCubicOut).attr('stroke-dashoffset', 0)),
-      (update) => update.call((u) => u.filter('.leaving').interrupt().classed('leaving', false).style('opacity', null).attr('stroke-dashoffset', 0)),
+      (update) => update.call((u) => u.filter('.leaving').interrupt().classed('leaving', false).style('opacity', null).attr('stroke-dashoffset', 0))
+        .call((u) => u.transition('view').duration(ms).ease(d3.easeCubicInOut).attr('d', (e) => edgePath(e.a, e.b))),
       (exit) => exit.filter(':not(.leaving)').classed('leaving', true)
         .call((ex) => ex.transition().duration(ms).style('opacity', 0).remove()))
       .classed('hot', (e) => e.hot)
@@ -483,10 +554,8 @@
       const i = state.drill.v.symbols.findIndex((s) => s.id === state.follow.id);
       if (i >= 0 && state.drill.cur.has(i)) ({ x, y, r } = state.drill.pos[i]);
     } else if (fol.e && !state.drill && pi !== undefined) {
-      const p = state.data.packages[pi];
-      x = x0 + p.x * size;
-      y = y0 + p.y * size;
-      r = (state.diam[pi] || 2 * p.r * size) / 2;
+      ({ x, y } = at(pi));
+      r = (state.diam[pi] || 2 * state.data.packages[pi].r * size) / 2;
     }
     tag.hidden = x === undefined;
     if (tag.hidden) return;
@@ -665,11 +734,11 @@
       state.views.set(key, v);
       if (step !== state.step) return; // the step changed meanwhile
     }
-    const p = state.data.packages[pi];
     const { size, x0, y0 } = state.geom;
     const st = $('stage');
-    st.style.setProperty('--ox', `${x0 + p.x * size}px`);
-    st.style.setProperty('--oy', `${y0 + p.y * size}px`);
+    const o = at(pi);
+    st.style.setProperty('--ox', `${o.x}px`);
+    st.style.setProperty('--oy', `${o.y}px`);
     // The package map's zoom is kept for coming back; the package opens whole.
     if (!state.drill) state.outer = state.zt;
     // Until a symbol is first packed it sits where the server placed it.
