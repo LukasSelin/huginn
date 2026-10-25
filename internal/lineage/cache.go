@@ -33,6 +33,10 @@ type Cache struct {
 // .git/huginn. The directory is created on first write.
 func NewCache(dir string) *Cache { return &Cache{dir: dir} }
 
+// Dir returns the directory the cache keeps its files in, where callers may
+// keep files of their own that derive from the same history.
+func (c *Cache) Dir() string { return c.dir }
+
 // cacheHeader is decoded before anything else, so that a cache from another
 // version is discarded without decoding the rest.
 type cacheHeader struct {

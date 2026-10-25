@@ -15,7 +15,9 @@
 // prints the history told in chapters, as the journey page tells it.
 //
 // They keep the walked history in .git/huginn, so that the next run only
-// walks commits it has not seen; -no-cache walks everything afresh.
+// walks commits it has not seen; -no-cache walks everything afresh. serve
+// also keeps the responses it built for the last history it indexed, so that
+// serving the same commits and tags again starts without rebuilding them.
 //
 //	huginn semdiff [-C dir] [-include-generated] [-callers n] rev
 //
