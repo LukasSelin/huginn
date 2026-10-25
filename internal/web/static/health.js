@@ -188,7 +188,7 @@ function renderHotspots(hotspots) {
     h('th', { scope: 'col', class: 'bar' }, 'Score'),
     h('th', { scope: 'col' }, 'Most complex symbol')));
   const rows = hotspots.map((s) => h('tr', null,
-    h('td', { class: 'mono' }, h('a', { href: `/#s=${encodeURIComponent(s.dir)}&w=all` }, s.path)),
+    h('td', { class: 'mono' }, h('a', { href: `/map#s=${encodeURIComponent(s.dir)}&w=all` }, s.path)),
     h('td', { class: 'num' }, s.edits),
     h('td', { class: 'num' }, s.fixes),
     h('td', { class: 'num' }, s.authors),

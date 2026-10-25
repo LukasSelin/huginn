@@ -115,8 +115,10 @@ func (s *Server) Index(ctx context.Context) error {
 func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
 	mux.Handle("GET /", s.file(""))
-	mux.Handle("GET /health", s.file("health.html"))
+	mux.Handle("GET /{$}", s.file("journey.html"))
 	mux.Handle("GET /journey", s.file("journey.html"))
+	mux.Handle("GET /map", s.file("index.html"))
+	mux.Handle("GET /health", s.file("health.html"))
 	mux.HandleFunc("GET /api/status", s.status)
 	s.indexRoutes(mux, s.index.Load)
 	mux.HandleFunc("GET /api/commit/{rev...}", s.commit)
