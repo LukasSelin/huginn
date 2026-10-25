@@ -56,6 +56,7 @@
     edges: null, // the stage's dependencies by key, at the current frame
     hover: null, // the package under the pointer
     focused: null, // the package with keyboard focus
+    picked: null, // the package clicked once: the map narrows to it and its neighbours
     links: null, // the package in the breakout: { dir, rev, v, nodes, adj, wires, lit }
   };
 
@@ -196,9 +197,12 @@
     const { packages } = state.data;
     const wrap = $('bubbles');
     wrap.replaceChildren();
-    state.hover = state.focused = null;
+    state.hover = state.focused = state.picked = null;
     state.bubbles = packages.map((p, i) => {
-      const el = h('button', { type: 'button', class: 'bubble gone', tabindex: '-1', onclick: () => openLinks(p.path).catch(fail) },
+      // The first click narrows the map to the package and its neighbours;
+      // a second one breaks it out in full.
+      const choose = () => (state.picked === i ? openLinks(p.path).catch(fail) : pick(i));
+      const el = h('button', { type: 'button', class: 'bubble gone', tabindex: '-1', onclick: choose },
         h('span', { class: 'bname' }, base(p.path)));
       el.addEventListener('pointerenter', (e) => { if (e.pointerType !== 'touch') setLit('hover', i); });
       el.addEventListener('pointerleave', () => setLit('hover', null));
@@ -357,7 +361,8 @@
       el.className = `bubble ${cls}${d * state.zt.k < 44 ? ' small' : ''}${i === focus ? ' focus' : ''}${i === folPkg ? ' followed' : ''}`;
       const label = live > 0 ? `${p.path} · ${plural(live, 'symbol')}${s && s.kinds ? ` · ${describeKinds(s.kinds)}` : ''}${knowersText(s)}` : p.path;
       el.title = label;
-      el.setAttribute('aria-label', `${label}. Show the functions crossing into and out of it`);
+      el.setAttribute('aria-label', i === state.picked ? `${label}. Show the functions crossing into and out of it`
+        : `${label}. Show only it and the packages it shares dependencies with`);
       el.tabIndex = live > 0 && !state.drill ? 0 : -1;
     });
 
@@ -392,10 +397,19 @@
 
   // ---------- A package's dependencies ----------
 
-  // The package hovered, or else the one focused, has its dependencies lit:
-  // the packages it uses and the ones using it stay, marked with the
-  // references across, and the rest of the map fades.
-  const litPkg = () => (state.drill ? null : state.hover ?? state.focused);
+  // The package picked, or else the one hovered or focused, has its
+  // dependencies lit: the packages it uses and the ones using it stay, marked
+  // with the references across, and the rest of the map fades, or goes
+  // altogether while a package is picked.
+  const litPkg = () => (state.drill ? null : state.picked ?? state.hover ?? state.focused);
+
+  function pick(pi) {
+    if (state.picked === pi) return;
+    state.picked = pi;
+    render(false);
+    if (state.data && state.data.frames.length) $('caption').textContent = caption(state.data.frames[state.frame]);
+  }
+  const unpick = () => pick(null);
 
   function setLit(key, pi) {
     if (state[key] === pi) return;
@@ -420,11 +434,15 @@
   function renderLit() {
     const lit = litPkg();
     const near = lit == null ? new Map() : litDeps(lit);
+    const picked = lit != null && lit === state.picked;
     $('stage').classList.toggle('lit', lit != null);
+    $('stage').classList.toggle('picked', picked);
     state.bubbles.forEach((el, i) => {
       const n = near.get(i);
       el.classList.toggle('lit', i === lit);
       el.classList.toggle('near', !!n);
+      // The packages filtered out can't be tabbed to.
+      if (picked && i !== lit && !n) el.tabIndex = -1;
       let badge = el.querySelector('.nref');
       if (!n) {
         if (badge) badge.remove();
@@ -742,6 +760,7 @@
     if (!state.drill) state.outer = state.zt;
     // Until a symbol is first packed it sits where the server placed it.
     const pos = v.symbols.map((s) => ({ x: x0 + s.x * size, y: y0 + s.y * size, r: 3 }));
+    state.picked = null;
     state.drill = { dir, pi, v, cur: new Map(), names: [], at: -1, dots: [], peak: Math.max(1, ...v.symbols.map((s) => s.peak)), pos, files: new Map(), fileAt: new Map() };
     state.switching = null;
     for (const s of v.symbols) {
@@ -1680,6 +1699,10 @@
     $('who').addEventListener('change', (e) => setWho(e.target.value));
     $('narrate').addEventListener('click', () => setNarrate(!state.narrate));
     $('back').addEventListener('click', undrill);
+    // A click on the map around the packages brings the rest of them back.
+    $('stage').addEventListener('click', (e) => {
+      if (e.target.closest('#world') && !e.target.closest('.bubble, #syms')) unpick();
+    });
     $('boClose').addEventListener('click', () => closeLinks());
     $('boInside').addEventListener('click', () => {
       const { dir } = state.links;
@@ -1746,6 +1769,7 @@
         case 'Escape':
           if (state.links) closeLinks();
           else if (state.card) hideCard();
+          else if (state.picked != null && !state.drill) unpick();
           else undrill();
           break;
         default:
