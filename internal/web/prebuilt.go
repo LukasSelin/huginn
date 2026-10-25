@@ -165,7 +165,7 @@ var steps = []journey.Step{journey.Commit, journey.Week, journey.Month}
 // pageURLs are what the pages ask for when they open. They are built before
 // the index is published, so no page waits on them.
 func (s *Server) pageURLs(ix *index) []string {
-	urls := []string{"/api/dirs", "/api/health"}
+	urls := []string{"/api/health"}
 	for _, st := range steps {
 		urls = append(urls, "/api/journey?step="+st.String())
 	}
@@ -196,9 +196,6 @@ func (s *Server) detailURLs(ix *index) []string {
 	}
 	for _, d := range ix.cmap.Dirs() {
 		urls = append(urls, withQuery("/api/map/"+escDir(d.Path), ix.mapWindow(mapDefaultWindow, false)))
-	}
-	for _, d := range ix.order {
-		urls = append(urls, "/api/dir?d="+url.QueryEscape(d))
 	}
 	return urls
 }

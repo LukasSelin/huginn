@@ -1,6 +1,6 @@
 'use strict';
 
-// Helpers shared by the map and the symbol timeline.
+// Helpers shared by the pages.
 
 // Kinds of change, highest priority first: when several land in one time
 // bucket, the first in this list is the one drawn.

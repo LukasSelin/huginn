@@ -16,8 +16,8 @@ import (
 // reportCacheSize is how many commit reports are kept, most recently used.
 const reportCacheSize = 64
 
-// commitJSON is the semantic diff report of one commit, as the commit screen
-// draws it.
+// commitJSON is the semantic diff report of one commit, as the journey's
+// key moments summarize it.
 type commitJSON struct {
 	SHA     string   `json:"sha"`
 	Parents []string `json:"parents"`

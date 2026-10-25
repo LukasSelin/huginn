@@ -169,7 +169,6 @@
 .card .sig.old::before { content: '− '; }
 .card .sig.new { color: var(--added); }
 .card .sig.new::before { content: '+ '; }
-.card-link { font-size: 13px; align-self: flex-start; }
 .ov-br { right: 20px; bottom: 18px; display: flex; align-items: center; gap: 6px; }
 .ov-zoom { right: 20px; top: 50%; transform: translateY(-50%); display: flex; flex-direction: column; gap: 6px; pointer-events: auto; cursor: auto; }
 .icon.zb { width: 30px; height: 30px; border-radius: 8px; }

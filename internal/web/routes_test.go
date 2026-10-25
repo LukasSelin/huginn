@@ -71,7 +71,7 @@ func TestBeforeIndex(t *testing.T) {
 	if st.Ready || st.Repo != "demo" {
 		t.Errorf("status = %+v, want not ready for demo", st)
 	}
-	for _, url := range []string{"/api/dirs", "/api/dir?d=geo", "/api/symbol/1", "/api/health", "/api/journey"} {
+	for _, url := range []string{"/api/symbol/1", "/api/health", "/api/journey"} {
 		getJSON(t, h, url, http.StatusServiceUnavailable, nil)
 	}
 }
@@ -111,56 +111,13 @@ func TestAPI(t *testing.T) {
 		}
 	})
 
-	t.Run("dirs", func(t *testing.T) {
-		var dirs []dirJSON
-		getJSON(t, h, "/api/dirs", http.StatusOK, &dirs)
-		want := []dirJSON{
-			{Dir: ".", Live: 1, Changes: 1},
-			// Point 1, Move 2, Hello 1, Bye 2.
-			{Dir: "geo", Live: 3, Changes: 6},
-		}
-		if !slices.Equal(dirs, want) {
-			t.Errorf("dirs = %+v, want %+v", dirs, want)
-		}
-	})
-
-	var lanes struct {
-		Dir     string     `json:"dir"`
-		Symbols []laneJSON `json:"symbols"`
-	}
-	t.Run("dir", func(t *testing.T) {
-		getJSON(t, h, "/api/dir?d=geo", http.StatusOK, &lanes)
-		var got []string
-		for _, l := range lanes.Symbols {
-			var marks []string
-			for _, m := range l.Marks {
-				marks = append(marks, m.Kind)
-			}
-			got = append(got, l.Name+" "+l.File+" "+strings.Join(marks, ","))
-		}
-		// Live first, then by file and line.
-		want := []string{
-			"Hello hello.go added",
-			"Point point.go added",
-			"(*Point).Move point.go added,signature",
-			"Bye hello.go added,deleted",
-		}
-		if lanes.Dir != "geo" || !slices.Equal(got, want) {
-			t.Errorf("dir %q = %q, want %q", lanes.Dir, got, want)
-		}
-		getJSON(t, h, "/api/dir?d=nowhere", http.StatusNotFound, nil)
-	})
-
 	t.Run("symbol", func(t *testing.T) {
-		var move lineage.ID
-		for _, l := range lanes.Symbols {
-			if l.Name == "(*Point).Move" {
-				move = l.ID
-			}
+		var hits []symHitJSON
+		getJSON(t, h, "/api/journey/symbols?q=(*Point).Move", http.StatusOK, &hits)
+		if len(hits) == 0 || hits[0].Name != "(*Point).Move" {
+			t.Fatalf("no hit for (*Point).Move: %+v", hits)
 		}
-		if move == 0 {
-			t.Fatal("no lane for (*Point).Move")
-		}
+		move := hits[0].ID
 		var sym symbolJSON
 		getJSON(t, h, "/api/symbol/"+strconv.FormatInt(int64(move), 10), http.StatusOK, &sym)
 		if sym.Name != "(*Point).Move" || sym.Kind != "method" || sym.Path != "geo/point.go" ||

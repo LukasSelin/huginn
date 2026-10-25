@@ -59,11 +59,10 @@ indexed 210 live symbols in 249ms (0 commits cached, 4 walked)
 
 ### `huginn serve`
 
-Indexes the history in the background and serves the symbol timeline at
-`http://localhost:7878`: one lane per symbol, grouped by directory, with a
-marker for each change. While indexing, the page shows progress. Once the
-history is indexed, the server encodes and gzips the responses the pages
-open with (the journey at every step, the health report, the map's preset
+Indexes the history in the background and serves the map, health and journey
+pages at `http://localhost:7878`. While indexing, the pages show progress.
+Once the history is indexed, the server encodes and gzips the responses the
+pages open with (the journey at every step, the health report, the map's preset
 windows) before it reports ready, then the per-directory views in the
 background, so the pages draw from memory.
 
@@ -78,15 +77,8 @@ The UI is backed by a small JSON API:
 | Route | Returns |
 | --- | --- |
 | `GET /api/status` | indexing progress, then live/total symbol counts and the time span |
-| `GET /api/dirs` | every directory with its live symbols and number of changes |
-| `GET /api/dir?d=internal/git` | the lanes of one directory: each symbol with its change markers |
 | `GET /api/symbol/{id}` | one symbol's declaration and its full list of events |
 | `GET /api/health` | trends over the whole history (exported symbols, complexity, restructuring, survival, test lines), hotspot files and owners |
-
-```
-$ curl -s localhost:7878/api/dirs
-[{"dir":"cmd/huginn","live":14,"changes":16},{"dir":"internal/ast","live":62,"changes":65},{"dir":"internal/git","live":46,"changes":50},…]
-```
 
 ### `huginn semdiff`
 
