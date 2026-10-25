@@ -48,17 +48,19 @@ async function api(path) {
 }
 
 // waitReady polls /api/status until indexing is done, reporting progress in
-// the #loading element. It returns the final status, or null on failure.
+// the #loading element. It returns the final status, or null on failure. The
+// server holds each poll until indexing is done or a moment has passed, so
+// the page learns it is ready at once.
 async function waitReady() {
   for (;;) {
-    const st = await api('/api/status');
+    const st = await api('/api/status?wait=1');
     if (st.error) {
       $('loading').textContent = `Indexing failed: ${st.error}`;
       return null;
     }
     if (st.ready) return st;
     $('loading').textContent = `Indexing history… ${st.commits.toLocaleString()} commits`;
-    await new Promise((r) => setTimeout(r, 500));
+    await new Promise((r) => setTimeout(r, 100));
   }
 }
 

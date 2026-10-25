@@ -2,7 +2,9 @@
 //
 // The history is indexed in memory once, in the background; until it is
 // ready the API answers /api/status, which reports indexing progress, and
-// /api/commit, whose reports are computed on demand.
+// /api/commit, whose reports are computed on demand. Once it is indexed, the
+// responses the pages ask for are built before the index is published, so
+// the pages draw from memory; see prebuilt.go.
 package web
 
 import (
@@ -15,6 +17,8 @@ import (
 	"path"
 	"slices"
 	"strconv"
+	"strings"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -37,6 +41,11 @@ type Server struct {
 	done  atomic.Int64 // commits applied so far while indexing
 	err   atomic.Pointer[error]
 
+	settled   chan struct{} // closed once the index is published or failed
+	settle    sync.Once
+	ui        fs.FS
+	uiEncoded map[string]*encoded // the static files, compressed
+
 	reports *reportCache                                       // commit reports by hash
 	build   func(context.Context, string) (*commitJSON, error) // buildReport, or a test's stand-in
 }
@@ -50,25 +59,31 @@ type index struct {
 	health *health.Report
 	took   time.Duration
 
-	journeys journeys // built on first request
+	journeys journeys // built with the prebuilt responses, or on first request
+	pre      sync.Map // request key → *encoded, see prebuilt.go
 }
 
 // New returns a server for repo. name labels it in the UI.
 func New(repo *git.Repo, name string, opts lineage.BuildOptions) *Server {
-	s := &Server{repo: repo, name: name, opts: opts, reports: newReportCache(reportCacheSize)}
+	s := &Server{repo: repo, name: name, opts: opts, reports: newReportCache(reportCacheSize), settled: make(chan struct{})}
 	s.build = s.buildReport
+	s.ui, _ = fs.Sub(static, "static")
+	s.uiEncoded = staticFiles(s.ui)
 	return s
 }
 
-// Index builds the history. It blocks until done; run it in a goroutine to
-// serve progress meanwhile.
+// Index builds the history and the responses the pages ask for, then
+// publishes them and builds the per-directory ones. It blocks until all are
+// done; run it in a goroutine to serve progress meanwhile.
 func (s *Server) Index(ctx context.Context) error {
+	defer s.settle.Do(func() { close(s.settled) })
 	start := time.Now()
 	opts := s.opts
 	opts.Progress = func(n int) { s.done.Store(int64(n)) }
 	h, err := lineage.Build(ctx, s.repo, opts)
 	if err != nil {
 		s.err.Store(&err)
+		s.settle.Do(func() { close(s.settled) })
 		return err
 	}
 	ix := &index{h: h, dirs: map[string][]*lineage.Symbol{}, cmap: codemap.Build(h), health: health.Build(h, health.Options{})}
@@ -80,37 +95,67 @@ func (s *Server) Index(ctx context.Context) error {
 		ix.order = append(ix.order, d)
 	}
 	slices.Sort(ix.order)
+	s.prebuild(ctx, ix, s.pageURLs(ix))
 	ix.took = time.Since(start)
 	s.index.Store(ix)
-	return nil
+	s.settle.Do(func() { close(s.settled) })
+	s.prebuild(ctx, ix, s.detailURLs(ix))
+	return ctx.Err()
 }
 
 // Handler returns the UI and API routes.
 func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
-	ui, _ := fs.Sub(static, "static")
-	mux.Handle("GET /", http.FileServerFS(ui))
-	mux.HandleFunc("GET /symbols", func(w http.ResponseWriter, r *http.Request) { http.ServeFileFS(w, r, ui, "symbols.html") })
-	mux.HandleFunc("GET /health", func(w http.ResponseWriter, r *http.Request) { http.ServeFileFS(w, r, ui, "health.html") })
-	mux.HandleFunc("GET /journey", func(w http.ResponseWriter, r *http.Request) { http.ServeFileFS(w, r, ui, "journey.html") })
+	mux.Handle("GET /", s.file(""))
+	mux.Handle("GET /symbols", s.file("symbols.html"))
+	mux.Handle("GET /health", s.file("health.html"))
+	mux.Handle("GET /journey", s.file("journey.html"))
 	mux.HandleFunc("GET /api/status", s.status)
-	mux.HandleFunc("GET /api/dirs", s.ready(s.dirList))
-	mux.HandleFunc("GET /api/dir", s.ready(s.dir))
-	mux.HandleFunc("GET /api/symbol/{id}", s.ready(s.symbol))
-	mux.HandleFunc("GET /api/map", s.ready(s.codeMap))
-	mux.HandleFunc("GET /api/map/{dir...}", s.ready(s.mapDir))
-	mux.HandleFunc("GET /api/health", s.ready(s.health))
-	mux.HandleFunc("GET /api/journey", s.ready(s.journeyAPI))
-	mux.HandleFunc("GET /api/journey/package/{dir...}", s.ready(s.journeyPackage))
-	mux.HandleFunc("GET /api/journey/links/{dir...}", s.ready(s.journeyLinks))
-	mux.HandleFunc("GET /api/journey/symbols", s.ready(s.journeySymbols))
+	s.indexRoutes(mux, s.index.Load)
 	mux.HandleFunc("GET /api/commit/{rev...}", s.commit)
 	return mux
 }
 
-func (s *Server) ready(fn func(*index, http.ResponseWriter, *http.Request)) http.HandlerFunc {
+// indexRoutes adds the routes served from the index that load returns.
+func (s *Server) indexRoutes(mux *http.ServeMux, load func() *index) {
+	ready := func(fn func(*index, http.ResponseWriter, *http.Request)) http.HandlerFunc {
+		return ready(load, fn)
+	}
+	mux.HandleFunc("GET /api/dirs", ready(prebuilt(s.dirList)))
+	mux.HandleFunc("GET /api/dir", ready(prebuilt(s.dir)))
+	mux.HandleFunc("GET /api/symbol/{id}", ready(s.symbol))
+	mux.HandleFunc("GET /api/map", ready(prebuilt(s.codeMap)))
+	mux.HandleFunc("GET /api/map/{dir...}", ready(prebuilt(s.mapDir)))
+	mux.HandleFunc("GET /api/health", ready(prebuilt(s.health)))
+	mux.HandleFunc("GET /api/journey", ready(prebuilt(s.journeyAPI)))
+	mux.HandleFunc("GET /api/journey/package/{dir...}", ready(prebuilt(s.journeyPackage)))
+	mux.HandleFunc("GET /api/journey/links/{dir...}", ready(s.journeyLinks))
+	mux.HandleFunc("GET /api/journey/symbols", ready(s.journeySymbols))
+}
+
+// file serves the static file name, or the one the request names when name
+// is empty, from its compressed copy.
+func (s *Server) file(name string) http.Handler {
+	files := http.FileServerFS(s.ui)
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		p := name
+		if p == "" {
+			p = strings.TrimPrefix(r.URL.Path, "/")
+			if p == "" || strings.HasSuffix(p, "/") {
+				p += "index.html"
+			}
+		}
+		if e := s.uiEncoded[p]; e != nil {
+			e.serve(w, r)
+			return
+		}
+		files.ServeHTTP(w, r)
+	})
+}
+
+func ready(load func() *index, fn func(*index, http.ResponseWriter, *http.Request)) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		ix := s.index.Load()
+		ix := load()
 		if ix == nil {
 			http.Error(w, "still indexing", http.StatusServiceUnavailable)
 			return
@@ -137,7 +182,19 @@ type statusJSON struct {
 	TookMS  int64  `json:"tookMs,omitempty"`
 }
 
+// statusWait is how long /api/status?wait=1 holds a request while
+// indexing, so that pages learn the index is ready as soon as it is.
+const statusWait = 2 * time.Second
+
 func (s *Server) status(w http.ResponseWriter, r *http.Request) {
+	if r.URL.Query().Get("wait") == "1" {
+		select {
+		case <-s.settled:
+		case <-time.After(statusWait):
+		case <-r.Context().Done():
+			return
+		}
+	}
 	st := statusJSON{Repo: s.name, Commits: s.done.Load()}
 	if err := s.err.Load(); err != nil {
 		st.Error = (*err).Error()

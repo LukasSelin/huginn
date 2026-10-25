@@ -61,7 +61,11 @@ indexed 210 live symbols in 249ms (0 commits cached, 4 walked)
 
 Indexes the history in the background and serves the symbol timeline at
 `http://localhost:7878`: one lane per symbol, grouped by directory, with a
-marker for each change. While indexing, the page shows progress.
+marker for each change. While indexing, the page shows progress. Once the
+history is indexed, the server encodes and gzips the responses the pages
+open with (the journey at every step, the health report, the map's preset
+windows) before it reports ready, then the per-directory views in the
+background, so the pages draw from memory.
 
 ```
 $ huginn serve
