@@ -252,17 +252,19 @@ func TestLayoutCoupling(t *testing.T) {
 }
 
 // TestLayoutGroups checks that the directory tree makes the clusters:
-// daemon, daemon/network and daemon/images form one group, with the
-// unrelated cli and api outside it, and that every package lies in its
-// group and every group in its parent.
+// daemon and its four subpackages form one group, while cli and cli/command
+// are too few to be a group of their own and join the outermost, and that
+// every package lies in its group and every group in its parent.
 func TestLayoutGroups(t *testing.T) {
 	var changes []ast.Change
 	add := func(s *ast.Symbol) { changes = append(changes, ast.Change{Flags: ast.Added, New: s}) }
 	add(fn("daemon/daemon.go", "New", "example.com/m/daemon/network", "example.com/m/daemon/images"))
-	add(fn("daemon/network/net.go", "Dial"))
-	add(fn("daemon/images/img.go", "Pull"))
+	for _, d := range []string{"network", "images", "logger", "config"} {
+		add(fn("daemon/"+d+"/"+d+".go", "F"))
+	}
 	add(fn("api/api.go", "Serve", "example.com/m/daemon"))
 	add(fn("cli/cli.go", "Main", "example.com/m/api"))
+	add(fn("cli/command/command.go", "Run"))
 	add(fn("vendor/x/y/y.go", "Y")) // folds into one package, no group of its own
 	h := lineage.New()
 	h.Apply(lineage.Revision{SHA: "a", Time: day("2026-03-02"), Changes: changes})
@@ -289,7 +291,10 @@ func TestLayoutGroups(t *testing.T) {
 			t.Errorf("%s pokes out of group %s", p.Path, g.Path)
 		}
 	}
-	want := map[string]string{"daemon": "daemon", "daemon/network": "daemon", "daemon/images": "daemon", "api": ".", "cli": ".", "vendor/x/y": "."}
+	want := map[string]string{
+		"daemon": "daemon", "daemon/network": "daemon", "daemon/images": "daemon", "daemon/logger": "daemon", "daemon/config": "daemon",
+		"api": ".", "cli": ".", "cli/command": ".", "vendor/x/y": ".",
+	}
 	if !reflect.DeepEqual(in, want) {
 		t.Errorf("groups of packages %v, want %v", in, want)
 	}
