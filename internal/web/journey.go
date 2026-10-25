@@ -324,6 +324,64 @@ func (s *Server) journeyPackage(ix *index, w http.ResponseWriter, r *http.Reques
 	writeJSON(w, out)
 }
 
+type linksJSON struct {
+	Dir     string        `json:"dir"`
+	Rev     int           `json:"rev"`
+	Symbols []linkSymJSON `json:"symbols"` // live in dir, by name
+	Out     []linkJSON    `json:"out"`     // dir's symbols referring elsewhere
+	In      []linkJSON    `json:"in"`      // other symbols referring to dir
+}
+
+type linkSymJSON struct {
+	ID   lineage.ID `json:"id"`
+	Name string     `json:"name"`
+	Kind string     `json:"kind"`
+}
+
+type linkJSON struct {
+	ID    lineage.ID `json:"id"`
+	Name  string     `json:"name"` // of the referring symbol
+	Kind  string     `json:"kind"`
+	From  string     `json:"from"`
+	To    string     `json:"to"`
+	Names []string   `json:"names"` // what it refers to in to
+	Refs  int        `json:"refs"`
+}
+
+// journeyLinks serves the symbols referring into and out of one package
+// directory after revision ?rev=, the latest by default. An empty directory
+// is the root.
+func (s *Server) journeyLinks(ix *index, w http.ResponseWriter, r *http.Request) {
+	dir := r.PathValue("dir")
+	if dir == "" {
+		dir = "."
+	}
+	rev := ix.h.Revisions() - 1
+	if q := r.URL.Query().Get("rev"); q != "" {
+		n, err := strconv.Atoi(q)
+		if err != nil || n < -1 || n > rev {
+			http.Error(w, "rev must be a revision index", http.StatusBadRequest)
+			return
+		}
+		rev = n
+	}
+	l := journey.LinksAt(ix.h, dir, rev, s.opts.Tests)
+	out := linksJSON{Dir: dir, Rev: rev, Symbols: []linkSymJSON{}, Out: []linkJSON{}, In: []linkJSON{}}
+	for _, x := range l.Symbols {
+		out.Symbols = append(out.Symbols, linkSymJSON{ID: x.ID, Name: x.Name, Kind: x.Kind.String()})
+	}
+	conv := func(k journey.Link) linkJSON {
+		return linkJSON{ID: k.ID, Name: k.Name, Kind: k.Kind.String(), From: k.From, To: k.To, Names: k.Names, Refs: k.Refs}
+	}
+	for _, k := range l.Out {
+		out.Out = append(out.Out, conv(k))
+	}
+	for _, k := range l.In {
+		out.In = append(out.In, conv(k))
+	}
+	writeJSON(w, out)
+}
+
 // symbolSearchLimit bounds the symbols a search returns.
 const symbolSearchLimit = 20
 

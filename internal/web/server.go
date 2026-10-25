@@ -129,6 +129,7 @@ func (s *Server) indexRoutes(mux *http.ServeMux, load func() *index) {
 	mux.HandleFunc("GET /api/health", ready(prebuilt(s.health)))
 	mux.HandleFunc("GET /api/journey", ready(prebuilt(s.journeyAPI)))
 	mux.HandleFunc("GET /api/journey/package/{dir...}", ready(prebuilt(s.journeyPackage)))
+	mux.HandleFunc("GET /api/journey/links/{dir...}", ready(s.journeyLinks))
 	mux.HandleFunc("GET /api/journey/symbols", ready(s.journeySymbols))
 }
 

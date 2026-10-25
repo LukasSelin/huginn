@@ -74,6 +74,25 @@
       </div>
       <p class="ov ov-bl caption" id="caption" aria-live="polite"></p>
       <div class="ov ov-bl card" id="card" role="region" aria-label="Key moment" aria-live="polite" hidden></div>
+      <div class="ov breakout" id="breakout" role="dialog" aria-labelledby="boName" hidden>
+        <div class="bo-head">
+          <div class="bo-title">
+            <span class="eyebrow">Functions crossing into and out of</span>
+            <span class="mono" id="boName"></span>
+            <span class="muted small" id="boNote"></span>
+          </div>
+          <button type="button" class="back" id="boInside">Look inside</button>
+          <button type="button" class="close" id="boClose" aria-label="Close (Escape)">×</button>
+        </div>
+        <div class="bo-body" id="boBody">
+          <div class="bo-grid" id="boGrid">
+            <svg class="bo-wires" id="boWires" aria-hidden="true"></svg>
+            <section class="bo-col in" aria-labelledby="boInHead"><h3 class="eyebrow" id="boInHead">Used by ←</h3><div id="boIn"></div></section>
+            <section class="bo-col mid" aria-labelledby="boMidHead"><h3 class="eyebrow" id="boMidHead">In the package</h3><div id="boMid"></div></section>
+            <section class="bo-col out" aria-labelledby="boOutHead"><h3 class="eyebrow" id="boOutHead">→ Uses</h3><div id="boOut"></div></section>
+          </div>
+        </div>
+      </div>
       <div class="ov ov-br legend" id="actLegend" aria-label="Activity scale">
         <span class="muted small">quiet</span>
         <span class="swatches" id="swatches"></span>

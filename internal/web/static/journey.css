@@ -292,6 +292,57 @@
   outline: 2px solid var(--text); outline-offset: 2px;
 }
 
+/* The breakout: one package's functions and only the functions of other
+   packages they refer to or are referred to by, green for the ones using
+   it, blue for the ones it uses. */
+.breakout {
+  inset: 10px; pointer-events: auto; z-index: 7; cursor: default; display: flex; flex-direction: column;
+  border-radius: 10px; background: rgba(14, 17, 22, .97); border: 1px solid var(--line-strong);
+  box-shadow: 0 8px 30px rgba(0, 0, 0, .5); animation: card-in 200ms ease-out;
+}
+.breakout[hidden] { display: none; }
+.bo-head { display: flex; align-items: center; gap: 10px; padding: 12px 14px; border-bottom: 1px solid var(--line); }
+.bo-title { display: flex; flex-wrap: wrap; align-items: baseline; gap: 4px 10px; min-width: 0; margin-right: auto; }
+.bo-title .mono { font-size: 15px; font-weight: 600; overflow-wrap: anywhere; }
+.bo-head .close { border: 0; background: none; color: var(--muted); font-size: 20px; line-height: 1; cursor: pointer; padding: 0 4px; }
+.bo-head .close:hover { color: var(--text); }
+.bo-head .close:focus-visible { outline: 2px solid var(--text); outline-offset: 2px; }
+.bo-body { flex: 1; overflow: auto; padding: 12px 14px 16px; }
+.bo-grid { position: relative; display: grid; grid-template-columns: minmax(150px, 1fr) minmax(150px, 1fr) minmax(150px, 1fr); column-gap: 72px; min-width: 620px; }
+.bo-wires { position: absolute; left: 0; top: 0; width: 100%; height: 100%; pointer-events: none; overflow: visible; }
+.bo-wires path { fill: none; stroke-width: 1.4; opacity: .45; transition: opacity 120ms ease; }
+.bo-wires path.in { stroke: var(--added); }
+.bo-wires path.out { stroke: var(--body); }
+.bo-grid.hl .bo-wires path { opacity: .06; }
+.bo-grid.hl .bo-wires path.on { opacity: 1; stroke-width: 2; }
+.bo-col { position: relative; min-width: 0; display: flex; flex-direction: column; }
+.bo-col h3 { margin: 0 0 8px; }
+.bo-col.in h3 { color: var(--added); }
+.bo-col.out h3 { color: var(--body); text-align: right; }
+.bo-col.mid h3 { text-align: center; }
+.bo-col > div { display: flex; flex-direction: column; gap: 10px; }
+.bo-pkg { display: flex; flex-direction: column; gap: 2px; }
+.bo-pkg > button.pk {
+  align-self: flex-start; border: 0; background: none; padding: 1px 0; cursor: pointer; text-align: left;
+  font: 600 11px/1.3 'JetBrains Mono', monospace; color: var(--muted); overflow-wrap: anywhere;
+}
+.bo-col.out .bo-pkg > button.pk { align-self: flex-end; text-align: right; }
+.bo-pkg > button.pk:hover { color: var(--text); text-decoration: underline; }
+.bo-fn {
+  display: flex; align-items: baseline; gap: 6px; width: 100%; padding: 3px 8px; border-radius: 5px; cursor: pointer; text-align: left;
+  border: 1px solid var(--line-strong); background: var(--raised); color: var(--text-2); font: 12px/1.35 'JetBrains Mono', monospace;
+  overflow-wrap: anywhere; transition: border-color 120ms ease, color 120ms ease, opacity 120ms ease;
+}
+.bo-fn .k { font: 10px 'IBM Plex Sans', sans-serif; color: var(--muted); margin-left: auto; flex: none; }
+.bo-fn.static { cursor: default; }
+.bo-fn.missing { color: var(--muted); border-style: dashed; }
+.bo-col.mid .bo-fn { border-color: #3A3222; background: var(--accent-bg); color: var(--text); }
+.bo-fn:hover:not(.static), .bo-fn.on { border-color: var(--text); color: var(--text); }
+.bo-fn.followed { border-color: var(--renamed); box-shadow: 0 0 0 2px rgba(199, 146, 234, .35); }
+.bo-fn:focus-visible, .bo-pkg > button.pk:focus-visible { outline: 2px solid var(--text); outline-offset: 2px; }
+.bo-grid.hl .bo-fn:not(.on) { opacity: .35; }
+.bo-empty { grid-column: 1 / -1; padding: 24px 0; text-align: center; }
+
 @media (max-width: 700px) {
   .story { max-width: none; }
   .date { font-size: 24px; }
@@ -305,7 +356,7 @@
 
 @media (prefers-reduced-motion: reduce) {
   .bubble, .deps path, .playhead, .bubbles, .deps, .syms, .sym, .file, .fname, .disc, .foltag { transition: none; }
-  .bubble.focus, .sym.flash, .card, .tag { animation: none; }
+  .bubble.focus, .sym.flash, .card, .tag, .breakout { animation: none; }
 }
 
 /* Release ticks on the chapter track */
