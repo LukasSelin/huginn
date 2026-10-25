@@ -49,6 +49,9 @@
 .deps > path.on.in { stroke: var(--added); }
 .deps > path.on.both { stroke: var(--text); }
 .stage.lit .bubble:not(.lit):not(.near):not(.gone) { opacity: .28; }
+/* A package picked with a click keeps only its neighbours on the map. */
+.stage.picked .deps > path:not(.on),
+.stage.picked .bubble:not(.lit):not(.near) { opacity: 0 !important; pointer-events: none; }
 .bubble.lit { border: calc(2px / var(--k)) solid var(--text); z-index: 3; }
 .bubble.near { z-index: 2; }
 .nref {
