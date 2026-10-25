@@ -1,8 +1,8 @@
 'use strict';
 
-// The code map: a squarified treemap of package directories, sized by live
-// lines and colored by what happened to them in a time window, over a
-// timeline that picks the window.
+// The code map: a squarified treemap of package directories, colored (and by
+// default sized) by what happened to them in a time window, over a timeline
+// that picks the window.
 
 const STEPS = ['#2A2418', '#4A3A1E', '#7A5A26', '#B07F33', '#F0A64A'];
 const DARK_TEXT = 3; // steps from here on are light enough to need dark text
@@ -13,7 +13,7 @@ const KIND_LABEL = Object.fromEntries(KINDS);
 
 const state = {
   status: null,
-  view: { z: '', k: 0, sel: null, color: 'churn', tests: false, w: '90d', from: 0, to: 0 },
+  view: { z: '', k: 0, sel: null, color: 'churn', size: 'color', tests: false, w: '90d', from: 0, to: 0 },
   map: null,    // last /api/map response for the current window
   series: null, // the timeline: weeks, commits and per-directory series
   detail: null, // last /api/map/{dir} response
@@ -26,6 +26,7 @@ function readHash() {
   const v = {
     z: p.get('z') || '', k: Number(p.get('k')) || 0, sel: p.get('s'),
     color: ['churn', 'recency', 'complexity'].includes(p.get('c')) ? p.get('c') : 'churn',
+    size: p.get('a') === 'loc' ? 'loc' : 'color',
     tests: p.get('t') === '1', w: p.get('w') || '90d', from: Number(p.get('from')) || 0, to: Number(p.get('to')) || 0,
   };
   if (v.w !== 'custom' && !(v.w in PRESETS) && v.w !== 'all') v.w = '90d';
@@ -39,6 +40,7 @@ function go(next) {
   if (v.k) p.set('k', v.k);
   if (v.sel) p.set('s', v.sel);
   if (v.color !== 'churn') p.set('c', v.color);
+  if (v.size !== 'color') p.set('a', v.size);
   if (v.tests) p.set('t', '1');
   p.set('w', v.w);
   if (v.w === 'custom') {
@@ -97,15 +99,32 @@ function metric(t) {
   }
 }
 
+// span is the stretch of time recency is measured over: the window, with open
+// ends closed at the first edit and the last commit.
+function span(tiles) {
+  let { from, to } = windowOf(state.view);
+  from = from || Math.min(...tiles.map((t) => t.last).filter(Boolean), state.status.from);
+  to = to || state.status.to + 1;
+  return { from, to };
+}
+
+// sizer returns the area function for the tiles: live lines, or the color
+// metric, so the biggest tiles are the ones the color calls out. Recency is
+// scaled to 1–4 across the span, so the newest is at most four times the
+// oldest; 0 means the tile is left out.
+function sizer(tiles) {
+  if (state.view.size === 'loc') return (t) => t.loc;
+  if (state.view.color !== 'recency') return (t) => (t.loc > 0 ? metric(t) : 0);
+  const { from, to } = span(tiles);
+  return (t) => (t.loc > 0 && t.last ? 1 + (3 * Math.max(0, t.last - from)) / Math.max(1, to - from) : 0);
+}
+
 // scale maps metric values to steps 1–4 by quartiles of the non-zero values,
 // or, for recency, by quarter of the window. It returns the step function and
 // the legend labels for steps 0–4.
 function scale(tiles) {
   if (state.view.color === 'recency') {
-    const lasts = tiles.map((t) => t.last).filter(Boolean);
-    let { from, to } = windowOf(state.view);
-    from = from || Math.min(...lasts, state.status.from);
-    to = to || state.status.to + 1;
+    const { from, to } = span(tiles);
     const q = (to - from) / 4;
     const step = (v) => (v ? 1 + Math.min(3, Math.max(0, Math.floor((v - from) / q))) : 0);
     const day = (t) => new Date(t * 1000).toLocaleDateString(undefined, { month: 'short', day: 'numeric', year: '2-digit' });
@@ -161,11 +180,12 @@ function squarify(items, x, y, w, h) {
   return out;
 }
 
-// tree nests the tiles with live code by path segment.
-function tree(tiles) {
+// tree nests the tiles with any area by path segment; each node's value is
+// the area under it.
+function tree(tiles, size) {
   const root = { name: '', path: '', kids: new Map(), tile: null, value: 0 };
   for (const t of tiles) {
-    if (t.loc <= 0) continue;
+    if (size(t) <= 0) continue;
     let n = root;
     if (t.dir !== '.') {
       for (const seg of t.dir.split('/')) {
@@ -176,7 +196,7 @@ function tree(tiles) {
     }
     n.tile = t;
   }
-  const sum = (n) => (n.value = (n.tile ? n.tile.loc : 0) + [...n.kids.values()].reduce((s, k) => s + sum(k), 0));
+  const sum = (n) => (n.value = (n.tile ? size(n.tile) : 0) + [...n.kids.values()].reduce((s, k) => s + sum(k), 0));
   sum(root);
   return root;
 }
@@ -191,11 +211,11 @@ function find(root, path) {
   return n;
 }
 
-// leaves returns every tile at or under n, biggest first.
-function leaves(n, out = []) {
+// leaves returns every tile at or under n, biggest first by size.
+function leaves(n, size, out = []) {
   if (n.tile) out.push(n.tile);
-  for (const k of n.kids.values()) leaves(k, out);
-  return out.sort((a, b) => b.loc - a.loc);
+  for (const k of n.kids.values()) leaves(k, size, out);
+  return out.sort((a, b) => size(b) - size(a));
 }
 
 const rel = (dir, base) => {
@@ -221,7 +241,8 @@ const smallLeaf = (r) => r.w < 58 || r.h < 34;
 function renderTreemap() {
   const box = $('treemap');
   const W = box.clientWidth, H = box.clientHeight;
-  const root = tree(state.map.dirs);
+  const size = sizer(state.map.dirs);
+  const root = tree(state.map.dirs, size);
   let at = find(root, state.view.z);
   if (!at) at = root;
   const { step } = scale(state.map.dirs);
@@ -229,10 +250,10 @@ function renderTreemap() {
   // The items at this level: the directory's own package, then its
   // subdirectories. A subtree with one package is shown as that package.
   let items = [];
-  if (at.tile) items.push({ type: 'leaf', tile: at.tile, value: at.tile.loc, label: rel(at.tile.dir, at.path) });
+  if (at.tile) items.push({ type: 'leaf', tile: at.tile, value: size(at.tile), label: rel(at.tile.dir, at.path) });
   for (const k of at.kids.values()) {
     if (k.value <= 0) continue;
-    const ls = leaves(k);
+    const ls = leaves(k, size);
     items.push(ls.length === 1
       ? { type: 'leaf', tile: ls[0], value: k.value, label: rel(ls[0].dir, at.path) }
       : { type: 'group', node: k, value: k.value, label: rel(k.path, at.path) });
@@ -248,9 +269,13 @@ function renderTreemap() {
   for (const r of laid) {
     if (r.type === 'leaf') kids.push(leafEl(r, step));
     else if (r.type === 'more') kids.push(moreEl(r, `+${r.count} more`, () => go({ k: r.skip })));
-    else kids.push(groupEl(r, step));
+    else kids.push(groupEl(r, step, size));
   }
-  if (!laid.length) kids.push(h('div', { class: 'empty' }, 'No live code here.'));
+  if (!laid.length) {
+    const why = state.view.size === 'loc' ? 'No live code here.'
+      : state.view.color === 'complexity' ? 'No complexity change here in this window.' : 'No edits here in this window.';
+    kids.push(h('div', { class: 'empty' }, why));
+  }
   box.replaceChildren(...kids);
 }
 
@@ -276,10 +301,10 @@ function moreEl(r, label, onclick) {
   return h('button', { type: 'button', class: 'tile more', style: place(r), title: 'Show the smaller packages', onclick }, h('span', { class: 'tname' }, label));
 }
 
-function groupEl(r, step) {
+function groupEl(r, step, size) {
   const n = r.node;
   const HEAD = 20, PAD = 3;
-  const inner = leaves(n).map((t) => ({ type: 'leaf', tile: t, value: t.loc, label: rel(t.dir, n.path) }));
+  const inner = leaves(n, size).map((t) => ({ type: 'leaf', tile: t, value: size(t), label: rel(t.dir, n.path) }));
   const laid = fit(inner, PAD, HEAD, r.w - 2 * PAD - 2, r.h - HEAD - PAD - 2, smallLeaf,
     (rest) => ({ type: 'more', value: rest.reduce((s, x) => s + x.value, 0), count: rest.length }));
   const zoom = () => go({ z: n.path, k: 0 });
@@ -493,6 +518,9 @@ function hotRow(name, n, max, onclick) {
 function render() {
   const v = state.view;
   for (const r of document.querySelectorAll('input[name=color]')) r.checked = r.value === v.color;
+  for (const r of document.querySelectorAll('input[name=size]')) r.checked = r.value === v.size;
+  $('areaNote').textContent = `Area: ${v.size === 'loc' ? 'lines in live symbols'
+    : v.color === 'recency' ? 'how recent the last edit is' : v.color === 'complexity' ? 'size of the complexity change' : 'semantic edits'}.`;
   $('tests').checked = v.tests;
   renderWindow();
   renderZoom();
@@ -508,6 +536,7 @@ async function boot() {
   const st = state.status;
   $('repo').textContent = `${st.repo} · ${st.commits.toLocaleString()} commits · ${st.live.toLocaleString()} live symbols`;
   for (const r of document.querySelectorAll('input[name=color]')) r.addEventListener('change', () => go({ color: r.value }));
+  for (const r of document.querySelectorAll('input[name=size]')) r.addEventListener('change', () => go({ size: r.value }));
   $('tests').addEventListener('change', (e) => go({ tests: e.target.checked }));
   for (const b of $('presets').querySelectorAll('button')) b.addEventListener('click', () => go({ w: b.dataset.w }));
   $('loading').hidden = true;
