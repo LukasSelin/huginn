@@ -52,7 +52,7 @@
     switching: null, // the package a followed symbol is being chased into
     folDir: undefined, // the followed symbol's package at the last render
     colorBy: 'edits', // or 'knowledge': ring the packages by who knows them
-    who: '', // the author whose share of each package dims it, if one
+    who: '', // the author whose packages the map keeps, dimmed by their share, if one
     edges: null, // the stage's dependencies by key, at the current frame
     hover: null, // the package under the pointer
     focused: null, // the package with keyboard focus
@@ -103,6 +103,16 @@
     if (!s || !s.knowers) return 0;
     const k = s.knowers.find((x) => x[0] === a);
     return k ? k[1] : 0;
+  }
+
+  // scoped is frame f with only the picked author's packages, the ones they
+  // are among the top knowers of, and the dependencies between them.
+  function scoped(f) {
+    if (!state.who) return f;
+    const a = state.data.authors.indexOf(state.who);
+    const pkgs = f.pkgs.filter((s) => shareOf(s, a) > 0);
+    const keep = new Set(pkgs.map((s) => s.p));
+    return { ...f, pkgs, deps: f.deps.filter(([x, y]) => keep.has(x) && keep.has(y)) };
   }
 
   function knowersText(s) {
@@ -331,8 +341,10 @@
     return (s) => k * Math.min(1, boost * grown(s));
   }
 
-  function renderStage(f) {
+  function renderStage(frame) {
     const { packages } = state.data;
+    // An author picked keeps only their packages on the map.
+    const f = scoped(frame);
     const { size } = state.geom;
     const now = new Map(f.pkgs.map((p) => [p.p, p]));
     const focus = state.card && state.card.pkg != null ? state.pathIdx.get(state.card.pkg) : undefined;
@@ -355,8 +367,8 @@
       const ringed = know && live > 0 && s.knowers;
       el.style.backgroundColor = know ? RING_IN : ACT[a];
       el.style.backgroundImage = ringed ? ring(s.knowers) : '';
-      // An author picked dims each package by their share of it.
-      el.style.opacity = live > 0 && state.who ? String(0.12 + 0.88 * Math.min(1, shareOf(s, who) / 0.5)) : '';
+      // and dims each by their share of it.
+      el.style.opacity = live > 0 && state.who ? String(0.35 + 0.65 * Math.min(1, shareOf(s, who) / 0.5)) : '';
       const cls = know ? `know${live > 0 ? '' : ' gone'}` : `a${a}${live > 0 ? '' : ' gone'}${a >= 3 ? ' busy' : ''}`;
       el.className = `bubble ${cls}${d * state.zt.k < 44 ? ' small' : ''}${i === focus ? ' focus' : ''}${i === folPkg ? ' followed' : ''}`;
       const label = live > 0 ? `${p.path} · ${plural(live, 'symbol')}${s && s.kinds ? ` · ${describeKinds(s.kinds)}` : ''}${knowersText(s)}` : p.path;
@@ -1526,7 +1538,10 @@
   function setWho(name) {
     state.who = name || '';
     $('who').value = state.who;
-    if (state.data) render(false);
+    if (!state.data) return;
+    // A package picked that the author doesn't know leaves the map with them.
+    if (state.picked != null && state.who && !scoped(state.data.frames[state.frame]).pkgs.some((s) => s.p === state.picked)) state.picked = null;
+    render(false);
   }
 
   // ---------- Playback ----------
