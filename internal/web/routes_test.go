@@ -331,11 +331,17 @@ func TestAPI(t *testing.T) {
 	})
 
 	t.Run("ui", func(t *testing.T) {
-		for _, page := range []string{"/", "/health", "/journey"} {
+		pages := map[string]string{
+			"/":        "<title>huginn · journey",
+			"/journey": "<title>huginn · journey",
+			"/map":     "<title>huginn · code map",
+			"/health":  "<title>huginn · health",
+		}
+		for page, title := range pages {
 			rec := httptest.NewRecorder()
 			h.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, page, nil))
 			body, _ := io.ReadAll(rec.Body)
-			if rec.Code != http.StatusOK || !strings.Contains(string(body), "<html") {
+			if rec.Code != http.StatusOK || !strings.Contains(string(body), title) {
 				t.Errorf("GET %s: status %d, body %.80q", page, rec.Code, body)
 			}
 		}
