@@ -1032,10 +1032,12 @@
   }
 
   // lightLinks picks out one function, the ones it is wired to and the wires.
-  function lightLinks(key) {
+  // With none under the pointer, the followed function stays picked out.
+  function lightLinks(hover) {
     const L = state.links;
     if (!L) return;
-    L.lit = key;
+    L.lit = hover;
+    const key = hover ?? followedKey();
     const near = key == null ? new Set() : new Set([key, ...(L.adj.get(key) || [])]);
     $('boGrid').classList.toggle('hl', key != null);
     for (const [k, el] of L.nodes) el.classList.toggle('on', near.has(k));
@@ -1045,6 +1047,21 @@
   function markFollowed() {
     const fid = state.follow ? String(state.follow.id) : '';
     for (const el of state.links.nodes.values()) el.classList.toggle('followed', !!fid && el.dataset.id === fid);
+    lightLinks(state.links.lit);
+  }
+
+  // followedKey is the breakout row of the followed function, its own
+  // package's row before any other.
+  function followedKey() {
+    const fid = state.follow ? String(state.follow.id) : '';
+    if (!fid) return null;
+    let key = null;
+    for (const [k, el] of state.links.nodes) {
+      if (el.dataset.id !== fid) continue;
+      if (k.startsWith('m ')) return k;
+      key ??= k;
+    }
+    return key;
   }
 
   // ---------- Following a symbol ----------
