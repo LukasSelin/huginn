@@ -944,27 +944,36 @@
     const mid = new Set();
     for (const l of v.in) for (const n of l.names) mid.add(n);
     for (const l of v.out) mid.add(l.name);
-    const midRows = [...mid].sort().map((n) => {
-      const s = own.get(n);
-      return node(`m ${n}`, n, s && s.kind, s && s.id);
-    });
+    const mids = [...mid].sort().map((n) => `m ${n}`);
 
+    // Each side is its packages, each a list of rows wired to middle ones.
     const ins = d3.group(v.in, (l) => l.from), outs = d3.group(v.out, (l) => l.to);
-    const inRows = [...ins].map(([dir, ls]) => pkg(dir, ls.map((l) => {
-      for (const n of l.names) wire(`i ${l.id}`, `m ${n}`, 'in');
-      return node(`i ${l.id}`, l.name, l.kind, l.id);
-    })));
+    const inSide = [...ins].map(([dir, ls]) => ({ dir, rows: ls.map((l) => ({ key: `i ${l.id}`, l, to: l.names.map((n) => `m ${n}`) })) }));
     // What the package uses is named only, not looked up in its package.
-    const outRows = [...outs].map(([dir, ls]) => {
-      const names = new Set();
+    const outSide = [...outs].map(([dir, ls]) => {
+      const names = new Map();
       for (const l of ls) {
         for (const n of l.names) {
-          names.add(n);
-          wire(`m ${l.name}`, `o ${dir} ${n}`, 'out');
+          if (!names.has(n)) names.set(n, []);
+          names.get(n).push(`m ${l.name}`);
         }
       }
-      return pkg(dir, [...names].sort().map((n) => node(`o ${dir} ${n}`, n, null, 0, true)));
+      return { dir, rows: [...names.keys()].sort().map((n) => ({ key: `o ${dir} ${n}`, n, to: names.get(n) })) };
     });
+    untangle(mids, [inSide, outSide]);
+
+    const midRows = mids.map((k) => {
+      const n = k.slice(2), s = own.get(n);
+      return node(k, n, s && s.kind, s && s.id);
+    });
+    const inRows = inSide.map((g) => pkg(g.dir, g.rows.map(({ key, l, to }) => {
+      for (const m of to) wire(key, m, 'in');
+      return node(key, l.name, l.kind, l.id);
+    })));
+    const outRows = outSide.map((g) => pkg(g.dir, g.rows.map(({ key, n, to }) => {
+      for (const m of to) wire(m, key, 'out');
+      return node(key, n, null, 0, true);
+    })));
 
     $('boIn').replaceChildren(...(inRows.length ? inRows : [h('p', { class: 'muted small' }, 'Nothing else uses it.')]));
     $('boMid').replaceChildren(...(midRows.length ? midRows : [h('p', { class: 'muted small' }, 'No function crosses into or out of it here.')]));
@@ -974,6 +983,37 @@
       + ` · uses ${plural(outNames, 'name')} in ${plural(outs.size, 'package')}`;
     markFollowed();
     drawWires();
+  }
+
+  // untangle orders the breakout's rows so the wires run as level as they
+  // can, in place: each side's packages and their rows move level with the
+  // middle rows they are wired to, and the middle rows level with both
+  // sides, a few rounds over. Each column is read as fractions of its
+  // height, as the columns hold different numbers of rows.
+  function untangle(mids, sides) {
+    const pos = new Map();
+    const place = (keys) => keys.forEach((k, i) => pos.set(k, keys.length > 1 ? i / (keys.length - 1) : 0.5));
+    const level = (xs, at) => {
+      for (const x of xs) x.at = at(x);
+      xs.sort((a, b) => a.at - b.at);
+    };
+    const back = new Map(mids.map((k) => [k, []]));
+    for (const side of sides) for (const g of side) for (const r of g.rows) for (const m of r.to) back.get(m).push(r.key);
+    const levelSides = () => {
+      for (const side of sides) {
+        for (const g of side) level(g.rows, (r) => d3.mean(r.to, (m) => pos.get(m)));
+        level(side, (g) => d3.mean(g.rows, (r) => r.at));
+        place(side.flatMap((g) => g.rows.map((r) => r.key)));
+      }
+    };
+    place(mids);
+    levelSides();
+    for (let round = 0; round < 3; round++) {
+      const at = new Map(mids.map((k) => [k, d3.mean(back.get(k), (r) => pos.get(r))]));
+      mids.sort((a, b) => at.get(a) - at.get(b));
+      place(mids);
+      levelSides();
+    }
   }
 
   // drawWires curves a line from each function to the ones it refers to.
