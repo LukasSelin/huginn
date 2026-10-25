@@ -154,13 +154,13 @@ function renderHotspots(hotspots) {
     h('th', { scope: 'col', class: 'bar' }, 'Score'),
     h('th', { scope: 'col' }, 'Most complex symbol')));
   const rows = hotspots.map((s) => h('tr', null,
-    h('td', { class: 'mono' }, h('a', { href: `/#s=${encodeURIComponent(s.dir)}&w=all` }, s.path)),
+    h('td', { class: 'mono' }, h('a', { href: `/map#s=${encodeURIComponent(s.dir)}&w=all` }, s.path)),
     h('td', { class: 'num' }, s.edits),
     h('td', { class: 'num' }, s.authors),
     h('td', { class: 'num' }, s.complexity),
     h('td', { class: 'num' }, s.lines),
     h('td', { class: 'bar' }, h('span', { class: 'meter', style: `width:${Math.max(2, Math.round((s.score / max) * 100))}%`, title: String(s.score) })),
-    h('td', null, h('a', { class: 'mono', href: `/symbols#d=${encodeURIComponent(s.dir)}&s=${s.top}` }, s.topName),
+    h('td', null, h('a', { class: 'mono', href: `/journey#sym=${s.top}` }, s.topName),
       ' ', h('span', { class: 'muted small' }, `cyclomatic ${s.topComplexity}`))));
   $('hotspots').replaceChildren(head, h('tbody', null, rows));
 }

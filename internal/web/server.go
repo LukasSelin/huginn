@@ -15,8 +15,6 @@ import (
 	"fmt"
 	"io/fs"
 	"net/http"
-	"path"
-	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -54,8 +52,6 @@ type Server struct {
 // index is the read-only view the API serves once indexing is done.
 type index struct {
 	h      *lineage.History
-	dirs   map[string][]*lineage.Symbol // by the directory of the latest declaration
-	order  []string                     // directories, sorted
 	cmap   *codemap.Map
 	health *health.Report
 	took   time.Duration
@@ -89,15 +85,7 @@ func (s *Server) Index(ctx context.Context) error {
 		s.settle.Do(func() { close(s.settled) })
 		return err
 	}
-	ix := &index{h: h, dirs: map[string][]*lineage.Symbol{}, cmap: codemap.Build(h), health: health.Build(h, health.Options{})}
-	for sym := range h.All() {
-		d := path.Dir(sym.Latest().Path)
-		ix.dirs[d] = append(ix.dirs[d], sym)
-	}
-	for d := range ix.dirs {
-		ix.order = append(ix.order, d)
-	}
-	slices.Sort(ix.order)
+	ix := &index{h: h, cmap: codemap.Build(h), health: health.Build(h, health.Options{})}
 	// The responses saved for this history are loaded rather than built
 	// again. They were saved once all were built, the detail ones too.
 	// Without a key they are neither loaded nor saved.
@@ -130,7 +118,6 @@ func (s *Server) Handler() http.Handler {
 	mux.Handle("GET /{$}", s.file("journey.html"))
 	mux.Handle("GET /journey", s.file("journey.html"))
 	mux.Handle("GET /map", s.file("index.html"))
-	mux.Handle("GET /symbols", s.file("symbols.html"))
 	mux.Handle("GET /health", s.file("health.html"))
 	mux.HandleFunc("GET /api/status", s.status)
 	s.indexRoutes(mux, s.index.Load)
@@ -143,8 +130,6 @@ func (s *Server) indexRoutes(mux *http.ServeMux, load func() *index) {
 	ready := func(fn func(*index, http.ResponseWriter, *http.Request)) http.HandlerFunc {
 		return ready(load, fn)
 	}
-	mux.HandleFunc("GET /api/dirs", ready(prebuilt(s.dirList)))
-	mux.HandleFunc("GET /api/dir", ready(prebuilt(s.dir)))
 	mux.HandleFunc("GET /api/symbol/{id}", ready(s.symbol))
 	mux.HandleFunc("GET /api/map", ready(prebuilt(s.codeMap)))
 	mux.HandleFunc("GET /api/map/{dir...}", ready(prebuilt(s.mapDir)))
@@ -230,78 +215,6 @@ func (s *Server) status(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	writeJSON(w, st)
-}
-
-type dirJSON struct {
-	Dir     string `json:"dir"`
-	Live    int    `json:"live"`
-	Changes int    `json:"changes"`
-}
-
-func (s *Server) dirList(ix *index, w http.ResponseWriter, r *http.Request) {
-	out := []dirJSON{}
-	for _, d := range ix.order {
-		dj := dirJSON{Dir: d}
-		for _, sym := range ix.dirs[d] {
-			if sym.Alive() {
-				dj.Live++
-			}
-			dj.Changes += len(sym.Events)
-		}
-		out = append(out, dj)
-	}
-	writeJSON(w, out)
-}
-
-// laneJSON is one symbol in a directory listing, with just enough of its
-// history to draw its lane.
-type laneJSON struct {
-	ID      lineage.ID `json:"id"`
-	Name    string     `json:"name"` // qualified, e.g. "(*Indexer).Visit"
-	Kind    string     `json:"kind"`
-	Recv    string     `json:"recv,omitempty"`
-	File    string     `json:"file"`
-	Line    int        `json:"line"`
-	Alive   bool       `json:"alive"`
-	Changes int        `json:"changes"`
-	Marks   []markJSON `json:"marks"`
-}
-
-type markJSON struct {
-	T    int64  `json:"t"`
-	Kind string `json:"k"` // the event's primary flag
-}
-
-func (s *Server) dir(ix *index, w http.ResponseWriter, r *http.Request) {
-	d := r.URL.Query().Get("d")
-	syms, ok := ix.dirs[d]
-	if !ok {
-		http.Error(w, "no such directory", http.StatusNotFound)
-		return
-	}
-	out := make([]laneJSON, 0, len(syms))
-	for _, sym := range syms {
-		cur := sym.Latest()
-		l := laneJSON{
-			ID: sym.ID, Name: cur.QualifiedName(), Kind: cur.Kind.String(), Recv: cur.Recv,
-			File: path.Base(cur.Path), Line: cur.StartLine, Alive: sym.Alive(), Changes: len(sym.Events),
-		}
-		for _, e := range sym.Events {
-			l.Marks = append(l.Marks, markJSON{T: e.Time.Unix(), Kind: e.Primary().String()})
-		}
-		out = append(out, l)
-	}
-	// Live before deleted, then by file and position.
-	slices.SortFunc(out, func(a, b laneJSON) int {
-		if a.Alive != b.Alive {
-			if a.Alive {
-				return -1
-			}
-			return 1
-		}
-		return cmp.Or(cmp.Compare(a.File, b.File), cmp.Compare(a.Line, b.Line), cmp.Compare(a.ID, b.ID))
-	})
-	writeJSON(w, map[string]any{"dir": d, "symbols": out})
 }
 
 type symbolJSON struct {

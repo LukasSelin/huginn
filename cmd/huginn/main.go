@@ -7,8 +7,8 @@
 //
 //	huginn serve [-C dir] [-branch rev] [-tests] [-no-cache] [-addr host:port]
 //
-// indexes the history and serves the symbol timeline and the semantic diff
-// of each commit in a browser.
+// indexes the history and serves the map, health and journey pages in a
+// browser.
 //
 //	huginn story [-C dir] [-branch rev] [-tests] [-no-cache] [-moments]
 //

@@ -32,10 +32,10 @@ func TestSavedResponses(t *testing.T) {
 		if err := srv.Index(context.Background()); err != nil {
 			t.Fatal(err)
 		}
-		return srv, get(srv, "/api/dirs", "").Body.String()
+		return srv, get(srv, "/api/health", "").Body.String()
 	}
 
-	// Mark the saved /api/dirs, so that serving it shows it was loaded.
+	// Mark the saved /api/health, so that serving it shows it was loaded.
 	const marked = `["saved"]`
 	mark := func(srv *Server) {
 		t.Helper()
@@ -51,7 +51,7 @@ func TestSavedResponses(t *testing.T) {
 		for k, e := range saved {
 			ix.pre.Store(k, e)
 		}
-		ix.pre.Store("/api/dirs", encode("application/json", []byte(marked)))
+		ix.pre.Store("/api/health", encode("application/json", []byte(marked)))
 		if err := srv.save(key, ix); err != nil {
 			t.Fatal(err)
 		}
@@ -66,7 +66,7 @@ func TestSavedResponses(t *testing.T) {
 	mark(srv)
 	srv, got := serve()
 	if got != marked {
-		t.Errorf("same history: /api/dirs = %s, want the saved %s", got, marked)
+		t.Errorf("same history: /api/health = %s, want the saved %s", got, marked)
 	}
 	// Only the gzipped copy is saved; it is inflated for clients without gzip.
 	if rec := get(srv, journey, "gzip"); rec.Header().Get("Content-Encoding") != "gzip" {
