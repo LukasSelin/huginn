@@ -35,13 +35,18 @@
     </fieldset>
     <div class="scale" id="scale" aria-label="Color scale"></div>
     <fieldset class="opts">
+      <legend class="eyebrow">Size by</legend>
+      <label class="opt"><input type="radio" name="size" value="color"> Color metric <span class="muted small">same as color</span></label>
+      <label class="opt"><input type="radio" name="size" value="loc"> Lines <span class="muted small">live code</span></label>
+    </fieldset>
+    <fieldset class="opts">
       <legend class="eyebrow">Include</legend>
       <label class="opt" id="testsOpt"><input type="checkbox" id="tests"> Tests</label>
       <span class="muted small" id="testsHint" hidden>Indexed without tests; restart with <code>huginn serve -tests</code>.</span>
       <label class="opt disabled"><input type="checkbox" id="generated" disabled> Generated code</label>
       <span class="muted small">Generated files are left out of the index.</span>
     </fieldset>
-    <p class="muted small">Area: lines in live symbols. Click a tile to inspect it, a group header to zoom in.</p>
+    <p class="muted small"><span id="areaNote">Area: semantic edits.</span> Click a tile to inspect it, a group header to zoom in.</p>
   </aside>
 
   <main class="center">
