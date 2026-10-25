@@ -32,12 +32,19 @@ type bucketJSON struct {
 	Reshaped   int            `json:"reshaped"` // renames, moves and signature changes
 	Added      int            `json:"added"`
 	Surviving  int            `json:"surviving"`
+	Fixed      int            `json:"fixed"` // added symbols a later fix edited
+	Commits    int            `json:"commits"`
+	Features   int            `json:"features"`
+	Fixes      int            `json:"fixes"` // including reverts
+	Reverts    int            `json:"reverts"`
+	FixEdits   int            `json:"fixEdits"`
 }
 
 type hotspotJSON struct {
 	Path          string     `json:"path"`
 	Dir           string     `json:"dir"`
 	Edits         int        `json:"edits"`
+	Fixes         int        `json:"fixes"`
 	Authors       int        `json:"authors"`
 	Complexity    int        `json:"complexity"`
 	Lines         int        `json:"lines"`
@@ -65,11 +72,12 @@ func (s *Server) health(ix *index, w http.ResponseWriter, r *http.Request) {
 			First: b.First, Last: b.Last, From: b.From.Unix(), To: b.To.Unix(), Revisions: b.Revisions,
 			Symbols: b.Symbols, Exported: b.Exported, Lines: b.Lines, Complexity: b.Complexity, Funcs: b.Funcs,
 			TestLines: b.TestLines, Edits: kindsJSON(b.Edits), Reshaped: b.Restructured(), Added: b.Added, Surviving: b.Surviving,
+			Fixed: b.Fixed, Commits: b.Commits, Features: b.Features, Fixes: b.Fixes, Reverts: b.Reverts, FixEdits: b.FixEdits,
 		})
 	}
 	for _, h := range rep.Hotspots {
 		out.Hotspots = append(out.Hotspots, hotspotJSON{
-			Path: h.Path, Dir: path.Dir(h.Path), Edits: h.Edits, Authors: h.Authors, Complexity: h.Complexity, Lines: h.Lines,
+			Path: h.Path, Dir: path.Dir(h.Path), Edits: h.Edits, Fixes: h.Fixes, Authors: h.Authors, Complexity: h.Complexity, Lines: h.Lines,
 			Score: h.Score, Top: h.Top, TopName: h.TopName, TopComplexity: h.TopComplexity,
 		})
 	}
