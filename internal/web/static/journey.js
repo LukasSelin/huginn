@@ -53,6 +53,7 @@
     edges: null, // the stage's dependencies by key, at the current frame
     hover: null, // the package under the pointer
     focused: null, // the package with keyboard focus
+    links: null, // the package in the breakout: { dir, rev, v, nodes, adj, wires, lit }
   };
 
   const fmtShort = (t) => new Date(t * 1000).toLocaleDateString(undefined, { month: 'short', day: 'numeric', timeZone: 'UTC' });
@@ -194,7 +195,7 @@
     wrap.replaceChildren();
     state.hover = state.focused = null;
     state.bubbles = packages.map((p, i) => {
-      const el = h('button', { type: 'button', class: 'bubble gone', tabindex: '-1', onclick: () => drill(p.path).catch(fail) },
+      const el = h('button', { type: 'button', class: 'bubble gone', tabindex: '-1', onclick: () => openLinks(p.path).catch(fail) },
         h('span', { class: 'bname' }, base(p.path)));
       el.addEventListener('pointerenter', (e) => { if (e.pointerType !== 'touch') setLit('hover', i); });
       el.addEventListener('pointerleave', () => setLit('hover', null));
@@ -286,7 +287,7 @@
       el.className = `bubble ${cls}${d * state.zt.k < 44 ? ' small' : ''}${i === focus ? ' focus' : ''}${i === folPkg ? ' followed' : ''}`;
       const label = live > 0 ? `${p.path} · ${plural(live, 'symbol')}${s && s.kinds ? ` · ${describeKinds(s.kinds)}` : ''}${knowersText(s)}` : p.path;
       el.title = label;
-      el.setAttribute('aria-label', `${label}. Look inside`);
+      el.setAttribute('aria-label', `${label}. Show the functions crossing into and out of it`);
       el.tabIndex = live > 0 && !state.drill ? 0 : -1;
     });
 
@@ -853,6 +854,159 @@
     }
   }
 
+  // ---------- The breakout ----------
+
+  // A package chosen on the map breaks out into a panel of its own with only
+  // the functions crossing into and out of it at the playhead: the ones of
+  // other packages using it on the left, its own in the middle, and what
+  // they use of other packages on the right, wired together.
+  const linkViews = new Map(); // "dir rev" → /api/journey/links response
+
+  async function openLinks(dir) {
+    if (!state.pathIdx.has(dir)) return;
+    state.links = { dir, rev: null, v: null, nodes: new Map(), adj: new Map(), wires: null, lit: null };
+    $('boName').textContent = dir;
+    $('boNote').textContent = 'Reading the references…';
+    for (const id of ['boIn', 'boMid', 'boOut', 'boWires']) $(id).replaceChildren();
+    $('breakout').hidden = false;
+    $('boClose').focus();
+    writeHash();
+    await loadLinks();
+  }
+
+  function closeLinks(refocus = true) {
+    if (!state.links) return;
+    const pi = state.pathIdx.get(state.links.dir);
+    state.links = null;
+    $('breakout').hidden = true;
+    writeHash();
+    const el = state.bubbles[pi];
+    if (refocus && el && el.tabIndex === 0) el.focus();
+  }
+
+  // loadLinks brings the breakout to the playhead's revision.
+  async function loadLinks() {
+    const L = state.links;
+    if (!L || !state.data.frames.length) return;
+    const r = rev();
+    if (L.rev === r) return;
+    L.rev = r;
+    const key = `${L.dir} ${r}`;
+    let v = linkViews.get(key);
+    if (!v) {
+      try {
+        v = await api(`/api/journey/links/${encDir(L.dir)}?rev=${r}`);
+      } catch (err) {
+        if (state.links === L && L.rev === r) $('boNote').textContent = `Could not read the references: ${err.message}`;
+        return;
+      }
+      linkViews.set(key, v);
+    }
+    if (state.links !== L || L.rev !== r) return;
+    L.v = v;
+    renderLinks();
+  }
+
+  function renderLinks() {
+    const L = state.links;
+    const { v } = L;
+    L.nodes = new Map();
+    L.adj = new Map();
+    L.wires = [];
+    const wire = (a, b, dir) => {
+      L.wires.push([a, b, dir]);
+      for (const [x, y] of [[a, b], [b, a]]) {
+        if (!L.adj.has(x)) L.adj.set(x, new Set());
+        L.adj.get(x).add(y);
+      }
+    };
+    // node is one function's row; given an id it can be followed. A name
+    // with no kind is not a live symbol of its own, e.g. a method's type.
+    const node = (key, name, kind, id, known = !!kind) => {
+      if (L.nodes.has(key)) return L.nodes.get(key);
+      const attrs = { class: `bo-fn${id ? '' : ' static'}${known ? '' : ' missing'}`, 'data-key': key, 'data-id': id || null };
+      const kids = [h('span', {}, name), kind ? h('span', { class: 'k' }, kind) : null];
+      const el = id
+        ? h('button', { type: 'button', ...attrs, title: `${name} · follow it`, onclick: () => followSym(id).catch(fail) }, kids)
+        : h('div', { ...attrs, title: known ? name : `${name} · not a live symbol of its own` }, kids);
+      el.addEventListener('pointerenter', () => lightLinks(key));
+      el.addEventListener('pointerleave', () => lightLinks(null));
+      el.addEventListener('focus', () => lightLinks(key));
+      el.addEventListener('blur', () => lightLinks(null));
+      L.nodes.set(key, el);
+      return el;
+    };
+    const pkg = (dir, rows) => h('div', { class: 'bo-pkg' },
+      h('button', { type: 'button', class: 'pk', title: `Break out ${dir}`, onclick: () => openLinks(dir).catch(fail) }, dir), rows);
+
+    // The package's own functions: the ones others use and the ones using others.
+    const own = new Map(v.symbols.map((s) => [s.name, s]));
+    const mid = new Set();
+    for (const l of v.in) for (const n of l.names) mid.add(n);
+    for (const l of v.out) mid.add(l.name);
+    const midRows = [...mid].sort().map((n) => {
+      const s = own.get(n);
+      return node(`m ${n}`, n, s && s.kind, s && s.id);
+    });
+
+    const ins = d3.group(v.in, (l) => l.from), outs = d3.group(v.out, (l) => l.to);
+    const inRows = [...ins].map(([dir, ls]) => pkg(dir, ls.map((l) => {
+      for (const n of l.names) wire(`i ${l.id}`, `m ${n}`, 'in');
+      return node(`i ${l.id}`, l.name, l.kind, l.id);
+    })));
+    // What the package uses is named only, not looked up in its package.
+    const outRows = [...outs].map(([dir, ls]) => {
+      const names = new Set();
+      for (const l of ls) {
+        for (const n of l.names) {
+          names.add(n);
+          wire(`m ${l.name}`, `o ${dir} ${n}`, 'out');
+        }
+      }
+      return pkg(dir, [...names].sort().map((n) => node(`o ${dir} ${n}`, n, null, 0, true)));
+    });
+
+    $('boIn').replaceChildren(...(inRows.length ? inRows : [h('p', { class: 'muted small' }, 'Nothing else uses it.')]));
+    $('boMid').replaceChildren(...(midRows.length ? midRows : [h('p', { class: 'muted small' }, 'No function crosses into or out of it here.')]));
+    $('boOut').replaceChildren(...(outRows.length ? outRows : [h('p', { class: 'muted small' }, 'It uses nothing else here.')]));
+    const outNames = [...outs.values()].reduce((a, ls) => a + new Set(ls.flatMap((l) => l.names)).size, 0);
+    $('boNote').textContent = `${fmtBig(state.data.frames[state.frame].t)} · used by ${plural(v.in.length, 'function')} in ${plural(ins.size, 'package')}`
+      + ` · uses ${plural(outNames, 'name')} in ${plural(outs.size, 'package')}`;
+    markFollowed();
+    drawWires();
+  }
+
+  // drawWires curves a line from each function to the ones it refers to.
+  function drawWires() {
+    const L = state.links;
+    if (!L || !L.wires) return;
+    const box = $('boGrid').getBoundingClientRect();
+    $('boWires').replaceChildren(...L.wires.map(([a, b, dir]) => {
+      const ra = L.nodes.get(a).getBoundingClientRect(), rb = L.nodes.get(b).getBoundingClientRect();
+      const x1 = ra.right - box.left, y1 = ra.top + ra.height / 2 - box.top;
+      const x2 = rb.left - box.left, y2 = rb.top + rb.height / 2 - box.top;
+      const dx = Math.max(24, (x2 - x1) / 2);
+      return svg('path', { class: dir, 'data-a': a, 'data-b': b, d: `M${x1},${y1} C${x1 + dx},${y1} ${x2 - dx},${y2} ${x2},${y2}` });
+    }));
+    lightLinks(L.lit);
+  }
+
+  // lightLinks picks out one function, the ones it is wired to and the wires.
+  function lightLinks(key) {
+    const L = state.links;
+    if (!L) return;
+    L.lit = key;
+    const near = key == null ? new Set() : new Set([key, ...(L.adj.get(key) || [])]);
+    $('boGrid').classList.toggle('hl', key != null);
+    for (const [k, el] of L.nodes) el.classList.toggle('on', near.has(k));
+    for (const p of $('boWires').children) p.classList.toggle('on', p.dataset.a === key || p.dataset.b === key);
+  }
+
+  function markFollowed() {
+    const fid = state.follow ? String(state.follow.id) : '';
+    for (const el of state.links.nodes.values()) el.classList.toggle('followed', !!fid && el.dataset.id === fid);
+  }
+
   // ---------- Following a symbol ----------
 
   async function followSym(id) {
@@ -1241,6 +1395,10 @@
     if (!f) return;
     renderStage(f);
     if (state.drill) renderDrill(animate);
+    if (state.links) {
+      if (state.links.v) markFollowed();
+      loadLinks().catch(fail);
+    }
     placeFolTag();
     renderOverlays(f);
     renderRows(f);
@@ -1336,6 +1494,7 @@
     p.set('f', String(state.frame));
     if (state.data.chapters.length) p.set('ch', String(chapterAt(rev()) + 1));
     if (state.drill) p.set('pkg', state.drill.dir);
+    if (state.links) p.set('links', state.links.dir);
     if (state.follow) p.set('sym', String(state.follow.id));
     if (!state.story) p.set('story', '0');
     if (state.colorBy !== 'edits') p.set('color', state.colorBy);
@@ -1370,6 +1529,9 @@
     const pkg = p.get('pkg');
     if (pkg && (!state.drill || state.drill.dir !== pkg)) await drill(pkg);
     else if (!pkg) undrill();
+    const links = p.get('links');
+    if (links && (!state.links || state.links.dir !== links)) await openLinks(links);
+    else if (!links) closeLinks(false);
     render();
   }
 
@@ -1394,6 +1556,13 @@
     $('who').addEventListener('change', (e) => setWho(e.target.value));
     $('narrate').addEventListener('click', () => setNarrate(!state.narrate));
     $('back').addEventListener('click', undrill);
+    $('boClose').addEventListener('click', () => closeLinks());
+    $('boInside').addEventListener('click', () => {
+      const { dir } = state.links;
+      closeLinks(false);
+      drill(dir).catch(fail);
+    });
+    new ResizeObserver(() => drawWires()).observe($('boGrid'));
     setupZoom();
     $('zoomIn').addEventListener('click', () => zoomBy(1.6));
     $('zoomOut').addEventListener('click', () => zoomBy(1 / 1.6));
@@ -1451,7 +1620,8 @@
           zoomTo(d3.zoomIdentity);
           break;
         case 'Escape':
-          if (state.card) hideCard();
+          if (state.links) closeLinks();
+          else if (state.card) hideCard();
           else undrill();
           break;
         default:

@@ -102,6 +102,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /api/health", s.ready(s.health))
 	mux.HandleFunc("GET /api/journey", s.ready(s.journeyAPI))
 	mux.HandleFunc("GET /api/journey/package/{dir...}", s.ready(s.journeyPackage))
+	mux.HandleFunc("GET /api/journey/links/{dir...}", s.ready(s.journeyLinks))
 	mux.HandleFunc("GET /api/journey/symbols", s.ready(s.journeySymbols))
 	mux.HandleFunc("GET /api/commit/{rev...}", s.commit)
 	return mux

@@ -288,6 +288,23 @@ func TestAPI(t *testing.T) {
 		getJSON(t, h, "/api/journey/package/geo?step=day", http.StatusBadRequest, nil)
 	})
 
+	t.Run("journey links", func(t *testing.T) {
+		var l linksJSON
+		getJSON(t, h, "/api/journey/links/geo", http.StatusOK, &l)
+		var names []string
+		for _, x := range l.Symbols {
+			names = append(names, x.Name)
+		}
+		if want := []string{"(*Point).Move", "Hello", "Point"}; l.Dir != "geo" || l.Rev != 2 || !slices.Equal(names, want) || len(l.In)+len(l.Out) != 0 {
+			t.Errorf("links = %+v", l)
+		}
+		getJSON(t, h, "/api/journey/links/geo?rev=0", http.StatusOK, &l)
+		if l.Rev != 0 || len(l.Symbols) != 2 {
+			t.Errorf("links at 0 = %+v", l)
+		}
+		getJSON(t, h, "/api/journey/links/geo?rev=9", http.StatusBadRequest, nil)
+	})
+
 	t.Run("journey symbols", func(t *testing.T) {
 		var hits []symHitJSON
 		getJSON(t, h, "/api/journey/symbols?q=MO", http.StatusOK, &hits)
