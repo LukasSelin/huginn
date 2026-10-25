@@ -122,6 +122,30 @@
   transition: left var(--tween) ease, top var(--tween) ease;
 }
 .stage.zooming .foltag { transition: none; }
+
+/* The hover card on a package or symbol */
+.tip {
+  z-index: 7; width: max-content; max-width: min(300px, calc(100% - 16px)); padding: 10px 12px; border-radius: 8px;
+  background: rgba(18, 22, 28, .97); border: 1px solid var(--line-strong); box-shadow: 0 8px 24px rgba(0, 0, 0, .45);
+  display: flex; flex-direction: column; gap: 8px; font-size: 12px; animation: tip-in 120ms ease-out;
+}
+@keyframes tip-in { from { opacity: 0; } to { opacity: 1; } }
+.tip-head { display: flex; flex-direction: column; gap: 2px; }
+.tip-name { font-size: 13px; font-weight: 600; color: var(--text); overflow-wrap: anywhere; }
+.tip-rows { display: grid; grid-template-columns: auto 1fr; gap: 3px 12px; }
+.tip-row { display: contents; }
+.tip-row .tl { color: var(--muted); }
+.tip-row .tv { color: var(--text-2); overflow-wrap: anywhere; }
+.tip-kinds { display: inline-flex; flex-wrap: wrap; gap: 2px 10px; }
+.tip-kinds .cnt { display: inline-flex; align-items: center; gap: 4px; }
+.tip-know { display: flex; flex-direction: column; gap: 3px; padding-top: 6px; border-top: 1px solid var(--line); }
+.tip-know .eyebrow { margin-bottom: 2px; }
+.tip-kn { display: grid; grid-template-columns: 10px 1fr auto; align-items: center; gap: 6px; color: var(--text-2); }
+.tip-kn i { width: 8px; height: 8px; border-radius: 50%; }
+.tip-kn.gone { color: var(--muted); }
+.tip-events { list-style: none; margin: 0; padding: 6px 0 0; border-top: 1px solid var(--line); display: flex; flex-direction: column; gap: 3px; }
+.tip-events li { display: grid; grid-template-columns: 52px 1fr; gap: 8px; color: var(--text-2); overflow-wrap: anywhere; }
+.tip-hint { color: var(--muted); font-size: 11px; font-style: italic; }
 .drillbar { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin-top: 8px; pointer-events: auto; }
 .drillbar .mono { font-size: 13px; color: var(--text); }
 .back {
@@ -358,7 +382,7 @@
 
 @media (prefers-reduced-motion: reduce) {
   .bubble, .deps path, .playhead, .bubbles, .deps, .syms, .sym, .file, .fname, .disc, .foltag { transition: none; }
-  .bubble.focus, .sym.flash, .card, .tag, .breakout { animation: none; }
+  .bubble.focus, .sym.flash, .card, .tag, .breakout, .tip { animation: none; }
 }
 
 /* Release ticks on the chapter track */
