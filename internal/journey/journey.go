@@ -79,6 +79,7 @@ type Package struct {
 	// X, Y and R place the package's bubble at its peak size in the unit
 	// square. The layout covers the whole history, so it never moves.
 	X, Y, R float64
+	Group   int // the innermost group around it, an index into Journey.Groups; -1 for none
 }
 
 // PackageState is one package in one frame.
@@ -122,6 +123,7 @@ type Frame struct {
 type Journey struct {
 	Step     Step
 	Packages []Package // sorted by path
+	Groups   []Group   // outermost first, so every parent comes before its children
 	Authors  []string  // commit authors, sorted
 	Frames   []Frame
 }
@@ -412,40 +414,76 @@ func (r *replay) deps() []Dep {
 //
 // The history does not record go.mod, so the module path is inferred: it is
 // the prefix that turns the most directories into import paths that the
-// code actually imports. That covers the main module of a repository;
-// imports of nested modules are not resolved.
+// code actually imports. A repository that renamed its module, as
+// github.com/dotcloud/docker became github.com/docker/docker and then
+// github.com/moby/moby/v2, imports itself under each name in turn, so more
+// prefixes follow: each the one that resolves the most imports the earlier
+// ones left, while it resolves two or more and at least a tenth as many as
+// the first. That covers the main module of a repository; imports of nested
+// modules are resolved only if they are as common.
 type resolver struct {
-	module string
-	dirs   map[string]bool
-	cache  map[string]string
+	modules []string // longest first
+	dirs    map[string]bool
+	cache   map[string]string
 }
 
 func newResolver(syms []*ast.Symbol) *resolver {
 	r := &resolver{dirs: map[string]bool{}, cache: map[string]string{}}
-	imports := map[string]bool{}
+	seen := map[string]bool{}
+	var imports []string
 	for _, s := range syms {
 		r.dirs[path.Dir(s.Path)] = true
 		for _, ref := range s.Refs {
-			if ref.Kind == ast.RefImport {
-				imports[ref.Pkg] = true
+			if ref.Kind == ast.RefImport && !seen[ref.Pkg] {
+				seen[ref.Pkg] = true
+				imports = append(imports, ref.Pkg)
 			}
 		}
 	}
-	matches := map[string]int{}
-	for imp := range imports {
-		for d := range r.dirs {
-			if d != "." && strings.HasSuffix(imp, "/"+d) {
-				matches[strings.TrimSuffix(imp, "/"+d)]++
+	slices.Sort(imports)
+	first := 0
+	for len(imports) > 0 {
+		// Every import ending in a directory other than the root makes the
+		// rest of it a candidate.
+		matches := map[string]int{}
+		for _, imp := range imports {
+			for i := range len(imp) {
+				if imp[i] == '/' && r.dirs[imp[i+1:]] && imp[i+1:] != "." {
+					matches[imp[:i]]++
+				}
 			}
 		}
-	}
-	best := 0
-	for mod, n := range matches {
-		if n > best || n == best && mod < r.module {
-			r.module, best = mod, n
+		mod, best := "", 0
+		for m, n := range matches {
+			if n > best || n == best && m < mod {
+				mod, best = m, n
+			}
 		}
+		if best == 0 || first > 0 && (best < 2 || best*10 < first) {
+			break
+		}
+		first = max(first, best)
+		r.modules = append(r.modules, mod)
+		imports = slices.DeleteFunc(imports, func(imp string) bool { return r.under(mod, imp) != "" })
 	}
+	slices.SortStableFunc(r.modules, func(a, b string) int { return cmp.Compare(len(b), len(a)) })
 	return r
+}
+
+// under returns the directory of the package imported as imp if it is in
+// module mod, or "".
+func (r *resolver) under(mod, imp string) string {
+	d := ""
+	switch {
+	case imp == mod:
+		d = "."
+	case strings.HasPrefix(imp, mod+"/"):
+		d = imp[len(mod)+1:]
+	}
+	if !r.dirs[d] {
+		return ""
+	}
+	return d
 }
 
 // dir returns the directory of the package imported as imp, or "".
@@ -454,15 +492,10 @@ func (r *resolver) dir(imp string) string {
 		return d
 	}
 	d := ""
-	switch {
-	case r.module == "":
-	case imp == r.module:
-		d = "."
-	case strings.HasPrefix(imp, r.module+"/"):
-		d = strings.TrimPrefix(imp, r.module+"/")
-	}
-	if !r.dirs[d] {
-		d = ""
+	for _, mod := range r.modules {
+		if d = r.under(mod, imp); d != "" {
+			break
+		}
 	}
 	r.cache[imp] = d
 	return d

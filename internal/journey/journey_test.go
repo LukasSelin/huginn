@@ -237,7 +237,81 @@ func TestLayoutCoupling(t *testing.T) {
 	if !(gap("api", "cli") < gap("api", "misc")) {
 		t.Errorf("api–cli %.3f not closer than api–misc %.3f", gap("api", "cli"), gap("api", "misc"))
 	}
-	if !(gap("core", "cli") < gap("core", "misc")) {
-		t.Errorf("core–cli %.3f (through api) not closer than core–misc %.3f", gap("core", "cli"), gap("core", "misc"))
+	// misc is packed beside the three, not among them: it is farther from
+	// their middle than any of them.
+	var mx, my float64
+	for _, p := range []string{"core", "api", "cli"} {
+		mx, my = mx+at[p].X/3, my+at[p].Y/3
+	}
+	off := func(p string) float64 { return math.Hypot(at[p].X-mx, at[p].Y-my) }
+	for _, p := range []string{"core", "api", "cli"} {
+		if !(off(p) < off("misc")) {
+			t.Errorf("misc %.3f from the middle of the coupled packages, %s %.3f", off("misc"), p, off(p))
+		}
+	}
+}
+
+// TestLayoutGroups checks that the directory tree makes the clusters:
+// daemon, daemon/network and daemon/images form one group, with the
+// unrelated cli and api outside it, and that every package lies in its
+// group and every group in its parent.
+func TestLayoutGroups(t *testing.T) {
+	var changes []ast.Change
+	add := func(s *ast.Symbol) { changes = append(changes, ast.Change{Flags: ast.Added, New: s}) }
+	add(fn("daemon/daemon.go", "New", "example.com/m/daemon/network", "example.com/m/daemon/images"))
+	add(fn("daemon/network/net.go", "Dial"))
+	add(fn("daemon/images/img.go", "Pull"))
+	add(fn("api/api.go", "Serve", "example.com/m/daemon"))
+	add(fn("cli/cli.go", "Main", "example.com/m/api"))
+	add(fn("vendor/x/y/y.go", "Y")) // folds into one package, no group of its own
+	h := lineage.New()
+	h.Apply(lineage.Revision{SHA: "a", Time: day("2026-03-02"), Changes: changes})
+	j := Build(h, codemap.Build(h), Week, Options{})
+
+	groups := map[string]Group{}
+	for _, g := range j.Groups {
+		groups[g.Path] = g
+		if g.Parent >= 0 {
+			p := j.Groups[g.Parent]
+			if d := math.Hypot(g.X-p.X, g.Y-p.Y) + g.R; d > p.R+1e-9 {
+				t.Errorf("group %s pokes out of %s", g.Path, p.Path)
+			}
+		}
+	}
+	if len(j.Groups) != 2 || groups["."].Parent != -1 || groups["daemon"].Parent != 0 {
+		t.Fatalf("groups %+v, want . and daemon", j.Groups)
+	}
+	in := map[string]string{}
+	for _, p := range j.Packages {
+		g := j.Groups[p.Group]
+		in[p.Path] = g.Path
+		if d := math.Hypot(p.X-g.X, p.Y-g.Y) + p.R; d > g.R+1e-9 {
+			t.Errorf("%s pokes out of group %s", p.Path, g.Path)
+		}
+	}
+	want := map[string]string{"daemon": "daemon", "daemon/network": "daemon", "daemon/images": "daemon", "api": ".", "cli": ".", "vendor/x/y": "."}
+	if !reflect.DeepEqual(in, want) {
+		t.Errorf("groups of packages %v, want %v", in, want)
+	}
+}
+
+// TestResolverRenamedModule checks that a module imported under its old
+// and its new path resolves under both, and that an import that merely
+// ends like a directory of the repository does not.
+func TestResolverRenamedModule(t *testing.T) {
+	r := newResolver([]*ast.Symbol{
+		fn("main.go", "Main"),
+		fn("api/api.go", "Serve", "example.com/old/core", "example.com/old/store"),
+		fn("api/v2.go", "Serve2", "example.com/new/core", "example.com/new/store", "example.com/new"),
+		fn("core/core.go", "Run", "example.com/old/store"),
+		fn("store/store.go", "Get", "github.com/other/core"),
+	})
+	for imp, want := range map[string]string{
+		"example.com/old/core": "core", "example.com/new/store": "store", "example.com/new": ".",
+		"github.com/other/core": "", "example.com/new/missing": "",
+	} {
+		if got := r.dir(imp); got != want {
+			t.Errorf("dir(%q) = %q, want %q", imp, got, want)
+		}
 	}
 }
