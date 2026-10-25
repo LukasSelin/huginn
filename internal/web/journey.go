@@ -52,6 +52,7 @@ func (s *Server) story(ix *index) (*story.Story, error) {
 type journeyJSON struct {
 	Step     string        `json:"step"`
 	Packages []packageJSON `json:"packages"`
+	Groups   []groupJSON   `json:"groups"`  // outermost first
 	Authors  []string      `json:"authors"` // sorted; knowers index into it
 	Frames   []frameJSON   `json:"frames"`
 	Chapters []chapterJSON `json:"chapters"`
@@ -66,6 +67,18 @@ type packageJSON struct {
 	X    float64 `json:"x"` // center of the bubble at its peak, in the unit square
 	Y    float64 `json:"y"`
 	R    float64 `json:"r"`
+	// Group is the innermost group around the package, an index into
+	// groups; -1 for none.
+	Group int `json:"group"`
+}
+
+// groupJSON is a directory drawn as a cluster around its packages.
+type groupJSON struct {
+	Path   string  `json:"path"`
+	Parent int     `json:"parent"` // index into groups, -1 for the outermost
+	X      float64 `json:"x"`      // center of its circle, in the unit square
+	Y      float64 `json:"y"`
+	R      float64 `json:"r"`
 }
 
 type frameJSON struct {
@@ -184,14 +197,17 @@ func (s *Server) journeyAPI(ix *index, w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	j := s.journey(ix, step)
-	out := journeyJSON{Step: step.String(), Packages: []packageJSON{}, Authors: nonNil(j.Authors), Frames: []frameJSON{}, Chapters: []chapterJSON{}, Moments: momentsJSON(st.Moments), Releases: momentsJSON(st.Releases)}
+	out := journeyJSON{Step: step.String(), Packages: []packageJSON{}, Groups: []groupJSON{}, Authors: nonNil(j.Authors), Frames: []frameJSON{}, Chapters: []chapterJSON{}, Moments: momentsJSON(st.Moments), Releases: momentsJSON(st.Releases)}
 	out.RevTimes = make([]int64, ix.h.Revisions())
 	for i := range out.RevTimes {
 		_, t := ix.h.RevisionAt(i)
 		out.RevTimes[i] = t.Unix()
 	}
 	for _, p := range j.Packages {
-		out.Packages = append(out.Packages, packageJSON{Path: p.Path, Peak: p.Peak, X: p.X, Y: p.Y, R: p.R})
+		out.Packages = append(out.Packages, packageJSON{Path: p.Path, Peak: p.Peak, X: p.X, Y: p.Y, R: p.R, Group: p.Group})
+	}
+	for _, g := range j.Groups {
+		out.Groups = append(out.Groups, groupJSON{Path: g.Path, Parent: g.Parent, X: g.X, Y: g.Y, R: g.R})
 	}
 	for _, f := range j.Frames {
 		fj := frameJSON{T: f.Start.Unix(), SHA: f.SHA, Commits: f.Commits, Total: f.Total, Live: f.Live, Pkgs: []pkgJSON{}, Deps: [][3]int{}}

@@ -23,6 +23,9 @@
 .deps > path { fill: none; stroke: #5A6472; stroke-linecap: round; opacity: .5; vector-effect: non-scaling-stroke; transition: stroke var(--tween) ease, opacity 160ms ease; }
 .bubble {
   position: absolute; left: 0; top: 0; border-radius: 50%;
+  /* --d is the bubble's size on the map; one too small to see keeps 8px on
+     screen, so that zooming in on a crowded map draws the bubbles apart. */
+  width: max(var(--d, 0px), calc(8px / var(--k))); height: max(var(--d, 0px), calc(8px / var(--k)));
   display: flex; align-items: center; justify-content: center; text-align: center;
   background: var(--act-0); border: calc(1px / var(--k)) solid #3A3222; color: var(--text);
   transform: translate(-50%, -50%) scale(1);
@@ -37,9 +40,19 @@
 .bubble.followed { border: calc(2px / var(--k)) solid var(--renamed); z-index: 3; }
 @keyframes pulse { 50% { box-shadow: 0 0 0 6px rgba(240, 166, 74, .55), 0 0 36px 10px rgba(240, 166, 74, .3); } }
 .deps > path.hot { stroke: var(--accent); opacity: .95; }
+/* Groups: a directory's packages sit in a faint disc, nested like the tree,
+   that dependencies between groups bundle through. */
+.cluster circle { fill: rgba(150, 165, 185, .035); stroke: #2A313B; stroke-width: 1px; vector-effect: non-scaling-stroke; }
+.cluster text {
+  fill: var(--muted); font: 600 calc(10px / var(--k))/1 'JetBrains Mono', monospace; text-anchor: middle;
+  opacity: 0; transition: opacity 160ms ease; pointer-events: none;
+}
+.cluster.named text { opacity: .85; }
+.stage.lit .cluster { opacity: .45 !important; }
 
 /* A package's dependencies, lit while it is hovered or focused: blue for
    the packages it uses, green for the ones using it. */
+.deps .arrow { pointer-events: none; }
 .deps .arrow.out path { fill: var(--body); }
 .deps .arrow.in path { fill: var(--added); }
 .deps .arrow.both path { fill: var(--text); }

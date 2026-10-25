@@ -14,9 +14,13 @@
   const TAG_MS = 1800; // how long event tags stay on a package's symbols
   const MAX_TAGS = 8; // event tags per frame
   const DAY = 86400;
-  const MAX_ZOOM = 8;
+  const MAX_ZOOM = 8; // at least; a map of many packages zooms further, see place
+  const NAMED = 48; // how wide on screen the deepest zoom draws a typical package
   const MAX_GROW = 6; // how far past its place a package grows on a sparse map
   const MAX_FIT = 4; // how far the map closes in on its first few packages
+  const BUNDLE = 0.85; // how tightly dependencies between groups bundle, 0 to 1
+  // A lit dependency's arrowheads, one way and both ways, in a 10×10 box.
+  const ARROW = 'M2,1 L9,5 L2,9 z', ARROWS = 'M0,5 L4,1 L4,9 z M10,5 L6,1 L6,9 z';
   const reduced = matchMedia('(prefers-reduced-motion: reduce)');
   // How long size, colour, edge and counter changes take, at the current speed.
   const tweenMs = () => (reduced.matches ? 0 : 600 / state.speed);
@@ -40,6 +44,7 @@
     diam: [], // bubble diameters by package index, before zooming
     view: null, // the part of the map the frame shows: { cx, cy, z, fx, fy }
     zoom: null, // the stage's d3 zoom behaviour
+    maxZoom: MAX_ZOOM,
     zt: d3.zoomIdentity, // its current transform
     outer: null, // the transform of the package map while a package is open
     story: true, // pause at key moments
@@ -54,6 +59,7 @@
     colorBy: 'edits', // or 'knowledge': ring the packages by who knows them
     who: '', // the author whose share of each package dims it, if one
     edges: null, // the stage's dependencies by key, at the current frame
+    chains: [], // each package's groups, innermost first
     hover: null, // the package under the pointer
     focused: null, // the package with keyboard focus
     picked: null, // the package clicked once: the map narrows to it and its neighbours
@@ -143,6 +149,12 @@
     state.step = step;
     state.data = await load(step);
     state.pathIdx = new Map(state.data.packages.map((p, i) => [p.path, i]));
+    const { groups } = state.data;
+    state.chains = state.data.packages.map((p) => {
+      const c = [];
+      for (let g = p.group; g >= 0; g = groups[g].parent) c.push(g);
+      return c;
+    });
     for (const b of $('step').querySelectorAll('button')) b.setAttribute('aria-pressed', String(b.dataset.v === step));
     let max = 1, maxRefs = 1;
     for (const f of state.data.frames) {
@@ -218,7 +230,7 @@
     });
     state.diam = [];
     $('deps').replaceChildren();
-    buildMarkers();
+    buildLayers();
     place();
   }
 
@@ -232,9 +244,15 @@
     const size = Math.max(120, Math.min(W - 40, H - top - bottom));
     const x0 = (W - size) / 2, y0 = top + (H - top - bottom - size) / 2;
     state.geom = { size, x0, y0 };
+    // Zooming goes as deep as it takes to name a typical package, so a map
+    // of thousands can be read up close.
+    const rs = state.data.packages.map((p) => p.r).filter((r) => r > 0).sort((a, b) => a - b);
+    const mid = rs.length ? rs[rs.length >> 1] : 1;
+    state.maxZoom = Math.min(128, Math.max(MAX_ZOOM, NAMED / (2 * mid * size)));
+    state.zoom.scaleExtent([1, state.maxZoom]);
     state.data.packages.forEach((p, i) => placeBubble(i));
     $('deps').setAttribute('viewBox', `0 0 ${W} ${H}`);
-    d3.select('#deps').selectAll(':scope > path').attr('d', (e) => edgePath(e.a, e.b));
+    d3.select('#deps').selectAll(':scope > path').attr('d', (e) => (e.d = edgePath(e)));
     placeDisc({ x: x0 + size / 2, y: y0 + size / 2, r: 0.48 * size });
     state.zoom.extent([[0, 0], [W, H]]).translateExtent([[0, 0], [W, H]]);
     if (state.data.frames.length) render(false);
@@ -269,9 +287,12 @@
   }
 
   // at places package pi on the stage, through the frame's view.
-  function at(pi) {
+  const at = (pi) => toStage(state.data.packages[pi]);
+
+  // toStage places a point of the map's unit square, a package's or a
+  // group's center, on the stage through the frame's view.
+  function toStage(p) {
     const { size, x0, y0 } = state.geom;
-    const p = state.data.packages[pi];
     const v = state.view;
     if (!v) return { x: x0 + p.x * size, y: y0 + p.y * size };
     return { x: x0 + size * (v.fx + (p.x - v.cx) * v.z), y: y0 + size * (v.fy + (p.y - v.cy) * v.z) };
@@ -284,25 +305,66 @@
     el.style.top = `${y}px`;
   }
 
-  // edgePath curves a dependency away from the middle of the map, so that
-  // edges between packages on the rim keep clear of the busy center.
-  function edgePath(a, b) {
-    const { size, x0, y0 } = state.geom;
-    const { x: ax, y: ay } = at(a), { x: bx, y: by } = at(b);
-    const mx = (ax + bx) / 2, my = (ay + by) / 2;
-    const len = Math.hypot(bx - ax, by - ay) || 1;
-    let nx = (ay - by) / len, ny = (bx - ax) / len;
-    if ((mx - x0 - size / 2) * nx + (my - y0 - size / 2) * ny < 0) { nx = -nx; ny = -ny; }
-    const bend = 0.18 * len;
-    const cx = mx + nx * bend, cy = my + ny * bend;
-    // Drawn as two halves meeting mid-curve, where the arrow marking the
-    // direction of a lit dependency goes; its ends are under the bubbles.
-    const hx = (ax + 2 * cx + bx) / 4, hy = (ay + 2 * cy + by) / 4;
+  // edgePath draws dependency e. Between packages of different groups it is
+  // bundled: it bends through the centers of the groups it leaves and enters
+  // below the innermost one holding both, so that the dependencies between
+  // two parts of the tree run together as one strand and fan out only at
+  // their ends. Between packages of one group it curves away from the
+  // group's middle. Its ends are under the bubbles. It notes on e where its
+  // middle is and which way it runs there, for the arrow of a lit dependency.
+  function edgePath(e) {
+    const { groups } = state.data;
+    const ca = state.chains[e.a], cb = state.chains[e.b];
+    let i = ca.length - 1, k = cb.length - 1;
+    while (i >= 0 && k >= 0 && ca[i] === cb[k]) { i--; k--; }
+    const a = at(e.a), b = at(e.b);
+    // Collects the curve as cubic Béziers, [x0, y0, c1x, c1y, c2x, c2y, x, y].
+    const seg = [];
+    const from = () => (seg.length ? seg[seg.length - 1].slice(6) : [a.x, a.y]);
+    const pen = {
+      moveTo() {},
+      lineTo(x, y) { const [px, py] = from(); seg.push([px, py, px, py, x, y, x, y]); },
+      bezierCurveTo(c1x, c1y, c2x, c2y, x, y) { seg.push([...from(), c1x, c1y, c2x, c2y, x, y]); },
+      closePath() {},
+    };
+    if (i < 0 && k < 0) {
+      const g = toStage(ca.length ? groups[ca[0]] : { x: 0.5, y: 0.5 });
+      const mx = (a.x + b.x) / 2, my = (a.y + b.y) / 2;
+      const len = Math.hypot(b.x - a.x, b.y - a.y) || 1;
+      let nx = (a.y - b.y) / len, ny = (b.x - a.x) / len;
+      if ((mx - g.x) * nx + (my - g.y) * ny < 0) { nx = -nx; ny = -ny; }
+      // The quadratic through (cx, cy), as a cubic.
+      const cx = mx + nx * 0.18 * len, cy = my + ny * 0.18 * len;
+      pen.bezierCurveTo(a.x + (2 / 3) * (cx - a.x), a.y + (2 / 3) * (cy - a.y), b.x + (2 / 3) * (cx - b.x), b.y + (2 / 3) * (cy - b.y), b.x, b.y);
+    } else {
+      const pts = [a];
+      for (let x = 0; x <= i; x++) pts.push(toStage(groups[ca[x]]));
+      for (let x = k; x >= 0; x--) pts.push(toStage(groups[cb[x]]));
+      pts.push(b);
+      d3.line().x((p) => p.x).y((p) => p.y).curve(d3.curveBundle.beta(BUNDLE)).context(pen)(pts);
+    }
+    e.mid = midway(seg);
     const p = d3.path();
-    p.moveTo(ax, ay);
-    p.quadraticCurveTo((ax + cx) / 2, (ay + cy) / 2, hx, hy);
-    p.quadraticCurveTo((cx + bx) / 2, (cy + by) / 2, bx, by);
+    p.moveTo(a.x, a.y);
+    for (const [, , c1x, c1y, c2x, c2y, x, y] of seg) p.bezierCurveTo(c1x, c1y, c2x, c2y, x, y);
     return p.toString();
+  }
+
+  // midway returns the point halfway along a chain of cubic Béziers, going
+  // by their chords, and the direction they run there in degrees.
+  function midway(seg) {
+    if (!seg.length) return { x: 0, y: 0, deg: 0 };
+    const len = seg.map(([x0, y0, , , , , x, y]) => Math.hypot(x - x0, y - y0));
+    let rest = len.reduce((s, l) => s + l, 0) / 2, n = 0;
+    while (n < seg.length - 1 && rest > len[n]) rest -= len[n++];
+    const t = len[n] ? rest / len[n] : 0.5, u = 1 - t;
+    const [x0, y0, x1, y1, x2, y2, x3, y3] = seg[n];
+    const x = u * u * u * x0 + 3 * u * u * t * x1 + 3 * u * t * t * x2 + t * t * t * x3;
+    const y = u * u * u * y0 + 3 * u * u * t * y1 + 3 * u * t * t * y2 + t * t * t * y3;
+    let dx = 3 * u * u * (x1 - x0) + 6 * u * t * (x2 - x1) + 3 * t * t * (x3 - x2);
+    let dy = 3 * u * u * (y1 - y0) + 6 * u * t * (y2 - y1) + 3 * t * t * (y3 - y2);
+    if (!dx && !dy) { dx = x3 - x0; dy = y3 - y0; }
+    return { x, y, deg: (Math.atan2(dy, dx) * 180) / Math.PI };
   }
 
   function actStep(e) {
@@ -327,6 +389,9 @@
       // No wider than a fifth of the stage.
       room = Math.min(room, 0.1 / (r[i] * z));
       const a = packages[live[i].p];
+      // Nor out of its group.
+      const g = state.data.groups[a.group];
+      if (g) room = Math.min(room, (g.r - Math.hypot(a.x - g.x, a.y - g.y)) / r[i]);
       for (let j = i + 1; j < live.length; j++) {
         const b = packages[live[j].p];
         room = Math.min(room, (0.92 * Math.hypot(a.x - b.x, a.y - b.y)) / (r[i] + r[j]));
@@ -353,10 +418,11 @@
       const s = now.get(i);
       const live = s ? s.live : 0;
       const a = actStep(s ? editsOf(s) : 0);
-      const d = live > 0 ? Math.max(8, 2 * p.r * size * z * grow(s)) : Math.max(8, p.r * size * z);
+      // Too small to see, a bubble is drawn 8px wide on screen, at any zoom.
+      const d = live > 0 ? 2 * p.r * size * z * grow(s) : p.r * size * z;
       placeBubble(i);
       state.diam[i] = d;
-      el.style.width = el.style.height = `${d}px`;
+      el.style.setProperty('--d', `${d}px`);
       const ringed = know && live > 0 && s.knowers;
       el.style.backgroundColor = know ? RING_IN : ACT[a];
       el.style.backgroundImage = ringed ? ring(s.knowers) : '';
@@ -384,20 +450,57 @@
       if (focus !== undefined && (state.card.kind === 'signature' ? b === focus : a === focus || b === focus)) e.hot = true;
     }
     const ms = tweenMs();
+    renderGroups(f, ms);
+    for (const e of edges.values()) e.d = edgePath(e);
     d3.select('#deps').selectAll(':scope > path').data([...edges.values()], (e) => e.key).join(
       (enter) => enter.append('path')
-        .attr('d', (e) => edgePath(e.a, e.b))
+        .attr('d', (e) => e.d)
         .attr('pathLength', 1).attr('stroke-dasharray', '1 1').attr('stroke-dashoffset', 1)
         .call((en) => en.transition().duration(ms).ease(d3.easeCubicOut).attr('stroke-dashoffset', 0)),
       (update) => update.call((u) => u.filter('.leaving').interrupt().classed('leaving', false).style('opacity', null).attr('stroke-dashoffset', 0))
-        .call((u) => u.transition('view').duration(ms).ease(d3.easeCubicInOut).attr('d', (e) => edgePath(e.a, e.b))),
+        .call((u) => u.transition('view').duration(ms).ease(d3.easeCubicInOut).attr('d', (e) => e.d)),
       (exit) => exit.filter(':not(.leaving)').classed('leaving', true)
         .call((ex) => ex.transition().duration(ms).style('opacity', 0).remove()))
       .classed('hot', (e) => e.hot)
       .style('stroke-width', (e) => `${e.hot ? Math.max(2.2, state.refs(e.refs)) : state.refs(e.refs)}px`);
     state.edges = edges;
-    renderLit();
+    renderLit(ms);
     renderTip();
+  }
+
+  // renderGroups outlines the groups holding live packages in frame f, each
+  // a faint disc inside its parent's, and names those large enough on
+  // screen. The outermost group is the whole map and goes unmarked.
+  function renderGroups(f, ms) {
+    const { groups } = state.data;
+    const { size } = state.geom;
+    const live = new Set();
+    for (const s of f.pkgs) if (s.live > 0) for (const g of state.chains[s.p]) live.add(g);
+    const shown = groups.map((g, i) => ({ ...g, i })).filter((g) => g.parent >= 0 && live.has(g.i));
+    const z = state.view.z;
+    for (const g of shown) {
+      Object.assign(g, toStage(g));
+      g.rr = g.r * size * z;
+      const up = groups[g.parent].path;
+      g.name = up === '.' ? g.path : g.path.slice(up.length + 1);
+    }
+    d3.select('#clusters').selectAll(':scope > g').data(shown, (g) => g.i).join(
+      (enter) => enter.append('g').attr('class', 'cluster').style('opacity', 0)
+        .call((en) => en.append('circle').attr('cx', (g) => g.x).attr('cy', (g) => g.y).attr('r', (g) => g.rr))
+        .call((en) => en.append('text').attr('dy', '1.3em').attr('x', (g) => g.x).attr('y', (g) => g.y - g.rr))
+        .call((en) => en.transition().duration(ms).style('opacity', 1)),
+      (update) => update.call((u) => u.select('circle').transition('view').duration(ms).ease(d3.easeCubicInOut)
+        .attr('cx', (g) => g.x).attr('cy', (g) => g.y).attr('r', (g) => g.rr)),
+      (exit) => exit.transition().duration(ms).style('opacity', 0).remove())
+      .call((sel) => sel.select('text').text((g) => `${g.name}/`)
+        .transition('view').duration(ms).ease(d3.easeCubicInOut).attr('x', (g) => g.x).attr('y', (g) => g.y - g.rr));
+    nameGroups();
+  }
+
+  // nameGroups names the groups wide enough on screen to hold a name.
+  function nameGroups() {
+    const k = state.zt.k;
+    d3.selectAll('#clusters > g').classed('named', (g) => g.rr * k >= 70);
   }
 
   // ---------- The hover card ----------
@@ -568,7 +671,7 @@
     return near;
   }
 
-  function renderLit() {
+  function renderLit(ms = 0) {
     const lit = litPkg();
     const near = lit == null ? new Map() : litDeps(lit);
     const picked = lit != null && lit === state.picked;
@@ -591,16 +694,29 @@
     });
     // An arrow mid-curve points the way the references go; edges run from
     // the lower package index to the higher.
+    const arrowed = [];
     d3.select('#deps').selectAll(':scope > path')
       .each(function (e) {
         const on = lit != null && (e.a === lit || e.b === lit);
         const out = on ? (e.a === lit ? e.ab : e.ba) : 0, inn = on ? (e.a === lit ? e.ba : e.ab) : 0;
-        const dir = !on ? '' : out && inn ? 'both' : out ? 'out' : 'in';
+        e.dir = !on ? '' : out && inn ? 'both' : out ? 'out' : 'in';
         // Which way along the path the arrow points: towards b is fwd.
-        const fwd = (e.a === lit) === (dir === 'out');
-        const sel = d3.select(this).classed('on', on).classed('out', dir === 'out').classed('in', dir === 'in').classed('both', dir === 'both');
-        sel.attr('marker-mid', !on ? null : dir === 'both' ? 'url(#arrow-both)' : `url(#arrow-${dir}-${fwd ? 'fwd' : 'back'})`);
+        e.fwd = (e.a === lit) === (e.dir === 'out');
+        d3.select(this).classed('on', on).classed('out', e.dir === 'out').classed('in', e.dir === 'in').classed('both', e.dir === 'both');
+        if (on) arrowed.push(e);
       });
+    d3.select('#arrows').raise().selectAll(':scope > g').data(arrowed, (e) => e.key).join(
+      (enter) => enter.append('g').call((en) => en.append('path')).attr('transform', arrowAt),
+      (update) => update.call((u) => u.transition('view').duration(ms).ease(d3.easeCubicInOut).attr('transform', arrowAt)))
+      .attr('class', (e) => `arrow ${e.dir}`)
+      .select('path').attr('d', (e) => (e.dir === 'both' ? ARROWS : ARROW));
+  }
+
+  // arrowAt places a lit dependency's arrow mid-curve, pointing the way its
+  // references go, at a size that holds on screen as the map zooms.
+  function arrowAt(e) {
+    const m = e.mid;
+    return `translate(${m.x},${m.y}) rotate(${m.deg + (e.fwd ? 0 : 180)}) scale(${1.4 / state.zt.k}) translate(-5,-5)`;
   }
 
   // litCaption sums up the lit package's dependencies.
@@ -614,18 +730,12 @@
     return `${state.data.packages[lit].path} · uses → ${part(uses, usesRefs)} · used by ← ${part(by, byRefs)}`;
   }
 
-  // The arrowheads, one per colour and direction; they keep their size on
-  // screen as the map zooms.
-  function buildMarkers() {
-    const defs = d3.select('#deps').append('defs');
-    const marks = [['out-fwd', 'M2,1 L9,5 L2,9 z'], ['out-back', 'M8,1 L1,5 L8,9 z'], ['in-fwd', 'M2,1 L9,5 L2,9 z'], ['in-back', 'M8,1 L1,5 L8,9 z'], ['both', 'M0,5 L4,1 L4,9 z M10,5 L6,1 L6,9 z']];
-    for (const [id, d] of marks) {
-      defs.append('marker').attr('id', `arrow-${id}`).attr('class', `arrow ${id.split('-')[0]}`)
-        .attr('viewBox', '0 0 10 10').attr('refX', 5).attr('refY', 5)
-        .attr('markerUnits', 'userSpaceOnUse').attr('orient', 'auto')
-        .attr('markerWidth', 14 / state.zt.k).attr('markerHeight', 14 / state.zt.k)
-        .append('path').attr('d', d);
-    }
+  // buildLayers adds the layers drawn with the dependencies: the groups
+  // under them and the arrows of the lit ones over them.
+  function buildLayers() {
+    const svg = d3.select('#deps');
+    svg.append('g').attr('id', 'clusters');
+    svg.append('g').attr('id', 'arrows');
   }
 
   // ---------- Zoom ----------
@@ -636,7 +746,7 @@
   function setupZoom() {
     const st = $('stage');
     state.zoom = d3.zoom()
-      .scaleExtent([1, MAX_ZOOM])
+      .scaleExtent([1, state.maxZoom])
       .filter((e) => {
         if (e.target.closest && e.target.closest('.ov')) return false;
         if (e.type === 'wheel') return e.ctrlKey || e.metaKey;
@@ -661,8 +771,9 @@
     const w = $('world');
     w.style.transform = `translate(${t.x}px, ${t.y}px) scale(${t.k})`;
     w.style.setProperty('--k', String(t.k));
-    d3.selectAll('#deps marker').attr('markerWidth', 14 / t.k).attr('markerHeight', 14 / t.k);
-    $('zoomIn').disabled = t.k >= MAX_ZOOM - 1e-6;
+    d3.selectAll('#arrows > g').attr('transform', arrowAt);
+    nameGroups();
+    $('zoomIn').disabled = t.k >= state.maxZoom - 1e-6;
     $('zoomOut').disabled = t.k <= 1 + 1e-6;
     $('zoomReset').disabled = t.k <= 1 + 1e-6 && Math.abs(t.x) < 0.5 && Math.abs(t.y) < 0.5;
     relabel();
