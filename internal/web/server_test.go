@@ -352,8 +352,8 @@ func TestCommitBeforeIndexing(t *testing.T) {
 	hs := newHistory(t)
 	_, ts := hs.server(t, false)
 
-	if code := get(t, ts, "/api/dirs", nil); code != http.StatusServiceUnavailable {
-		t.Errorf("/api/dirs: status %d, want 503", code)
+	if code := get(t, ts, "/api/health", nil); code != http.StatusServiceUnavailable {
+		t.Errorf("/api/health: status %d, want 503", code)
 	}
 	// Reports need no index; the parent stands in for the previous commit.
 	var c commitJSON
@@ -448,15 +448,14 @@ func TestSymbolEventsCarryCommits(t *testing.T) {
 	hs := newHistory(t)
 	_, ts := hs.server(t, true)
 
-	var dir struct {
-		Symbols []laneJSON `json:"symbols"`
-	}
-	get(t, ts, "/api/dir?d=store", &dir)
-	if len(dir.Symbols) != 1 {
-		t.Fatalf("store symbols %+v", dir.Symbols)
+	var hits []symHitJSON
+	get(t, ts, "/api/journey/symbols?q=Open", &hits)
+	hits = slices.DeleteFunc(hits, func(h symHitJSON) bool { return h.Dir != "store" })
+	if len(hits) != 1 {
+		t.Fatalf("store hits %+v", hits)
 	}
 	var sym symbolJSON
-	get(t, ts, "/api/symbol/"+itoa(int64(dir.Symbols[0].ID)), &sym)
+	get(t, ts, "/api/symbol/"+itoa(int64(hits[0].ID)), &sym)
 	var shas []string
 	for _, e := range sym.Events {
 		shas = append(shas, e.SHA)

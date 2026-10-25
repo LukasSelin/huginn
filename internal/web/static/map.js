@@ -476,7 +476,7 @@ function renderInspector() {
       h('div', { class: 'hotlist' }, busiest.filter((t) => t.edits).map((t) => hotRow(t.dir, t.edits, busiest[0].edits, () => go({ sel: t.dir })))));
     return;
   }
-  const link = (extra) => `/symbols#${new URLSearchParams({ d: d.dir, ...extra })}`;
+  const follow = (id) => `/journey#sym=${id}`;
   const maxHot = Math.max(1, ...d.hot.map((x) => x.edits));
   el.replaceChildren(
     h('div', { class: 'stack' },
@@ -492,12 +492,12 @@ function renderInspector() {
     h('section', { class: 'stack' },
       h('h2', { class: 'h2' }, 'Hot symbols'),
       d.hot.length
-        ? h('div', { class: 'hotlist' }, d.hot.map((x) => hotRow(x.name, x.edits, maxHot, () => { location.href = link({ s: x.id }); })))
+        ? h('div', { class: 'hotlist' }, d.hot.map((x) => hotRow(x.name, x.edits, maxHot, () => { location.href = follow(x.id); })))
         : h('span', { class: 'muted small' }, 'No edits in this window.')),
-    h('a', { class: 'btn', href: link({}) }, 'Open symbol timeline →'),
+    h('a', { class: 'btn', href: `/journey#${new URLSearchParams({ pkg: d.dir })}` }, 'Open in the journey →'),
     h('section', { class: 'stack' },
       h('h2', { class: 'h2' }, 'Recent semantic changes'),
-      d.recent.length ? h('div', { class: 'recent' }, d.recent.map((e) => h('a', { class: 'rc', href: link({ s: e.id }) },
+      d.recent.length ? h('div', { class: 'recent' }, d.recent.map((e) => h('a', { class: 'rc', href: follow(e.id) },
         mark(e.kind),
         h('span', { class: 'rcbody' },
           h('span', {}, h('span', { class: 'mono' }, e.name), h('span', { class: 'muted' }, ` · ${(KIND_LABEL[e.kind] || e.kind).toLowerCase()}`)),

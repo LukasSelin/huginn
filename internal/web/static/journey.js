@@ -599,8 +599,7 @@
         h('span', { class: 'muted small mono' }, `${fmtBig(m.t)} · ${m.sha.slice(0, 7)}`),
         h('button', { type: 'button', class: 'close', 'aria-label': 'Close the key moment (Escape)', onclick: hideCard }, '×')),
       h('p', { class: 'card-text' }, m.text),
-      sum,
-      h('a', { class: 'card-link', href: `/symbols#c=${m.sha}` }, 'Open the commit →'));
+      sum);
     card.hidden = false;
     report(m.sha).then((r) => { if (state.card === m) sum.replaceChildren(...summary(r, m)); })
       .catch((err) => { if (state.card === m) sum.replaceChildren(h('span', { class: 'muted small' }, `Could not read the commit: ${err.message}`)); });
@@ -1126,8 +1125,7 @@
       h('div', { class: `muted small${now.state === 'live' ? '' : ' fol-off'}` }, where),
       h('div', { class: 'fol-links small' },
         now.dir && (!state.drill || state.drill.dir !== now.dir)
-          ? h('button', { type: 'button', class: 'linkish', onclick: () => drill(now.dir).catch(fail) }, `Look inside ${base(now.dir)}`) : null,
-        h('a', { href: `/symbols#d=${encodeURIComponent(dirOf(sym.path))}&s=${sym.id}` }, 'Symbol timeline →')),
+          ? h('button', { type: 'button', class: 'linkish', onclick: () => drill(now.dir).catch(fail) }, `Look inside ${base(now.dir)}`) : null),
       h('ol', { class: 'fol-events' }, sym.events.map((x) => h('li', { class: x.rev <= r ? (x === e ? 'now' : 'past') : 'future' },
         h('button', { type: 'button', onclick: () => { stop(); seekRev(x.rev); } },
           mark(x.kind), h('span', { class: 'mono small' }, fmtShort(x.t)), h('span', { class: 'small' }, x.summary || x.kind))))));
