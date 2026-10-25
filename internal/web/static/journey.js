@@ -752,22 +752,24 @@
 
   // ---------- Zoom ----------
 
-  // The stage zooms with Ctrl+scroll or a pinch and pans by dragging; plain
-  // scrolling still scrolls the page. Labels keep their size on screen, so
-  // zooming in names more of the packages and symbols.
+  // The stage zooms with the scroll wheel or a pinch and pans by dragging;
+  // scrolling out past the whole map scrolls the page again. Labels keep
+  // their size on screen, so zooming in names more of the packages and
+  // symbols.
   function setupZoom() {
     const st = $('stage');
     state.zoom = d3.zoom()
       .scaleExtent([1, state.maxZoom])
       .filter((e) => {
         if (e.target.closest && e.target.closest('.ov')) return false;
-        if (e.type === 'wheel') return e.ctrlKey || e.metaKey;
+        if (e.type === 'wheel') return true;
         if (e.touches) return e.touches.length > 1 || state.zt.k > 1;
         return !e.button;
       })
-      // A pinch arrives as small Ctrl+wheel steps; a mouse wheel's steps are
-      // large and need no boost.
-      .wheelDelta((e) => -e.deltaY * (e.deltaMode === 1 ? 0.05 : e.deltaMode ? 1 : 0.002) * (Math.abs(e.deltaY) < 50 ? 10 : 1))
+      // A pinch arrives as small Ctrl+wheel steps and needs a boost; a mouse
+      // wheel's steps are large, and a touchpad's two-finger scroll comes in
+      // many small steps, so neither does.
+      .wheelDelta((e) => -e.deltaY * (e.deltaMode === 1 ? 0.05 : e.deltaMode ? 1 : 0.002) * (e.ctrlKey && Math.abs(e.deltaY) < 50 ? 10 : 1))
       .on('start', () => st.classList.add('zooming'))
       .on('end', () => st.classList.remove('zooming'))
       .on('zoom', (e) => {
