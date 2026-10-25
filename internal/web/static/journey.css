@@ -443,7 +443,7 @@
 .k-cycle .dot { background: var(--deleted); } .k-cycle-gone .dot { background: var(--added); }
 
 /* Knowledge: each package is a ring split by who knows it; an author picked
-   dims the packages they know little of. */
+   keeps only the packages they know, dimming the ones they know little of. */
 .bubble.know { color: var(--text); border-color: #3A4250; }
 .who {
   min-height: 30px; max-width: 180px; padding: 0 8px; border-radius: 6px; border: 1px solid var(--line-strong);

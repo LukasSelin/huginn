@@ -72,7 +72,7 @@
     folDir: undefined, // the followed symbol's package at the last render
     colorBy: 'edits', // or 'knowledge': ring the packages by who knows them
     lines: 'key', // which dependencies are drawn unlit: 'key', 'hover' or 'all'
-    who: '', // the author whose share of each package dims it, if one
+    who: '', // the author whose packages the map keeps, dimmed by their share, if one
     edges: null, // the stage's dependencies by key, at the current frame
     chains: [], // each package's groups, innermost first
     gchains: [], // each group's enclosing groups, innermost first
@@ -129,6 +129,16 @@
     if (!s || !s.knowers) return 0;
     const k = s.knowers.find((x) => x[0] === a);
     return k ? k[1] : 0;
+  }
+
+  // scoped is frame f with only the picked author's packages, the ones they
+  // are among the top knowers of, and the dependencies between them.
+  function scoped(f) {
+    if (!state.who) return f;
+    const a = state.data.authors.indexOf(state.who);
+    const pkgs = f.pkgs.filter((s) => shareOf(s, a) > 0);
+    const keep = new Set(pkgs.map((s) => s.p));
+    return { ...f, pkgs, deps: f.deps.filter(([x, y]) => keep.has(x) && keep.has(y)) };
   }
 
   function knowersText(s) {
@@ -493,8 +503,10 @@
     return (s) => k * Math.min(1, boost * grown(s));
   }
 
-  function renderStage(f) {
+  function renderStage(frame) {
     const { packages } = state.data;
+    // An author picked keeps only their packages on the map.
+    const f = scoped(frame);
     const { size } = state.geom;
     const now = new Map(f.pkgs.map((p) => [p.p, p]));
     const focus = state.card && state.card.pkg != null ? state.pathIdx.get(state.card.pkg) : undefined;
@@ -522,8 +534,8 @@
       const ringed = know && live > 0 && s.knowers;
       el.style.backgroundColor = know ? RING_IN : ACT[a];
       el.style.backgroundImage = ringed ? ring(s.knowers) : '';
-      // An author picked dims each package by their share of it.
-      el.style.opacity = live > 0 && state.who ? String(0.12 + 0.88 * Math.min(1, shareOf(s, who) / 0.5)) : '';
+      // and dims each by their share of it.
+      el.style.opacity = live > 0 && state.who ? String(0.35 + 0.65 * Math.min(1, shareOf(s, who) / 0.5)) : '';
       const cls = know ? `know${live > 0 ? '' : ' gone'}` : `a${a}${live > 0 ? '' : ' gone'}${a >= 3 ? ' busy' : ''}`;
       el.className = `bubble ${cls}${nameClass(el, i, d * state.zt.k)}${i === focus ? ' focus' : ''}${i === folPkg ? ' followed' : ''}`;
       const label = live > 0 ? `${p.path} · ${plural(live, 'symbol')}${s && s.kinds ? ` · ${describeKinds(s.kinds)}` : ''}${knowersText(s)}` : p.path;
@@ -985,22 +997,24 @@
 
   // ---------- Zoom ----------
 
-  // The stage zooms with Ctrl+scroll or a pinch and pans by dragging; plain
-  // scrolling still scrolls the page. Labels keep their size on screen, so
-  // zooming in names more of the packages and symbols.
+  // The stage zooms with the scroll wheel or a pinch and pans by dragging;
+  // scrolling out past the whole map scrolls the page again. Labels keep
+  // their size on screen, so zooming in names more of the packages and
+  // symbols.
   function setupZoom() {
     const st = $('stage');
     state.zoom = d3.zoom()
       .scaleExtent([1, state.maxZoom])
       .filter((e) => {
         if (e.target.closest && e.target.closest('.ov')) return false;
-        if (e.type === 'wheel') return e.ctrlKey || e.metaKey;
+        if (e.type === 'wheel') return true;
         if (e.touches) return e.touches.length > 1 || state.zt.k > 1;
         return !e.button;
       })
-      // A pinch arrives as small Ctrl+wheel steps; a mouse wheel's steps are
-      // large and need no boost.
-      .wheelDelta((e) => -e.deltaY * (e.deltaMode === 1 ? 0.05 : e.deltaMode ? 1 : 0.002) * (Math.abs(e.deltaY) < 50 ? 10 : 1))
+      // A pinch arrives as small Ctrl+wheel steps and needs a boost; a mouse
+      // wheel's steps are large, and a touchpad's two-finger scroll comes in
+      // many small steps, so neither does.
+      .wheelDelta((e) => -e.deltaY * (e.deltaMode === 1 ? 0.05 : e.deltaMode ? 1 : 0.002) * (e.ctrlKey && Math.abs(e.deltaY) < 50 ? 10 : 1))
       .on('start', () => st.classList.add('zooming'))
       .on('end', () => {
         st.classList.remove('zooming');
@@ -2038,7 +2052,10 @@
   function setWho(name) {
     state.who = name || '';
     $('who').value = state.who;
-    if (state.data) render(false);
+    if (!state.data) return;
+    // A package picked that the author doesn't know leaves the map with them.
+    if (state.picked != null && state.who && !scoped(state.data.frames[state.frame]).pkgs.some((s) => s.p === state.picked)) state.picked = null;
+    render(false);
   }
 
   // ---------- Playback ----------
