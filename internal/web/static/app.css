@@ -45,6 +45,8 @@ h1 { margin: 0; font-size: 20px; font-weight: 600; }
 .views { display: flex; gap: 2px; padding: 3px; background: var(--raised); border-radius: 8px; }
 .views a { padding: 7px 14px; border-radius: 6px; color: var(--muted); text-decoration: none; }
 .views a[aria-current] { background: var(--line-strong); color: var(--text); font-weight: 500; }
+.detail-views { align-items: center; background: none; border: 1px solid var(--line); }
+.detail-views .eyebrow { padding: 0 8px 0 6px; }
 .crumbs { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; font-size: 13px; color: var(--muted); }
 .crumbs button { border: 0; background: none; padding: 0; color: var(--muted); cursor: pointer; }
 .crumbs button:hover { color: var(--text); }
