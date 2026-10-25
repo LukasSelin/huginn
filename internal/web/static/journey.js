@@ -58,6 +58,7 @@
     focused: null, // the package with keyboard focus
     picked: null, // the package clicked once: the map narrows to it and its neighbours
     links: null, // the package in the breakout: { dir, rev, v, nodes, adj, wires, lit }
+    tip: null, // the node the hover card describes: { pkg } or { sym }
   };
 
   const fmtShort = (t) => new Date(t * 1000).toLocaleDateString(undefined, { month: 'short', day: 'numeric', timeZone: 'UTC' });
@@ -204,10 +205,14 @@
       const choose = () => (state.picked === i ? openLinks(p.path).catch(fail) : pick(i));
       const el = h('button', { type: 'button', class: 'bubble gone', tabindex: '-1', onclick: choose },
         h('span', { class: 'bname' }, base(p.path)));
-      el.addEventListener('pointerenter', (e) => { if (e.pointerType !== 'touch') setLit('hover', i); });
-      el.addEventListener('pointerleave', () => setLit('hover', null));
-      el.addEventListener('focus', () => setLit('focused', i));
-      el.addEventListener('blur', () => setLit('focused', null));
+      el.addEventListener('pointerenter', (e) => {
+        if (e.pointerType === 'touch') return;
+        setLit('hover', i);
+        showTip({ pkg: i });
+      });
+      el.addEventListener('pointerleave', () => { setLit('hover', null); hideTip(); });
+      el.addEventListener('focus', () => { setLit('focused', i); showTip({ pkg: i }); });
+      el.addEventListener('blur', () => { setLit('focused', null); hideTip(); });
       wrap.append(el);
       return el;
     });
@@ -360,7 +365,6 @@
       const cls = know ? `know${live > 0 ? '' : ' gone'}` : `a${a}${live > 0 ? '' : ' gone'}${a >= 3 ? ' busy' : ''}`;
       el.className = `bubble ${cls}${d * state.zt.k < 44 ? ' small' : ''}${i === focus ? ' focus' : ''}${i === folPkg ? ' followed' : ''}`;
       const label = live > 0 ? `${p.path} · ${plural(live, 'symbol')}${s && s.kinds ? ` · ${describeKinds(s.kinds)}` : ''}${knowersText(s)}` : p.path;
-      el.title = label;
       el.setAttribute('aria-label', i === state.picked ? `${label}. Show the functions crossing into and out of it`
         : `${label}. Show only it and the packages it shares dependencies with`);
       el.tabIndex = live > 0 && !state.drill ? 0 : -1;
@@ -393,6 +397,139 @@
       .style('stroke-width', (e) => `${e.hot ? Math.max(2.2, state.refs(e.refs)) : state.refs(e.refs)}px`);
     state.edges = edges;
     renderLit();
+    renderTip();
+  }
+
+  // ---------- The hover card ----------
+
+  // A package or symbol under the pointer, or with keyboard focus, is
+  // described in a card beside it: what it holds at the playhead, how it
+  // got there, and what a click on it does.
+  function showTip(t) {
+    state.tip = t;
+    renderTip();
+  }
+
+  function hideTip() {
+    state.tip = null;
+    $('tip').hidden = true;
+  }
+
+  function renderTip() {
+    const t = state.tip;
+    const f = state.data && state.data.frames[state.frame];
+    const body = !t || !f ? null : t.sym != null ? (state.drill ? symTip(t.sym) : null) : !state.drill ? pkgTip(t.pkg, f) : null;
+    const tip = $('tip');
+    if (!body) {
+      tip.hidden = true;
+      return;
+    }
+    tip.replaceChildren(...body);
+    tip.hidden = false;
+    placeTip();
+  }
+
+  // placeTip sets the card beside its node, on whichever side has room.
+  function placeTip() {
+    const t = state.tip, tip = $('tip');
+    if (!t || tip.hidden) return;
+    let x, y, r;
+    if (t.sym != null) ({ x, y, r } = state.drill.pos[t.sym]);
+    else {
+      ({ x, y } = at(t.pkg));
+      r = (state.diam[t.pkg] || 0) / 2;
+    }
+    const z = state.zt, st = $('stage');
+    const cx = z.applyX(x), cy = z.applyY(y), cr = r * z.k;
+    const w = tip.offsetWidth, ht = tip.offsetHeight, gap = 12;
+    let left = cx + cr + gap;
+    if (left + w > st.clientWidth - 8) left = cx - cr - gap - w;
+    left = Math.max(8, Math.min(st.clientWidth - w - 8, left));
+    const top = Math.max(8, Math.min(st.clientHeight - ht - 8, cy - ht / 2));
+    tip.style.left = `${left}px`;
+    tip.style.top = `${top}px`;
+  }
+
+  const tipRow = (label, ...value) => h('div', { class: 'tip-row' }, h('span', { class: 'tl' }, label), h('span', { class: 'tv' }, ...value));
+
+  function pkgTip(pi, f) {
+    const p = state.data.packages[pi];
+    const s = f.pkgs.find((x) => x.p === pi);
+    const live = s ? s.live : 0;
+    const out = [h('div', { class: 'tip-head' }, h('span', { class: 'eyebrow' }, 'Package'), h('span', { class: 'tip-name mono' }, p.path))];
+    const { born, edited } = pkgHistory(pi);
+    if (!live) {
+      out.push(h('div', { class: 'muted small' }, born == null ? `Not written yet at ${fmtBig(f.t)}` : 'No live symbols at the playhead'));
+      return out;
+    }
+    const rows = [tipRow('Symbols', `${live.toLocaleString()}`, h('span', { class: 'muted' }, ` · peak ${p.peak.toLocaleString()}`))];
+    const kinds = s.kinds ? KINDS.filter(([k]) => s.kinds[k]) : [];
+    const per = { commit: 'this commit', week: 'this week', month: 'this month' }[state.step];
+    rows.push(tipRow(`Edits ${per}`, kinds.length
+      ? h('span', { class: 'tip-kinds' }, kinds.map(([k, l]) => h('span', { class: 'cnt', title: l }, mark(k), String(s.kinds[k]))))
+      : h('span', { class: 'muted' }, 'none')));
+    let uses = 0, by = 0;
+    for (const n of litDeps(pi).values()) {
+      if (n.out) uses++;
+      if (n.in) by++;
+    }
+    rows.push(tipRow('Uses →', plural(uses, 'package')), tipRow('Used by ←', plural(by, 'package')));
+    if (born != null) rows.push(tipRow('First seen', fmtBig(born)));
+    if (edited != null) rows.push(tipRow('Last edited', fmtBig(edited)));
+    out.push(h('div', { class: 'tip-rows' }, rows));
+    if (s.knowers && s.knowers.length) {
+      out.push(h('div', { class: 'tip-know' },
+        h('div', { class: 'eyebrow' }, `Who knows it · bus factor ${s.bus}`),
+        s.knowers.slice(0, 3).map(([a, share, gone]) => {
+          const name = state.data.authors[a];
+          return h('div', { class: `tip-kn${gone ? ' gone' : ''}` },
+            h('i', { style: `background:${gone ? GONE : authorColor(name)}` }), h('span', {}, `${name}${gone ? ' (left)' : ''}`), h('span', { class: 'mono' }, pct(share)));
+        }),
+        s.orphaned > 0 ? h('div', { class: 'muted small' }, `${pct(s.orphaned)} orphaned`) : null));
+    }
+    out.push(h('div', { class: 'tip-hint' }, state.picked === pi ? 'Click to break out the functions crossing it' : 'Click to show only it and its neighbours'));
+    return out;
+  }
+
+  // pkgHistory is when package pi first had live symbols and when it was
+  // last edited, up to the playhead.
+  function pkgHistory(pi) {
+    let born = null, edited = null;
+    const fs = state.data.frames;
+    for (let i = 0; i <= state.frame; i++) {
+      const s = fs[i].pkgs.find((x) => x.p === pi);
+      if (!s) continue;
+      if (born == null && s.live > 0) born = fs[i].t;
+      if (editsOf(s) > 0) edited = fs[i].t;
+    }
+    return { born, edited };
+  }
+
+  const SYM_EVENT = { born: 'Added', died: 'Deleted', renamed: 'Renamed', in: 'Moved in', out: 'Moved out', signature: 'New signature' };
+
+  function symTip(i) {
+    const d = state.drill;
+    if (!d.cur.has(i)) return null;
+    const s = d.v.symbols[i];
+    const stmts = d.cur.get(i);
+    const evs = [];
+    for (let fi = 0; fi <= state.frame; fi++) for (const e of d.v.frames[fi].ev) if (e.s === i) evs.push(e);
+    const when = (e) => fmtShort(state.data.revTimes[e.rev] ?? 0);
+    const what = (e) => (e.k === 'renamed' ? `from ${e.from}` : e.k === 'in' ? `from ${e.from}` : e.k === 'out' ? `to ${e.to}` : '');
+    const out = [
+      h('div', { class: 'tip-head' }, h('span', { class: 'eyebrow' }, s.kind), h('span', { class: 'tip-name mono' }, d.names[i])),
+      h('div', { class: 'tip-rows' },
+        tipRow('File', h('span', { class: 'mono' }, s.file)),
+        tipRow('Size', plural(stmts, 'statement'), h('span', { class: 'muted' }, ` · peak ${s.peak.toLocaleString()}`))),
+    ];
+    if (evs.length) {
+      out.push(h('ol', { class: 'tip-events' }, evs.slice(-4).map((e) => h('li', {},
+        h('span', { class: 'mono muted' }, when(e)), h('span', {}, `${SYM_EVENT[e.k] || e.k} ${what(e)}`.trim())))));
+    }
+    if (evs.length > 4) out.push(h('div', { class: 'muted small' }, `and ${plural(evs.length - 4, 'earlier change')}`));
+    const fid = state.follow ? state.follow.id : 0;
+    out.push(h('div', { class: 'tip-hint' }, s.id === fid ? 'Being followed' : 'Click to follow it through renames and moves'));
+    return out;
   }
 
   // ---------- A package's dependencies ----------
@@ -529,7 +666,10 @@
     $('zoomOut').disabled = t.k <= 1 + 1e-6;
     $('zoomReset').disabled = t.k <= 1 + 1e-6 && Math.abs(t.x) < 0.5 && Math.abs(t.y) < 0.5;
     relabel();
-    if (state.data) placeFolTag();
+    if (state.data) {
+      placeFolTag();
+      placeTip();
+    }
   }
 
   function zoomTo(t, ms = zoomMs()) {
@@ -758,6 +898,7 @@
     st.style.setProperty('--oy', `${o.y}px`);
     // The package map's zoom is kept for coming back; the package opens whole.
     if (!state.drill) state.outer = state.zt;
+    hideTip();
     // Until a symbol is first packed it sits where the server placed it.
     const pos = v.symbols.map((s) => ({ x: x0 + s.x * size, y: y0 + s.y * size, r: 3 }));
     state.picked = null;
@@ -768,7 +909,12 @@
     }
     $('files').replaceChildren(...state.drill.files.values());
     $('dots').replaceChildren(...v.symbols.map((s) => {
+      const i = state.drill.dots.length;
       const el = h('button', { type: 'button', class: `sym gone k-${s.kind}`, tabindex: '-1', onclick: () => followSym(s.id).catch(fail) }, h('span', { class: 'sname' }));
+      el.addEventListener('pointerenter', (e) => { if (e.pointerType !== 'touch') showTip({ sym: i }); });
+      el.addEventListener('pointerleave', hideTip);
+      el.addEventListener('focus', () => showTip({ sym: i }));
+      el.addEventListener('blur', hideTip);
       state.drill.dots.push(el);
       return el;
     }));
@@ -788,6 +934,7 @@
     const pi = state.drill.pi;
     state.drill = null;
     state.switching = null;
+    hideTip();
     $('stage').classList.remove('drilled');
     $('drillBar').hidden = true;
     $('syms').inert = true;
@@ -881,7 +1028,6 @@
       el.classList.toggle('gone', !live);
       el.classList.toggle('followed', s.id === fid);
       const label = `${d.names[i]} · ${s.kind} · ${plural(stmts, 'statement')}`;
-      el.title = label;
       el.setAttribute('aria-label', `${label}. Follow`);
       el.tabIndex = live ? 0 : -1;
     });
@@ -889,6 +1035,7 @@
     const live = d.cur.size;
     $('drillNote').textContent = `${plural(live, 'live symbol')}${d.v.truncated ? ` · the biggest ${d.v.symbols.length.toLocaleString()} of ${d.v.total.toLocaleString()} shown` : ''}`;
     if (animate) animateEvents(d.v.frames[state.frame].ev);
+    renderTip();
   }
 
   // The point on the package's rim facing package dir.
