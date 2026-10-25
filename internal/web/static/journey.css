@@ -26,7 +26,7 @@
   display: flex; align-items: center; justify-content: center; text-align: center;
   background: var(--act-0); border: calc(1px / var(--k)) solid #3A3222; color: var(--text);
   transform: translate(-50%, -50%) scale(1);
-  transition: width var(--tween) ease, height var(--tween) ease, background-color var(--tween) ease,
+  transition: left var(--tween) ease, top var(--tween) ease, width var(--tween) ease, height var(--tween) ease, background-color var(--tween) ease,
     opacity var(--tween) ease, transform var(--tween) ease, box-shadow var(--tween) ease;
 }
 .bubble { padding: 0; cursor: pointer; }
