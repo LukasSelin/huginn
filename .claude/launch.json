@@ -1,0 +1,11 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "huginn",
+      "runtimeExecutable": "go",
+      "runtimeArgs": ["run", "./cmd/huginn", "serve", "-addr", "localhost:7979"],
+      "port": 7979
+    }
+  ]
+}
