@@ -115,20 +115,24 @@ type exit struct {
 	w        float64
 }
 
-// minGroup is the fewest packages a directory needs below it to be a group,
-// and minKids the fewest children: a circle around two or three others is
-// mostly padding.
-const (
-	minGroup = 5
-	minKids  = 4
-)
+// minSizes returns, for a map of n packages, the fewest packages a directory
+// needs below it to be a group, and the fewest children. A circle around a
+// few others is mostly padding; and the larger the map, the more of it is
+// laid out by coupling within a group rather than split by directory, so
+// that what is coupled sits close. On moby's 3,767 packages a group holds
+// 40 packages or more.
+func minSizes(n int) (pkgs, kids int) {
+	pkgs = max(5, int(math.Sqrt(float64(n))*2/3))
+	return pkgs, max(4, pkgs/5)
+}
 
 // tree arranges the packages by directory. Directories with a single child
-// are folded into it, and those with fewer than minGroup packages or
-// minKids children into their parent, so every group left has two children or more; a directory that is
-// itself a package as well as a parent holds its own package as a leaf
-// among its subdirectories.
+// are folded into it, and those too small by minSizes into their parent,
+// so every group left has two children or more; a directory that is itself
+// a package as well as a parent holds its own package as a leaf among its
+// subdirectories.
 func tree(pkgs []Package) *node {
+	minGroup, minKids := minSizes(len(pkgs))
 	dirs := map[string]*node{}
 	var dir func(p string) *node
 	dir = func(p string) *node {
@@ -153,9 +157,8 @@ func tree(pkgs []Package) *node {
 		d.kids = append(d.kids, &node{path: p.Path, pkg: i, r: math.Sqrt(float64(max(p.Peak, 1)))})
 	}
 	// fold returns what d leaves its parent: d itself, or, for a directory
-	// too small to be a group, what is in it,
-	// so that small corners of the tree add no ring of padding around a
-	// few bubbles. It counts the packages under d in size.
+	// too small to be a group, what is in it. It counts the packages under
+	// d in size.
 	size := map[*node]int{}
 	var fold func(d *node) []*node
 	fold = func(d *node) []*node {

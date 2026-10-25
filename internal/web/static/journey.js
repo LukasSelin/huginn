@@ -20,11 +20,19 @@
   const MAX_FIT = 4; // how far the map closes in on its first few packages
   const BUNDLE = 0.85; // how tightly dependencies between groups bundle, 0 to 1
   const OPEN = 60; // how wide on screen a group grows before it opens to show its packages
-  // How wide on screen a bubble is before it is named: a package inside it,
-  // a closed group beneath it.
-  const NAME_IN = 44, NAME_UNDER = 14;
-  const named = (id, d) => d >= (isGroup(id) ? NAME_UNDER : NAME_IN);
-  const EDGES = 240; // dependencies drawn at once; the weaker ones show only when lit
+  // Where a bubble d pixels wide on screen is named: inside it if its name
+  // fits there, else beneath it once it is NAME_UNDER wide, else not at
+  // all. A closed group is always named beneath.
+  const NAME_UNDER = 14;
+  function nameAt(el, id, d) {
+    if (d < NAME_UNDER) return 'small';
+    if (isGroup(id) || d < 6.6 * el.firstChild.textContent.length + 10) return 'under';
+    return '';
+  }
+  const nameClass = (el, id, d) => { const c = nameAt(el, id, d); return c ? ` ${c}` : ''; };
+  // How many dependencies are drawn at once, by the lines setting: the
+  // strongest with an end on screen; the others show when one end is lit.
+  const LINES = { key: 30, hover: 0, all: Infinity };
   // A lit dependency's arrowheads, one way and both ways, in a 10×10 box.
   const ARROW = 'M2,1 L9,5 L2,9 z', ARROWS = 'M0,5 L4,1 L4,9 z M10,5 L6,1 L6,9 z';
   const reduced = matchMedia('(prefers-reduced-motion: reduce)');
@@ -63,6 +71,7 @@
     switching: null, // the package a followed symbol is being chased into
     folDir: undefined, // the followed symbol's package at the last render
     colorBy: 'edits', // or 'knowledge': ring the packages by who knows them
+    lines: 'key', // which dependencies are drawn unlit: 'key', 'hover' or 'all'
     who: '', // the author whose share of each package dims it, if one
     edges: null, // the stage's dependencies by key, at the current frame
     chains: [], // each package's groups, innermost first
@@ -516,7 +525,7 @@
       // An author picked dims each package by their share of it.
       el.style.opacity = live > 0 && state.who ? String(0.12 + 0.88 * Math.min(1, shareOf(s, who) / 0.5)) : '';
       const cls = know ? `know${live > 0 ? '' : ' gone'}` : `a${a}${live > 0 ? '' : ' gone'}${a >= 3 ? ' busy' : ''}`;
-      el.className = `bubble ${cls}${named(i, d * state.zt.k) ? '' : ' small'}${i === focus ? ' focus' : ''}${i === folPkg ? ' followed' : ''}`;
+      el.className = `bubble ${cls}${nameClass(el, i, d * state.zt.k)}${i === focus ? ' focus' : ''}${i === folPkg ? ' followed' : ''}`;
       const label = live > 0 ? `${p.path} · ${plural(live, 'symbol')}${s && s.kinds ? ` · ${describeKinds(s.kinds)}` : ''}${knowersText(s)}` : p.path;
       el.setAttribute('aria-label', i === state.picked ? `${label}. Show the functions crossing into and out of it`
         : `${label}. Show only it and the packages it shares dependencies with`);
@@ -551,7 +560,7 @@
       el.style.setProperty('--d', `${d}px`);
       el.style.backgroundColor = know ? RING_IN : ACT[a];
       const cls = know ? 'know' : `a${a}${a >= 3 ? ' busy' : ''}`;
-      el.className = `bubble agg ${cls}${live > 0 ? '' : ' gone'}${named(id, d * state.zt.k) ? '' : ' small'}`
+      el.className = `bubble agg ${cls}${live > 0 ? '' : ' gone'}${nameClass(el, id, d * state.zt.k)}`
         + `${focus !== undefined && front[focus] === id ? ' focus' : ''}${folPkg !== undefined && front[folPkg] === id ? ' followed' : ''}`;
       el.setAttribute('aria-label', `${g.path}/ · ${plural(t ? t.pkgs : 0, 'package')} · ${plural(live, 'symbol')}. Zoom in to open it`);
       el.tabIndex = live > 0 && !state.drill ? 0 : -1;
@@ -579,9 +588,7 @@
       else e.ba += refs || 0;
       if (focus !== undefined && (state.card.kind === 'signature' ? pb === focus : pa === focus || pb === focus)) e.hot = true;
     }
-    // Only the strongest are drawn; the others show when one of their ends
-    // is lit.
-    [...edges.values()].sort((x, y) => y.refs - x.refs).forEach((e, i) => { e.faint = i >= EDGES && !e.hot; });
+    rankLines(edges.values());
     const ms = tweenMs();
     renderGroups(f, ms);
     for (const e of edges.values()) e.d = edgePath(e);
@@ -596,18 +603,47 @@
         .call((ex) => ex.transition().duration(ms).style('opacity', 0).remove()))
       .classed('hot', (e) => e.hot)
       .classed('faint', (e) => e.faint)
-      .style('stroke-width', (e) => `${e.hot ? Math.max(2.2, state.refs(e.refs)) : state.refs(e.refs)}px`);
+      .style('--w', (e) => `${e.hot ? Math.max(2.2, state.refs(e.refs)) : state.refs(e.refs)}px`);
     state.edges = edges;
     state.foldKey = [...open].join();
     renderLit(ms);
     renderTip();
   }
 
+  // rankLines marks the dependencies not drawn unless lit: all but the
+  // strongest few, by the lines setting, of those with an end on screen.
+  // The card's are always drawn.
+  function rankLines(edges) {
+    const st = $('stage'), W = st.clientWidth, H = st.clientHeight, t = state.zt;
+    const seen = (id) => {
+      const { x, y } = nodeAt(id);
+      const sx = t.applyX(x), sy = t.applyY(y);
+      return sx >= 0 && sx <= W && sy >= 0 && sy <= H;
+    };
+    let n = 0;
+    for (const e of [...edges].sort((p, q) => q.refs - p.refs)) {
+      const drawn = n < LINES[state.lines] && (seen(e.a) || seen(e.b));
+      if (drawn) n++;
+      e.faint = !drawn && !e.hot;
+    }
+  }
+
+  function setLines(v) {
+    state.lines = LINES[v] !== undefined ? v : 'key';
+    for (const b of $('lines').querySelectorAll('button')) b.setAttribute('aria-pressed', String(b.dataset.v === state.lines));
+    if (!state.edges) return;
+    rankLines(state.edges.values());
+    d3.select('#deps').selectAll(':scope > path').classed('faint', (e) => e.faint);
+  }
+
   // refold draws the stage again, at once, when zooming opens or closes a
-  // group.
+  // group, and otherwise picks the lines to draw for what is now on screen.
   function refold() {
     if (!state.data || !state.data.frames.length || !state.view || state.drill) return;
-    if ([...fold(kept()).open].join() === state.foldKey) return;
+    if ([...fold(kept()).open].join() === state.foldKey) {
+      setLines(state.lines);
+      return;
+    }
     const f = state.data.frames[state.frame];
     state.instant = true;
     renderStage(f);
@@ -653,6 +689,25 @@
       .call((sel) => sel.select('text').text((g) => `${g.name}/`)
         .transition('view').duration(ms).ease(d3.easeCubicInOut).attr('x', (g) => g.x).attr('y', (g) => g.y - g.rr));
     nameGroups();
+    cullNames();
+  }
+
+  // cullNames hides the names beneath bubbles that would run into the name
+  // of a larger one, so that the names left can be read.
+  function cullNames() {
+    const t = state.zt, taken = [];
+    const named = state.bubbles.map((el, id) => ({ el, id, d: (state.diam[id] || 0) * t.k }))
+      .filter(({ el }) => !el.classList.contains('gone') && el.classList.contains('under'))
+      .sort((a, b) => b.d - a.d);
+    for (const { el, id, d } of named) {
+      const { x, y } = nodeAt(id);
+      const cx = t.applyX(x), top = t.applyY(y) + Math.max(d, 8) / 2 + 4;
+      const w = 6.2 * el.firstChild.textContent.length + 4;
+      const box = [cx - w / 2, top, cx + w / 2, top + 13];
+      const hit = taken.some((b) => box[0] < b[2] && b[0] < box[2] && box[1] < b[3] && b[1] < box[3]);
+      el.classList.toggle('unnamed', hit);
+      if (!hit) taken.push(box);
+    }
   }
 
   // nameGroups names the groups wide enough on screen to hold a name.
@@ -967,6 +1022,7 @@
     w.style.setProperty('--k', String(t.k));
     d3.selectAll('#arrows > g').attr('transform', arrowAt);
     nameGroups();
+    cullNames();
     $('zoomIn').disabled = t.k >= state.maxZoom - 1e-6;
     $('zoomOut').disabled = t.k <= 1 + 1e-6;
     $('zoomReset').disabled = t.k <= 1 + 1e-6 && Math.abs(t.x) < 0.5 && Math.abs(t.y) < 0.5;
@@ -988,7 +1044,11 @@
   // relabel names the bubbles and symbols big enough on screen to hold a name.
   function relabel() {
     const k = state.zt.k;
-    state.bubbles.forEach((el, i) => el.classList.toggle('small', !named(i, (state.diam[i] || 0) * k)));
+    state.bubbles.forEach((el, i) => {
+      const c = nameAt(el, i, (state.diam[i] || 0) * k);
+      el.classList.toggle('small', c === 'small');
+      el.classList.toggle('under', c === 'under');
+    });
     const d = state.drill;
     if (!d) return;
     d.dots.forEach((el, i) => {
@@ -2093,6 +2153,7 @@
     if (state.follow) p.set('sym', String(state.follow.id));
     if (!state.story) p.set('story', '0');
     if (state.colorBy !== 'edits') p.set('color', state.colorBy);
+    if (state.lines !== 'key') p.set('lines', state.lines);
     if (state.who) p.set('who', state.who);
     const s = `#${p.toString().replaceAll('%2F', '/')}`;
     if (s !== location.hash) {
@@ -2112,6 +2173,7 @@
     setStory(p.get('story') !== '0');
     state.colorBy = p.get('color') === 'knowledge' ? 'knowledge' : 'edits';
     for (const b of $('colorBy').querySelectorAll('button')) b.setAttribute('aria-pressed', String(b.dataset.v === state.colorBy));
+    setLines(p.get('lines'));
     state.who = state.data.authors.includes(p.get('who')) ? p.get('who') : '';
     $('who').value = state.who;
     if (!state.data.frames.length) return;
@@ -2148,6 +2210,7 @@
     $('step').addEventListener('click', (e) => { const b = e.target.closest('button'); if (b) setStep(b.dataset.v).catch(fail); });
     $('storyMode').addEventListener('click', () => setStory(!state.story));
     $('colorBy').addEventListener('click', (e) => { const b = e.target.closest('button'); if (b) setColorBy(b.dataset.v); });
+    $('lines').addEventListener('click', (e) => { const b = e.target.closest('button'); if (b) setLines(b.dataset.v); });
     $('who').addEventListener('change', (e) => setWho(e.target.value));
     $('narrate').addEventListener('click', () => setNarrate(!state.narrate));
     $('back').addEventListener('click', undrill);

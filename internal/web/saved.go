@@ -19,7 +19,7 @@ import (
 // savedVersion identifies the saved format. Bump it whenever the encoding
 // changes, or a prebuilt response would come out differently for the same
 // history, so that a stale file is discarded rather than served.
-const savedVersion = 4
+const savedVersion = 5
 
 // savedHeader is decoded before anything else, so that a file from another
 // version or another history is discarded without decoding the rest.
