@@ -12,6 +12,7 @@ import (
 	"context"
 	"embed"
 	"encoding/json"
+	"fmt"
 	"io/fs"
 	"net/http"
 	"path"
@@ -73,8 +74,10 @@ func New(repo *git.Repo, name string, opts lineage.BuildOptions) *Server {
 }
 
 // Index builds the history and the responses the pages ask for, then
-// publishes them and builds the per-directory ones. It blocks until all are
-// done; run it in a goroutine to serve progress meanwhile.
+// publishes them and builds the per-directory ones. With a cache, the
+// responses are saved there for the next Index of the same history. It
+// blocks until all are done; run it in a goroutine to serve progress
+// meanwhile.
 func (s *Server) Index(ctx context.Context) error {
 	defer s.settle.Do(func() { close(s.settled) })
 	start := time.Now()
@@ -95,12 +98,29 @@ func (s *Server) Index(ctx context.Context) error {
 		ix.order = append(ix.order, d)
 	}
 	slices.Sort(ix.order)
+	// The responses saved for this history are loaded rather than built
+	// again. They were saved once all were built, the detail ones too.
+	// Without a key they are neither loaded nor saved.
+	key, _ := s.historyKey(ctx)
+	saved := s.loadSaved(key)
+	for k, e := range saved {
+		ix.pre.Store(k, e)
+	}
 	s.prebuild(ctx, ix, s.pageURLs(ix))
 	ix.took = time.Since(start)
 	s.index.Store(ix)
 	s.settle.Do(func() { close(s.settled) })
+	if len(saved) > 0 {
+		return nil
+	}
 	s.prebuild(ctx, ix, s.detailURLs(ix))
-	return ctx.Err()
+	if ctx.Err() != nil {
+		return ctx.Err()
+	}
+	if err := s.save(key, ix); err != nil {
+		return fmt.Errorf("save responses: %w", err)
+	}
+	return nil
 }
 
 // Handler returns the UI and API routes.

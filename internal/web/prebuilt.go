@@ -6,6 +6,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"io"
 	"io/fs"
 	"mime"
 	"net/http"
@@ -24,7 +25,8 @@ import (
 // memory. Requests outside that set, like a custom map window or a search,
 // are computed as before. The static files are compressed once at startup.
 
-// encoded is a response body ready to send.
+// encoded is a response body ready to send. In saved responses only the
+// smaller of body and gz is kept; the other is nil.
 type encoded struct {
 	body, gz []byte
 	ctype    string
@@ -54,14 +56,27 @@ func (e *encoded) serve(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	body := e.body
-	if len(e.gz) < len(e.body) && strings.Contains(r.Header.Get("Accept-Encoding"), "gzip") {
+	switch {
+	case e.gz != nil && (body == nil || len(e.gz) < len(body)) && strings.Contains(r.Header.Get("Accept-Encoding"), "gzip"):
 		h.Set("Content-Encoding", "gzip")
 		body = e.gz
+	case body == nil:
+		body = e.inflate()
 	}
 	h.Set("Content-Length", strconv.Itoa(len(body)))
 	if r.Method != http.MethodHead {
 		w.Write(body)
 	}
+}
+
+// inflate decompresses e's gzipped copy, for when only that was kept.
+func (e *encoded) inflate() []byte {
+	zr, err := gzip.NewReader(bytes.NewReader(e.gz))
+	if err != nil {
+		return nil
+	}
+	body, _ := io.ReadAll(zr)
+	return body
 }
 
 // requestKey names a request by its path and its sorted query, so that
