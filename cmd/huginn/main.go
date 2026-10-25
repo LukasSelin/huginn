@@ -23,6 +23,13 @@
 //
 // prints the semantic diff of one commit: its changed symbols, their
 // callers, the blast radius and the files that changed only in formatting.
+//
+//	huginn moves [-C dir] [-blocked] [packages]
+//
+// type-checks the working tree and prints the functions that only one other
+// package refers to, as candidates to move there, with the unexported helpers
+// that only they use and would move along. Moves that would leave unexported
+// symbols behind or create an import cycle are listed only with -blocked.
 package main
 
 import (
@@ -46,7 +53,8 @@ const usage = `usage:
   huginn symbols [-C dir] [-branch rev] [-max-count n] [-tests] [-no-cache] name
   huginn serve [-C dir] [-branch rev] [-tests] [-no-cache] [-addr host:port]
   huginn story [-C dir] [-branch rev] [-tests] [-no-cache] [-moments]
-  huginn semdiff [-C dir] [-include-generated] [-callers n] rev`
+  huginn semdiff [-C dir] [-include-generated] [-callers n] rev
+  huginn moves [-C dir] [-blocked] [packages]`
 
 func main() {
 	cmds := map[string]func(context.Context, io.Writer, io.Writer, []string) error{
@@ -54,6 +62,7 @@ func main() {
 		"serve":   serve,
 		"semdiff": semanticDiff,
 		"story":   tell,
+		"moves":   suggestMoves,
 	}
 	if len(os.Args) < 2 || cmds[os.Args[1]] == nil {
 		fmt.Fprintln(os.Stderr, usage)

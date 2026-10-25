@@ -37,6 +37,7 @@ go test ./...
 huginn symbols [-C dir] [-branch rev] [-tests] [-no-cache] name
 huginn serve [-C dir] [-branch rev] [-tests] [-no-cache] [-addr host:port]
 huginn semdiff [-C dir] [-include-generated] [-callers n] rev
+huginn moves [-C dir] [-blocked] [packages]
 ```
 
 `-C` points at the repository (default: the current directory), `-branch`
@@ -130,6 +131,30 @@ Blast radius
   git.(*walker).parse  internal/git/walk.go:280  ×1
 ```
 
+### `huginn moves`
+
+Type-checks the working tree (`./...` unless packages are given) and lists the
+functions that only one other package refers to, as candidates to move into
+that package. Each comes with the unexported symbols of its package that only
+it uses, which would move along (a type brings its methods), and the
+`_test.go` files in its directory that name any of them. A move is blocked if
+the function needs unexported symbols that code staying behind also uses, or
+if it would break an import cycle or the internal package rule; those are
+listed, with the reasons, only with `-blocked`. Methods are never suggested,
+since they cannot leave their receiver's package.
+
+References come from the type checker, plus the calls that interface dispatch
+may make according to a class hierarchy analysis. Dispatched calls need
+neither an import nor access, so they never block a move.
+
+```
+$ huginn moves
+checked 12 packages in 996ms: 2 clean moves, 7 blocked
+huginn/internal/journey.ParseStep  internal/journey/journey.go:34
+  -> huginn/internal/web, used by (*Server).journeyAPI, (*Server).journeyPackage
+…
+```
+
 ## Architecture
 
 ```
@@ -161,6 +186,9 @@ git log / cat-file ──► internal/git ──► internal/ast ──► inter
   JSON API from an in-memory index built once at startup.
 - **internal/semdiff** reports one commit: changed symbols, the callers of
   each across the tree at that commit, and the commit's blast radius.
+- **internal/moves** loads the working tree with `go/packages`, builds a
+  reference graph between package-level symbols from `types.Info` and
+  `go/callgraph/cha`, and finds functions to move with their helpers.
 
 ### Index cache
 
