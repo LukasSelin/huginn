@@ -8,6 +8,15 @@ const pct = (x) => `${Math.round(x * 100)}%`;
 const ratio = (a, b) => (b ? a / b : 0);
 const sum = (xs, f) => xs.reduce((n, x) => n + f(x), 0);
 const editsOf = (b) => Object.values(b.edits).reduce((n, x) => n + x, 0);
+const DAY = 86400;
+
+// perWeek is a count over the time a run of buckets covers: from the end of
+// the bucket before it to its own end, and at least a day.
+function perWeek(B, i, j, f) {
+  const from = i > 0 ? B[i - 1].to : B[i].from;
+  const days = Math.max(1, (B[j - 1].to - from) / DAY);
+  return (sum(B.slice(i, j), f) / days) * 7;
+}
 
 // Verdicts say which way a trend points, and whether that way is good.
 const VERDICTS = {
@@ -91,11 +100,18 @@ function render() {
   const cTrend = trend(cpf(first), cpf(last), true);
   if (cTrend === 'watch') lede.push(`Functions are getting more complex on average (${cpf(first).toFixed(1)} → ${cpf(last).toFixed(1)}).`);
   else if (cTrend === 'good') lede.push(`Functions are getting simpler on average (${cpf(first).toFixed(1)} → ${cpf(last).toFixed(1)}).`);
+  const tailN = Math.max(1, Math.ceil(B.length / 4));
+  const commits = sum(B, (b) => b.commits), fixes = sum(B, (b) => b.fixes);
+  const tailCommits = sum(B.slice(-tailN), (b) => b.commits), tailFixes = sum(B.slice(-tailN), (b) => b.fixes);
+  const fixShare = ratio(fixes, commits), tailFixShare = ratio(tailFixes, tailCommits);
+  const fTrend = B.length < 4 ? 'steady' : trend(ratio(sum(B.slice(0, -tailN), (b) => b.fixes), sum(B.slice(0, -tailN), (b) => b.commits)), tailFixShare, true, 0.2);
+  if (fixes && fTrend === 'watch') lede.push(`Fixes are a larger share of the work lately (${pct(tailFixShare)} of recent commits, ${pct(fixShare)} overall).`);
+  else if (fixes && fTrend === 'good') lede.push(`Fixes are a smaller share of the work lately (${pct(tailFixShare)} of recent commits, ${pct(fixShare)} overall).`);
   if (state.data.busFactor === 1 && state.data.authors > 1) lede.push(`One person last touched more than half of the live code.`);
   $('lede').textContent = lede.join(' ');
 
   const added = sum(B, (b) => b.added), surviving = sum(B, (b) => b.surviving);
-  const tail = B.slice(-Math.max(1, Math.ceil(B.length / 4)));
+  const tail = B.slice(-tailN);
   const tailShare = ratio(sum(tail, (b) => b.reshaped), sum(tail, editsOf));
   const allShare = ratio(sum(B, (b) => b.reshaped), sum(B, editsOf));
   const cards = [
@@ -118,6 +134,23 @@ function render() {
       title: 'Code survival', value: pct(ratio(surviving, added)), delta: `${surviving.toLocaleString()} of ${plural(added, 'added symbol')} still alive`,
       verdict: 'info', series: spark(B.map((b) => (b.added ? b.surviving / b.added : null)), { bars: true, label: 'Share of each period\'s new symbols still alive today' }),
       why: 'Of the symbols added in each period, how many exist today. Low survival in recent periods points to churn from unclear requirements.',
+    }),
+    card({
+      title: 'Fix share', value: pct(tailFixShare), delta: `latest quarter · ${pct(fixShare)} overall · ${fixes.toLocaleString()} ${fixes === 1 ? 'fix' : 'fixes'}`,
+      verdict: fixes ? fTrend : 'info', series: spark(B.map((b) => (b.commits ? b.fixes / b.commits : null)), { bars: true, label: 'Share of commits that fix or revert, per period' }),
+      why: 'Commits whose message says they fix a bug or revert earlier work: a fix(...) type, an opening verb like Fix or Prevent, or words like bug and crash. A rising share means more of the effort goes into repairing what shipped.',
+    }),
+    card({
+      title: 'Velocity', value: perWeek(B, B.length - tailN, B.length, (b) => b.commits).toFixed(1),
+      delta: `commits/week lately · ${perWeek(B, 0, B.length, (b) => b.commits).toFixed(1)} overall · ${perWeek(B, B.length - tailN, B.length, editsOf).toFixed(0)} edits/week`,
+      verdict: 'info', series: spark(B.map((_, i) => perWeek(B, i, i + 1, (b) => b.commits)), { bars: true, label: 'Commits per week, per period' }),
+      why: 'Commits per week, branch merges left out, over the time each period covers. Pair it with the fix share: speed that comes with more fixes is borrowed.',
+    }),
+    card({
+      title: 'New code fixed later', value: pct(ratio(sum(B, (b) => b.fixed), added)),
+      delta: `${sum(B, (b) => b.fixed).toLocaleString()} of ${plural(added, 'added symbol')} later edited by a fix`,
+      verdict: 'info', series: spark(B.map((b) => (b.added ? b.fixed / b.added : null)), { bars: true, label: 'Share of each period\'s new symbols a later fix edited' }),
+      why: 'Of the symbols added in each period, how many a later fix or revert had to change: an error rate for the work itself. Recent periods have had less time to be found out.',
     }),
   ];
   if (state.data.tests) {
@@ -148,6 +181,7 @@ function renderHotspots(hotspots) {
   const head = h('thead', null, h('tr', null,
     h('th', { scope: 'col' }, 'File'),
     h('th', { scope: 'col', class: 'num' }, 'Edits'),
+    h('th', { scope: 'col', class: 'num', title: 'Edits made by fixes and reverts' }, 'Fixes'),
     h('th', { scope: 'col', class: 'num' }, 'Authors'),
     h('th', { scope: 'col', class: 'num' }, 'Complexity'),
     h('th', { scope: 'col', class: 'num' }, 'Lines'),
@@ -156,6 +190,7 @@ function renderHotspots(hotspots) {
   const rows = hotspots.map((s) => h('tr', null,
     h('td', { class: 'mono' }, h('a', { href: `/#s=${encodeURIComponent(s.dir)}&w=all` }, s.path)),
     h('td', { class: 'num' }, s.edits),
+    h('td', { class: 'num' }, s.fixes),
     h('td', { class: 'num' }, s.authors),
     h('td', { class: 'num' }, s.complexity),
     h('td', { class: 'num' }, s.lines),

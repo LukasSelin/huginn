@@ -60,8 +60,16 @@ type Bucket struct {
 	Edits codemap.Kinds
 
 	// Added counts the symbols first seen in the bucket, Surviving those of
-	// them still alive after the last revision.
-	Added, Surviving int
+	// them still alive after the last revision, and Fixed those of them a
+	// later fix or revert edited.
+	Added, Surviving, Fixed int
+
+	// What the bucket's commit messages say they were for (see ReadIntent).
+	// Commits leaves out plain branch merges; Fixes counts reverts too.
+	Commits, Features, Fixes, Reverts int
+
+	// FixEdits counts the bucket's edits made by fixes and reverts.
+	FixEdits int
 }
 
 // Restructured counts the bucket's renames, moves and signature changes:
@@ -74,6 +82,7 @@ func (b Bucket) Restructured() int {
 type Hotspot struct {
 	Path       string
 	Edits      int // semantic edits over the whole history
+	Fixes      int // of them, made by fixes and reverts
 	Authors    int // who made them
 	Complexity int // of its live functions
 	Lines      int
@@ -100,8 +109,12 @@ func Build(h *lineage.History, opts Options) *Report {
 		opts.Hotspots = 10
 	}
 	r := &Report{}
-	r.Buckets = buckets(h, opts.Buckets)
-	r.Hotspots = hotspots(h, opts.Hotspots)
+	intents := make([]Intent, h.Revisions())
+	for i := range intents {
+		intents[i] = ReadIntent(h.MessageAt(i))
+	}
+	r.Buckets = buckets(h, intents, opts.Buckets)
+	r.Hotspots = hotspots(h, intents, opts.Hotspots)
 	r.Owners, r.Authors, r.BusFactor = owners(h)
 	return r
 }
@@ -116,7 +129,7 @@ type step struct {
 
 // buckets replays every event in revision order, splitting the revisions
 // into at most n buckets of near-equal size.
-func buckets(h *lineage.History, n int) []Bucket {
+func buckets(h *lineage.History, intents []Intent, n int) []Bucket {
 	revs := h.Revisions()
 	if revs == 0 {
 		return []Bucket{}
@@ -160,6 +173,21 @@ func buckets(h *lineage.History, n int) []Bucket {
 		bk.Revisions = hi - lo
 		bk.First, bk.From = h.RevisionAt(lo)
 		bk.Last, bk.To = h.RevisionAt(hi - 1)
+		for _, in := range intents[lo:hi] {
+			if in == Merge {
+				continue
+			}
+			bk.Commits++
+			switch in {
+			case Feature:
+				bk.Features++
+			case Fix:
+				bk.Fixes++
+			case Revert:
+				bk.Fixes++
+				bk.Reverts++
+			}
+		}
 		for ; next < len(steps) && steps[next].rev < hi; next++ {
 			st := steps[next]
 			e := st.event
@@ -174,11 +202,17 @@ func buckets(h *lineage.History, n int) []Bucket {
 			}
 			if k := e.Primary(); k != 0 {
 				bk.Edits[codemap.KindIndex(k)]++
+				if intents[st.rev].fixes() {
+					bk.FixEdits++
+				}
 			}
 			if st.first && e.Old == nil {
 				bk.Added++
 				if st.sym.Alive() {
 					bk.Surviving++
+				}
+				if fixedLater(h, intents, st.sym) {
+					bk.Fixed++
 				}
 			}
 		}
@@ -188,8 +222,18 @@ func buckets(h *lineage.History, n int) []Bucket {
 	return out
 }
 
+// fixedLater reports whether a fix or revert edited sym after adding it.
+func fixedLater(h *lineage.History, intents []Intent, sym *lineage.Symbol) bool {
+	for _, e := range sym.Events[1:] {
+		if rev, ok := h.Position(e.SHA); ok && e.Primary() != 0 && intents[rev].fixes() {
+			return true
+		}
+	}
+	return false
+}
+
 // hotspots ranks the files of live source code by edits × complexity.
-func hotspots(h *lineage.History, n int) []Hotspot {
+func hotspots(h *lineage.History, intents []Intent, n int) []Hotspot {
 	type file struct {
 		Hotspot
 		authors map[string]bool
@@ -213,6 +257,9 @@ func hotspots(h *lineage.History, n int) []Hotspot {
 			f := get(p)
 			f.Edits++
 			f.authors[e.Author] = true
+			if rev, ok := h.Position(e.SHA); ok && intents[rev].fixes() {
+				f.Fixes++
+			}
 		}
 		if !sym.Alive() {
 			continue

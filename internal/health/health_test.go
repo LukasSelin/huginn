@@ -57,16 +57,16 @@ func TestBucketsPerRevision(t *testing.T) {
 	want := []Bucket{
 		{First: "a", Last: "a", From: at(0), To: at(0), Revisions: 1,
 			Symbols: 2, Exported: 1, Lines: 11, Complexity: 2, Funcs: 2, TestLines: 5,
-			Edits: kinds(2, 0, 0, 0, 0, 0), Added: 2, Surviving: 2}, // g lives on as H
+			Edits: kinds(2, 0, 0, 0, 0, 0), Added: 2, Surviving: 2, Commits: 1}, // g lives on as H
 		{First: "b", Last: "b", From: at(1), To: at(1), Revisions: 1,
 			Symbols: 2, Exported: 2, Lines: 15, Complexity: 4, Funcs: 2, TestLines: 5,
-			Edits: kinds(0, 0, 1, 0, 0, 1)},
+			Edits: kinds(0, 0, 1, 0, 0, 1), Commits: 1},
 		{First: "c", Last: "c", From: at(2), To: at(2), Revisions: 1,
 			Symbols: 3, Exported: 3, Lines: 19, Complexity: 5, Funcs: 3, TestLines: 8,
-			Edits: kinds(1, 0, 0, 0, 0, 0), Added: 1, Surviving: 0}, // K is deleted in d
+			Edits: kinds(1, 0, 0, 0, 0, 0), Added: 1, Surviving: 0, Commits: 1}, // K is deleted in d
 		{First: "d", Last: "d", From: at(3), To: at(3), Revisions: 1,
 			Symbols: 2, Exported: 2, Lines: 13, Complexity: 3, Funcs: 2, TestLines: 8,
-			Edits: kinds(0, 1, 0, 1, 0, 1)},
+			Edits: kinds(0, 1, 0, 1, 0, 1), Commits: 1},
 	}
 	if !slices.Equal(r.Buckets, want) {
 		t.Errorf("buckets =\n%+v\nwant\n%+v", r.Buckets, want)
