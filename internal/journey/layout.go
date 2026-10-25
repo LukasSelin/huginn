@@ -115,10 +115,19 @@ type exit struct {
 	w        float64
 }
 
+// minGroup is the fewest packages a directory needs below it to be a group,
+// and minKids the fewest children: a circle around two or three others is
+// mostly padding.
+const (
+	minGroup = 5
+	minKids  = 4
+)
+
 // tree arranges the packages by directory. Directories with a single child
-// are folded into it, so every group left has two children or more; a
-// directory that is itself a package as well as a parent holds its own
-// package as a leaf among its subdirectories.
+// are folded into it, and those with fewer than minGroup packages or
+// minKids children into their parent, so every group left has two children or more; a directory that is
+// itself a package as well as a parent holds its own package as a leaf
+// among its subdirectories.
 func tree(pkgs []Package) *node {
 	dirs := map[string]*node{}
 	var dir func(p string) *node
@@ -143,16 +152,27 @@ func tree(pkgs []Package) *node {
 		d := dir(p.Path)
 		d.kids = append(d.kids, &node{path: p.Path, pkg: i, r: math.Sqrt(float64(max(p.Peak, 1)))})
 	}
-	var fold func(d *node) *node
-	fold = func(d *node) *node {
+	// fold returns what d leaves its parent: d itself, or, for a directory
+	// too small to be a group, what is in it,
+	// so that small corners of the tree add no ring of padding around a
+	// few bubbles. It counts the packages under d in size.
+	size := map[*node]int{}
+	var fold func(d *node) []*node
+	fold = func(d *node) []*node {
 		if d.pkg >= 0 {
-			return d
+			size[d] = 1
+			return []*node{d}
 		}
-		for i, k := range d.kids {
-			d.kids[i] = fold(k)
+		var kids []*node
+		for _, k := range d.kids {
+			for _, f := range fold(k) {
+				kids = append(kids, f)
+				size[d] += size[f]
+			}
 		}
-		if len(d.kids) == 1 {
-			return d.kids[0]
+		d.kids = kids
+		if len(kids) == 1 || d != root && (size[d] < minGroup || len(kids) < minKids) {
+			return kids
 		}
 		// The package of the directory itself first, then its
 		// subdirectories by path.
@@ -163,9 +183,9 @@ func tree(pkgs []Package) *node {
 			return 1
 		}
 		slices.SortFunc(d.kids, func(a, b *node) int { return cmp.Or(cmp.Compare(own(a), own(b)), cmp.Compare(a.path, b.path)) })
-		return d
+		return []*node{d}
 	}
-	root = fold(root)
+	root = fold(root)[0]
 	var link func(d *node)
 	link = func(d *node) {
 		for _, k := range d.kids {
@@ -342,7 +362,8 @@ const gap = 0.6
 // distances follow the springs between them. Each set of circles coupled to
 // one another, directly or not, is laid out on its own; the sets are then
 // packed around the largest, so that unrelated packages keep to the edge
-// without leaving room for a coupling they do not have.
+// without leaving room for a coupling they do not have. Last, all are drawn
+// together, so that the springs set the arrangement but leave no slack.
 func stress(r []float64, mean float64, coupling []spring) (x, y []float64) {
 	n := len(r)
 	maxW := 0.0
@@ -404,16 +425,16 @@ func stress(r []float64, mean float64, coupling []spring) (x, y []float64) {
 		}
 		cr[k] = R
 	}
-	if len(sets) == 1 {
-		return x, y
-	}
-	px, py := pack(cr, mean)
-	for k, m := range sets {
-		for _, i := range m {
-			x[i] += px[k]
-			y[i] += py[k]
+	if len(sets) > 1 {
+		px, py := pack(cr, mean)
+		for k, m := range sets {
+			for _, i := range m {
+				x[i] += px[k]
+				y[i] += py[k]
+			}
 		}
 	}
+	compact(x, y, r, mean, coupling)
 	return x, y
 }
 
@@ -530,33 +551,97 @@ func spread(r []float64, mean, maxW float64, coupling []spring) (x, y []float64)
 	}
 
 	// Distances are only met on average; push any circles still
-	// overlapping apart until none do.
-	for range 500 {
+	// overlapping apart.
+	separate(x, y, r, mean, 500)
+	return x, y
+}
+
+// separate pushes circles that overlap, or come closer than a sliver of
+// room, apart, for at most rounds rounds or until none do. The smaller of
+// two moves the more. It reports whether any still overlap.
+func separate(x, y, r []float64, mean float64, rounds int) bool {
+	n := len(r)
+	for range rounds {
 		moved := false
 		for i := range n {
 			for k := i + 1; k < n; k++ {
 				dx, dy := x[k]-x[i], y[k]-y[i]
+				want := r[i] + r[k] + 0.25*gap*min(r[i], r[k], mean)
+				if math.Abs(dx) >= want || math.Abs(dy) >= want {
+					continue
+				}
 				l := math.Hypot(dx, dy)
-				want := r[i] + r[k] + 0.25*gap*unit(i, k)
 				if l >= want {
 					continue
 				}
 				if l < 1e-9 {
 					dx, dy, l = float64(k-i), 1, math.Hypot(float64(k-i), 1)
 				}
-				push := (want - l) / l / 2
-				x[i] -= dx * push
-				y[i] -= dy * push
-				x[k] += dx * push
-				y[k] += dy * push
+				ai, ak := r[i]*r[i], r[k]*r[k]
+				push := (want - l) / l
+				x[i] -= dx * push * ak / (ai + ak)
+				y[i] -= dy * push * ak / (ai + ak)
+				x[k] += dx * push * ai / (ai + ak)
+				y[k] += dy * push * ai / (ai + ak)
 				moved = true
 			}
 		}
 		if !moved {
-			break
+			return false
 		}
 	}
-	return x, y
+	return true
+}
+
+// compact takes up the slack that the springs and the packing leave between
+// circles: round by round, every circle takes a step towards the ones it is
+// coupled to, or towards the middle of all if it is coupled to none, and
+// those that then overlap are pushed apart again. The larger a circle, the
+// smaller its step, so that small ones gather around a large one rather
+// than drag it, and coupled ones stay side by side.
+func compact(x, y, r []float64, mean float64, coupling []spring) {
+	n := len(r)
+	if n < 8 {
+		// A few circles have little slack, and their distances say
+		// more about their coupling.
+		return
+	}
+	adj := make([][]spring, n)
+	for _, s := range coupling {
+		adj[s.a] = append(adj[s.a], s)
+		adj[s.b] = append(adj[s.b], spring{s.b, s.a, s.w})
+	}
+	meanA := 0.0
+	for i := range n {
+		meanA += r[i] * r[i] / float64(n)
+	}
+	rounds := 40
+	if n > 300 {
+		rounds = 15
+	}
+	for range rounds {
+		cx, cy, w := 0.0, 0.0, 0.0
+		for i := range n {
+			a := r[i] * r[i]
+			cx, cy, w = cx+a*x[i], cy+a*y[i], w+a
+		}
+		cx, cy = cx/w, cy/w
+		for i := range n {
+			tx, ty := cx, cy
+			if len(adj[i]) > 0 {
+				tx, ty, w = 0, 0, 0
+				for _, s := range adj[i] {
+					tx, ty, w = tx+s.w*x[s.b], ty+s.w*y[s.b], w+s.w
+				}
+				tx, ty = tx/w, ty/w
+			}
+			step := 0.15 * meanA / (meanA + r[i]*r[i])
+			x[i] += (tx - x[i]) * step
+			y[i] += (ty - y[i]) * step
+		}
+		separate(x, y, r, mean, 20)
+	}
+	separate(x, y, r, mean, 1000)
 }
 
 // enclose returns a small circle around the circles at x, y of radii r: the

@@ -19,11 +19,17 @@
   const MAX_GROW = 6; // how far past its place a package grows on a sparse map
   const MAX_FIT = 4; // how far the map closes in on its first few packages
   const BUNDLE = 0.85; // how tightly dependencies between groups bundle, 0 to 1
+  const OPEN = 60; // how wide on screen a group grows before it opens to show its packages
+  // How wide on screen a bubble is before it is named: a package inside it,
+  // a closed group beneath it.
+  const NAME_IN = 44, NAME_UNDER = 14;
+  const named = (id, d) => d >= (isGroup(id) ? NAME_UNDER : NAME_IN);
+  const EDGES = 240; // dependencies drawn at once; the weaker ones show only when lit
   // A lit dependency's arrowheads, one way and both ways, in a 10×10 box.
   const ARROW = 'M2,1 L9,5 L2,9 z', ARROWS = 'M0,5 L4,1 L4,9 z M10,5 L6,1 L6,9 z';
   const reduced = matchMedia('(prefers-reduced-motion: reduce)');
   // How long size, colour, edge and counter changes take, at the current speed.
-  const tweenMs = () => (reduced.matches ? 0 : 600 / state.speed);
+  const tweenMs = () => (reduced.matches || state.instant ? 0 : 600 / state.speed);
   const zoomMs = () => (reduced.matches ? 0 : 650);
 
   const state = {
@@ -40,7 +46,7 @@
     spoken: -1, // chapter last narrated
     maxEdits: 1,
     refs: null, // dependency stroke width by references between two packages
-    bubbles: [], // elements by package index
+    bubbles: [], // elements by node: the packages by index, then the groups after them
     diam: [], // bubble diameters by package index, before zooming
     view: null, // the part of the map the frame shows: { cx, cy, z, fx, fy }
     zoom: null, // the stage's d3 zoom behaviour
@@ -60,11 +66,15 @@
     who: '', // the author whose share of each package dims it, if one
     edges: null, // the stage's dependencies by key, at the current frame
     chains: [], // each package's groups, innermost first
+    gchains: [], // each group's enclosing groups, innermost first
+    unit: 0, // a bubble's radius per square root of a symbol, in the unit square
+    open: new Set(), // the groups opened at the last render
+    instant: false, // render without tweens, as when zooming opens a group
     hover: null, // the package under the pointer
     focused: null, // the package with keyboard focus
     picked: null, // the package clicked once: the map narrows to it and its neighbours
     links: null, // the package in the breakout: { dir, rev, v, nodes, adj, wires, lit }
-    tip: null, // the node the hover card describes: { pkg } or { sym }
+    tip: null, // the node the hover card describes: { node } on the map or { sym } in a package
   };
 
   const fmtShort = (t) => new Date(t * 1000).toLocaleDateString(undefined, { month: 'short', day: 'numeric', timeZone: 'UTC' });
@@ -155,6 +165,13 @@
       for (let g = p.group; g >= 0; g = groups[g].parent) c.push(g);
       return c;
     });
+    state.gchains = groups.map((g) => {
+      const c = [];
+      for (let u = g.parent; u >= 0; u = groups[u].parent) c.push(u);
+      return c;
+    });
+    const sized = state.data.packages.find((p) => p.peak > 0);
+    state.unit = sized ? sized.r / Math.sqrt(sized.peak) : 0;
     for (const b of $('step').querySelectorAll('button')) b.setAttribute('aria-pressed', String(b.dataset.v === step));
     let max = 1, maxRefs = 1;
     for (const f of state.data.frames) {
@@ -163,7 +180,7 @@
     }
     state.maxEdits = max;
     buildAuthors();
-    state.refs = d3.scaleSqrt().domain([0, maxRefs]).range([0.8, 3.2]).clamp(true);
+    state.refs = d3.scaleSqrt().domain([0, maxRefs]).range([0.7, 2.6]).clamp(true);
     // Moments are per step; so is the card's.
     state.card = null;
     $('card').hidden = true;
@@ -217,21 +234,42 @@
       const choose = () => (state.picked === i ? openLinks(p.path).catch(fail) : pick(i));
       const el = h('button', { type: 'button', class: 'bubble gone', tabindex: '-1', onclick: choose },
         h('span', { class: 'bname' }, base(p.path)));
-      el.addEventListener('pointerenter', (e) => {
-        if (e.pointerType === 'touch') return;
-        setLit('hover', i);
-        showTip({ pkg: i });
-      });
-      el.addEventListener('pointerleave', () => { setLit('hover', null); hideTip(); });
-      el.addEventListener('focus', () => { setLit('focused', i); showTip({ pkg: i }); });
-      el.addEventListener('blur', () => { setLit('focused', null); hideTip(); });
-      wrap.append(el);
+      wrap.append(hoverable(el, i));
       return el;
+    });
+    // Each group has a bubble too, drawn in place of its packages while it is
+    // too small on screen to open; a click zooms in until it does.
+    state.data.groups.forEach((g, gi) => {
+      const el = h('button', { type: 'button', class: 'bubble agg gone', tabindex: '-1', onclick: () => zoomToGroup(gi) },
+        h('span', { class: 'bname' }, `${groupName(gi)}/`));
+      wrap.append(hoverable(el, packages.length + gi));
+      state.bubbles.push(el);
     });
     state.diam = [];
     $('deps').replaceChildren();
     buildLayers();
     place();
+  }
+
+  // hoverable lights node id's dependencies and describes it while el is
+  // under the pointer or has focus.
+  function hoverable(el, id) {
+    el.addEventListener('pointerenter', (e) => {
+      if (e.pointerType === 'touch') return;
+      setLit('hover', id);
+      showTip({ node: id });
+    });
+    el.addEventListener('pointerleave', () => { setLit('hover', null); hideTip(); });
+    el.addEventListener('focus', () => { setLit('focused', id); showTip({ node: id }); });
+    el.addEventListener('blur', () => { setLit('focused', null); hideTip(); });
+    return el;
+  }
+
+  // groupName is group g's path below its parent's.
+  function groupName(g) {
+    const { groups } = state.data;
+    const up = groups[g].parent < 0 ? '.' : groups[groups[g].parent].path;
+    return up === '.' ? groups[g].path : groups[g].path.slice(up.length + 1);
   }
 
   // place positions the bubbles, lines and symbols for the stage's size.
@@ -289,6 +327,13 @@
   // at places package pi on the stage, through the frame's view.
   const at = (pi) => toStage(state.data.packages[pi]);
 
+  // A node is a package, by index, or a group, numbered after the packages.
+  const isGroup = (id) => id >= state.data.packages.length;
+  const groupOf = (id) => state.data.groups[id - state.data.packages.length];
+  const nodeAt = (id) => (isGroup(id) ? toStage(groupOf(id)) : at(id));
+  const chainOf = (id) => (isGroup(id) ? state.gchains[id - state.data.packages.length] : state.chains[id]);
+  const nodeName = (id) => (isGroup(id) ? `${groupOf(id).path}/` : state.data.packages[id].path);
+
   // toStage places a point of the map's unit square, a package's or a
   // group's center, on the stage through the frame's view.
   function toStage(p) {
@@ -305,19 +350,55 @@
     el.style.top = `${y}px`;
   }
 
-  // edgePath draws dependency e. Between packages of different groups it is
-  // bundled: it bends through the centers of the groups it leaves and enters
-  // below the innermost one holding both, so that the dependencies between
+  // fold decides which groups are open at the frame's view and the zoom: the
+  // outermost always, and any other on screen once it is OPEN pixels wide
+  // there inside an open parent, so that a large map shows its parts before
+  // their packages. The groups around the packages in keep stay open. It returns
+  // the open groups and, per package, the node it is drawn as: itself, or
+  // the outermost closed group around it.
+  function fold(keep) {
+    const { groups, packages } = state.data;
+    const n = packages.length;
+    const px = state.geom.size * state.view.z * state.zt.k;
+    const st = $('stage'), W = st.clientWidth, H = st.clientHeight, t = state.zt;
+    const seen = (g) => {
+      const { x, y } = toStage(g), r = g.r * px;
+      const sx = t.applyX(x), sy = t.applyY(y);
+      return sx + r >= 0 && sx - r <= W && sy + r >= 0 && sy - r <= H;
+    };
+    const open = new Set();
+    groups.forEach((g, i) => {
+      if (g.parent < 0 || (open.has(g.parent) && g.r * px >= OPEN && seen(g))) open.add(i);
+    });
+    for (const p of keep) if (p != null && p < n) for (const g of state.chains[p]) open.add(g);
+    const front = packages.map((p, i) => {
+      const c = state.chains[i];
+      for (let x = c.length - 1; x >= 0; x--) if (!open.has(c[x])) return n + c[x];
+      return i;
+    });
+    return { open, front };
+  }
+
+  // kept are the packages whose groups stay open: the picked one and the
+  // followed symbol's.
+  function kept() {
+    const fol = followNow();
+    return [state.picked, fol.dir != null ? state.pathIdx.get(fol.dir) : undefined];
+  }
+
+  // edgePath draws dependency e between two nodes. Between nodes of different
+  // groups it is bundled: it bends through the centers of the groups it
+  // leaves and enters below the innermost one holding both, so that the dependencies between
   // two parts of the tree run together as one strand and fan out only at
   // their ends. Between packages of one group it curves away from the
   // group's middle. Its ends are under the bubbles. It notes on e where its
   // middle is and which way it runs there, for the arrow of a lit dependency.
   function edgePath(e) {
     const { groups } = state.data;
-    const ca = state.chains[e.a], cb = state.chains[e.b];
+    const ca = chainOf(e.a), cb = chainOf(e.b);
     let i = ca.length - 1, k = cb.length - 1;
     while (i >= 0 && k >= 0 && ca[i] === cb[k]) { i--; k--; }
-    const a = at(e.a), b = at(e.b);
+    const a = nodeAt(e.a), b = nodeAt(e.b);
     // Collects the curve as cubic Béziers, [x0, y0, c1x, c1y, c2x, c2y, x, y].
     const seg = [];
     const from = () => (seg.length ? seg[seg.length - 1].slice(6) : [a.x, a.y]);
@@ -333,8 +414,10 @@
       const len = Math.hypot(b.x - a.x, b.y - a.y) || 1;
       let nx = (a.y - b.y) / len, ny = (b.x - a.x) / len;
       if ((mx - g.x) * nx + (my - g.y) * ny < 0) { nx = -nx; ny = -ny; }
-      // The quadratic through (cx, cy), as a cubic.
-      const cx = mx + nx * 0.18 * len, cy = my + ny * 0.18 * len;
+      // The quadratic through (cx, cy), as a cubic. A long one bends no
+      // further than a short one would, so that it keeps to the map.
+      const bend = Math.min(0.18 * len, 0.03 * state.geom.size * state.view.z);
+      const cx = mx + nx * bend, cy = my + ny * bend;
       pen.bezierCurveTo(a.x + (2 / 3) * (cx - a.x), a.y + (2 / 3) * (cy - a.y), b.x + (2 / 3) * (cx - b.x), b.y + (2 / 3) * (cy - b.y), b.x, b.y);
     } else {
       const pts = [a];
@@ -413,10 +496,14 @@
     state.view = fitView(f);
     const z = state.view.z;
     const grow = growth(f, z);
+    const n = packages.length;
+    const { open, front } = fold(kept());
+    state.open = open;
     packages.forEach((p, i) => {
       const el = state.bubbles[i];
       const s = now.get(i);
-      const live = s ? s.live : 0;
+      // Inside a closed group a package is drawn as the group.
+      const live = s && front[i] === i ? s.live : 0;
       const a = actStep(s ? editsOf(s) : 0);
       // Too small to see, a bubble is drawn 8px wide on screen, at any zoom.
       const d = live > 0 ? 2 * p.r * size * z * grow(s) : p.r * size * z;
@@ -429,26 +516,72 @@
       // An author picked dims each package by their share of it.
       el.style.opacity = live > 0 && state.who ? String(0.12 + 0.88 * Math.min(1, shareOf(s, who) / 0.5)) : '';
       const cls = know ? `know${live > 0 ? '' : ' gone'}` : `a${a}${live > 0 ? '' : ' gone'}${a >= 3 ? ' busy' : ''}`;
-      el.className = `bubble ${cls}${d * state.zt.k < 44 ? ' small' : ''}${i === focus ? ' focus' : ''}${i === folPkg ? ' followed' : ''}`;
+      el.className = `bubble ${cls}${named(i, d * state.zt.k) ? '' : ' small'}${i === focus ? ' focus' : ''}${i === folPkg ? ' followed' : ''}`;
       const label = live > 0 ? `${p.path} · ${plural(live, 'symbol')}${s && s.kinds ? ` · ${describeKinds(s.kinds)}` : ''}${knowersText(s)}` : p.path;
       el.setAttribute('aria-label', i === state.picked ? `${label}. Show the functions crossing into and out of it`
         : `${label}. Show only it and the packages it shares dependencies with`);
       el.tabIndex = live > 0 && !state.drill ? 0 : -1;
     });
 
-    // Dependencies, as wide as the references across them; the ones the
-    // card's moment is about are lit up. New ones draw themselves from end
-    // to end, dropped ones fade.
+    // A closed group is one bubble at its center, as large as its live
+    // symbols together and as busy as its busiest package. Its place was
+    // made for every package it ever held at its peak, so all of them grow
+    // alike, as far as the fullest still fits its place.
+    const sums = new Map();
+    for (const s of f.pkgs) {
+      if (front[s.p] < n || s.live <= 0) continue;
+      const t = sums.get(front[s.p]) || { live: 0, edits: 0, pkgs: 0 };
+      t.live += s.live;
+      t.edits = Math.max(t.edits, editsOf(s));
+      t.pkgs++;
+      sums.set(front[s.p], t);
+    }
+    let fill = MAX_GROW;
+    for (const [id, t] of sums) fill = Math.min(fill, (0.85 * groupOf(id).r) / (state.unit * Math.sqrt(t.live)));
+    fill = Math.max(1, fill);
+    state.data.groups.forEach((g, gi) => {
+      const id = n + gi, el = state.bubbles[id], t = sums.get(id);
+      const live = t ? t.live : 0;
+      const a = actStep(t ? t.edits : 0);
+      const d = 2 * fill * state.unit * Math.sqrt(live) * size * z;
+      const { x, y } = toStage(g);
+      el.style.left = `${x}px`;
+      el.style.top = `${y}px`;
+      state.diam[id] = d;
+      el.style.setProperty('--d', `${d}px`);
+      el.style.backgroundColor = know ? RING_IN : ACT[a];
+      const cls = know ? 'know' : `a${a}${a >= 3 ? ' busy' : ''}`;
+      el.className = `bubble agg ${cls}${live > 0 ? '' : ' gone'}${named(id, d * state.zt.k) ? '' : ' small'}`
+        + `${focus !== undefined && front[focus] === id ? ' focus' : ''}${folPkg !== undefined && front[folPkg] === id ? ' followed' : ''}`;
+      el.setAttribute('aria-label', `${g.path}/ · ${plural(t ? t.pkgs : 0, 'package')} · ${plural(live, 'symbol')}. Zoom in to open it`);
+      el.tabIndex = live > 0 && !state.drill ? 0 : -1;
+    });
+
+    // A node that zooming folded away or opened no longer has the pointer
+    // or focus, nor a card.
+    for (const key of ['hover', 'focused']) {
+      if (state[key] != null && state.bubbles[state[key]].classList.contains('gone')) state[key] = null;
+    }
+    if (state.tip && state.tip.node != null && state.bubbles[state.tip.node].classList.contains('gone')) hideTip();
+
+    // Dependencies between the nodes drawn, as wide as the references across
+    // them; the ones the card's moment is about are lit up. New ones draw
+    // themselves from end to end, dropped ones fade.
     const edges = new Map();
-    for (const [a, b, refs] of f.deps) {
+    for (const [pa, pb, refs] of f.deps) {
+      const a = front[pa], b = front[pb];
+      if (a === b) continue;
       const key = `${Math.min(a, b)}-${Math.max(a, b)}`;
       let e = edges.get(key);
       if (!e) edges.set(key, e = { key, a: Math.min(a, b), b: Math.max(a, b), refs: 0, ab: 0, ba: 0, hot: false });
       e.refs += refs || 0;
       if (a < b) e.ab += refs || 0;
       else e.ba += refs || 0;
-      if (focus !== undefined && (state.card.kind === 'signature' ? b === focus : a === focus || b === focus)) e.hot = true;
+      if (focus !== undefined && (state.card.kind === 'signature' ? pb === focus : pa === focus || pb === focus)) e.hot = true;
     }
+    // Only the strongest are drawn; the others show when one of their ends
+    // is lit.
+    [...edges.values()].sort((x, y) => y.refs - x.refs).forEach((e, i) => { e.faint = i >= EDGES && !e.hot; });
     const ms = tweenMs();
     renderGroups(f, ms);
     for (const e of edges.values()) e.d = edgePath(e);
@@ -462,27 +595,52 @@
       (exit) => exit.filter(':not(.leaving)').classed('leaving', true)
         .call((ex) => ex.transition().duration(ms).style('opacity', 0).remove()))
       .classed('hot', (e) => e.hot)
+      .classed('faint', (e) => e.faint)
       .style('stroke-width', (e) => `${e.hot ? Math.max(2.2, state.refs(e.refs)) : state.refs(e.refs)}px`);
     state.edges = edges;
+    state.foldKey = [...open].join();
     renderLit(ms);
     renderTip();
   }
 
-  // renderGroups outlines the groups holding live packages in frame f, each
-  // a faint disc inside its parent's, and names those large enough on
-  // screen. The outermost group is the whole map and goes unmarked.
+  // refold draws the stage again, at once, when zooming opens or closes a
+  // group.
+  function refold() {
+    if (!state.data || !state.data.frames.length || !state.view || state.drill) return;
+    if ([...fold(kept()).open].join() === state.foldKey) return;
+    const f = state.data.frames[state.frame];
+    state.instant = true;
+    renderStage(f);
+    state.instant = false;
+    $('caption').textContent = caption(f);
+  }
+
+  // zoomToGroup closes in on group g until it fills most of the stage, which
+  // opens it.
+  function zoomToGroup(g) {
+    const st = $('stage'), W = st.clientWidth, H = st.clientHeight;
+    const grp = state.data.groups[g];
+    const { x, y } = toStage(grp);
+    const r = grp.r * state.geom.size * state.view.z;
+    const k = Math.min(state.maxZoom, Math.max(1, (0.42 * Math.min(W, H)) / r));
+    zoomTo(d3.zoomIdentity.translate(W / 2 - x * k, H / 2 - y * k).scale(k));
+  }
+
+  // renderGroups outlines the open groups holding live packages in frame f,
+  // each inside its parent's, and names those large enough on screen. The
+  // outermost group is the whole map and goes unmarked; a closed one is
+  // drawn as a bubble instead.
   function renderGroups(f, ms) {
     const { groups } = state.data;
     const { size } = state.geom;
     const live = new Set();
     for (const s of f.pkgs) if (s.live > 0) for (const g of state.chains[s.p]) live.add(g);
-    const shown = groups.map((g, i) => ({ ...g, i })).filter((g) => g.parent >= 0 && live.has(g.i));
+    const shown = groups.map((g, i) => ({ ...g, i })).filter((g) => g.parent >= 0 && live.has(g.i) && state.open.has(g.i));
     const z = state.view.z;
     for (const g of shown) {
       Object.assign(g, toStage(g));
       g.rr = g.r * size * z;
-      const up = groups[g.parent].path;
-      g.name = up === '.' ? g.path : g.path.slice(up.length + 1);
+      g.name = groupName(g.i);
     }
     d3.select('#clusters').selectAll(':scope > g').data(shown, (g) => g.i).join(
       (enter) => enter.append('g').attr('class', 'cluster').style('opacity', 0)
@@ -521,7 +679,8 @@
   function renderTip() {
     const t = state.tip;
     const f = state.data && state.data.frames[state.frame];
-    const body = !t || !f ? null : t.sym != null ? (state.drill ? symTip(t.sym) : null) : !state.drill ? pkgTip(t.pkg, f) : null;
+    const body = !t || !f ? null : t.sym != null ? (state.drill ? symTip(t.sym) : null)
+      : state.drill ? null : isGroup(t.node) ? groupTip(t.node, f) : pkgTip(t.node, f);
     const tip = $('tip');
     if (!body) {
       tip.hidden = true;
@@ -539,8 +698,8 @@
     let x, y, r;
     if (t.sym != null) ({ x, y, r } = state.drill.pos[t.sym]);
     else {
-      ({ x, y } = at(t.pkg));
-      r = (state.diam[t.pkg] || 0) / 2;
+      ({ x, y } = nodeAt(t.node));
+      r = (state.diam[t.node] || 0) / 2;
     }
     const z = state.zt, st = $('stage');
     const cx = z.applyX(x), cy = z.applyY(y), cr = r * z.k;
@@ -591,6 +750,37 @@
         s.orphaned > 0 ? h('div', { class: 'muted small' }, `${pct(s.orphaned)} orphaned`) : null));
     }
     out.push(h('div', { class: 'tip-hint' }, state.picked === pi ? 'Click to break out the functions crossing it' : 'Click to show only it and its neighbours'));
+    return out;
+  }
+
+  // groupTip describes the closed group drawn as node id: what its packages
+  // hold together at the playhead.
+  function groupTip(id, f) {
+    const gi = id - state.data.packages.length;
+    let pkgs = 0, live = 0;
+    const kinds = {};
+    for (const s of f.pkgs) {
+      if (s.live <= 0 || !state.chains[s.p].includes(gi)) continue;
+      pkgs++;
+      live += s.live;
+      for (const [k, v] of Object.entries(s.kinds || {})) kinds[k] = (kinds[k] || 0) + v;
+    }
+    const out = [h('div', { class: 'tip-head' }, h('span', { class: 'eyebrow' }, 'Directory'), h('span', { class: 'tip-name mono' }, nodeName(id)))];
+    const per = { commit: 'this commit', week: 'this week', month: 'this month' }[state.step];
+    const ks = KINDS.filter(([k]) => kinds[k]);
+    let uses = 0, by = 0;
+    for (const n of litDeps(id).values()) {
+      if (n.out) uses++;
+      if (n.in) by++;
+    }
+    out.push(h('div', { class: 'tip-rows' },
+      tipRow('Packages', pkgs.toLocaleString()),
+      tipRow('Symbols', live.toLocaleString()),
+      tipRow(`Edits ${per}`, ks.length
+        ? h('span', { class: 'tip-kinds' }, ks.map(([k, l]) => h('span', { class: 'cnt', title: l }, mark(k), String(kinds[k]))))
+        : h('span', { class: 'muted' }, 'none')),
+      tipRow('Uses →', plural(uses, 'neighbour')), tipRow('Used by ←', plural(by, 'neighbour'))));
+    out.push(h('div', { class: 'tip-hint' }, 'Click to zoom in and open it'));
     return out;
   }
 
@@ -727,7 +917,7 @@
       if (n.in) { by++; byRefs += n.in; }
     }
     const part = (n, refs) => (n ? `${plural(n, 'package')} (${plural(refs, 'reference')})` : 'none');
-    return `${state.data.packages[lit].path} · uses → ${part(uses, usesRefs)} · used by ← ${part(by, byRefs)}`;
+    return `${nodeName(lit)} · uses → ${part(uses, usesRefs)} · used by ← ${part(by, byRefs)}`;
   }
 
   // buildLayers adds the layers drawn with the dependencies: the groups
@@ -757,10 +947,14 @@
       // large and need no boost.
       .wheelDelta((e) => -e.deltaY * (e.deltaMode === 1 ? 0.05 : e.deltaMode ? 1 : 0.002) * (Math.abs(e.deltaY) < 50 ? 10 : 1))
       .on('start', () => st.classList.add('zooming'))
-      .on('end', () => st.classList.remove('zooming'))
+      .on('end', () => {
+        st.classList.remove('zooming');
+        refold();
+      })
       .on('zoom', (e) => {
         state.zt = e.transform;
         applyZoom();
+        refold();
       });
     d3.select(st).call(state.zoom).on('dblclick.zoom', null);
     st.style.touchAction = 'pan-y';
@@ -794,7 +988,7 @@
   // relabel names the bubbles and symbols big enough on screen to hold a name.
   function relabel() {
     const k = state.zt.k;
-    state.bubbles.forEach((el, i) => el.classList.toggle('small', (state.diam[i] || 0) * k < 44));
+    state.bubbles.forEach((el, i) => el.classList.toggle('small', !named(i, (state.diam[i] || 0) * k)));
     const d = state.drill;
     if (!d) return;
     d.dots.forEach((el, i) => {
