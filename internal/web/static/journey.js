@@ -20,6 +20,7 @@
   const MAX_FIT = 4; // how far the map closes in on its first few packages
   const BUNDLE = 0.85; // how tightly dependencies between groups bundle, 0 to 1
   const OPEN = 60; // how wide on screen a group grows before it opens to show its packages
+  const SPREAD = 0.85; // a bubble's scale on the map, against the shorter side its packages spread over
   // Where a bubble d pixels wide on screen is named: inside it if its name
   // fits there, else beneath it once it is NAME_UNDER wide, else not at
   // all. A closed group is always named beneath.
@@ -298,14 +299,19 @@
     const W = st.clientWidth, H = st.clientHeight;
     // Leave room for the overlays at the top and bottom.
     const top = 86, bottom = 56;
-    const size = Math.max(120, Math.min(W - 40, H - top - bottom));
-    const x0 = (W - size) / 2, y0 = top + (H - top - bottom - size) / 2;
-    state.geom = { size, x0, y0 };
+    const aw = Math.max(120, W - 40), ah = Math.max(120, H - top - bottom);
+    const size = Math.min(aw, ah);
+    const x0 = (W - size) / 2, y0 = top + (ah - size) / 2;
+    // The packages spread over the stage's whole width and height, at most
+    // twice as far along one as the other, while their bubbles keep to the
+    // shorter side and a little under, so that they sit apart.
+    const sx = Math.min(aw, 2 * ah), sy = Math.min(ah, 2 * aw);
+    state.geom = { size, x0, y0, sx, sy, mx: (W - sx) / 2, my: top + (ah - sy) / 2, rs: SPREAD * size };
     // Zooming goes as deep as it takes to name a typical package, so a map
     // of thousands can be read up close.
     const rs = state.data.packages.map((p) => p.r).filter((r) => r > 0).sort((a, b) => a - b);
     const mid = rs.length ? rs[rs.length >> 1] : 1;
-    state.maxZoom = Math.min(128, Math.max(MAX_ZOOM, NAMED / (2 * mid * size)));
+    state.maxZoom = Math.min(128, Math.max(MAX_ZOOM, NAMED / (2 * mid * state.geom.rs)));
     state.zoom.scaleExtent([1, state.maxZoom]);
     state.data.packages.forEach((p, i) => placeBubble(i));
     $('deps').setAttribute('viewBox', `0 0 ${W} ${H}`);
@@ -356,10 +362,18 @@
   // toStage places a point of the map's unit square, a package's or a
   // group's center, on the stage through the frame's view.
   function toStage(p) {
-    const { size, x0, y0 } = state.geom;
+    const { sx, sy, mx, my } = state.geom;
     const v = state.view;
-    if (!v) return { x: x0 + p.x * size, y: y0 + p.y * size };
-    return { x: x0 + size * (v.fx + (p.x - v.cx) * v.z), y: y0 + size * (v.fy + (p.y - v.cy) * v.z) };
+    if (!v) return { x: mx + p.x * sx, y: my + p.y * sy };
+    return { x: mx + sx * (v.fx + (p.x - v.cx) * v.z), y: my + sy * (v.fy + (p.y - v.cy) * v.z) };
+  }
+
+  // radii returns how wide and how tall a group of radius r in the unit
+  // square is drawn on the stage through the frame's view: the packages
+  // spread further one way than the other.
+  function radii(r) {
+    const { sx, sy } = state.geom, z = state.view.z;
+    return { rx: r * sx * z, ry: r * sy * z };
   }
 
   function placeBubble(i) {
@@ -378,16 +392,16 @@
   function fold(keep) {
     const { groups, packages } = state.data;
     const n = packages.length;
-    const px = state.geom.size * state.view.z * state.zt.k;
     const st = $('stage'), W = st.clientWidth, H = st.clientHeight, t = state.zt;
     const seen = (g) => {
-      const { x, y } = toStage(g), r = g.r * px;
+      const { x, y } = toStage(g), { rx, ry } = radii(g.r);
       const sx = t.applyX(x), sy = t.applyY(y);
-      return sx + r >= 0 && sx - r <= W && sy + r >= 0 && sy - r <= H;
+      return sx + rx * t.k >= 0 && sx - rx * t.k <= W && sy + ry * t.k >= 0 && sy - ry * t.k <= H;
     };
+    const wide = (g) => { const { rx, ry } = radii(g.r); return Math.min(rx, ry) * t.k >= OPEN; };
     const open = new Set();
     groups.forEach((g, i) => {
-      if (g.parent < 0 || (open.has(g.parent) && g.r * px >= OPEN && seen(g))) open.add(i);
+      if (g.parent < 0 || (open.has(g.parent) && wide(g) && seen(g))) open.add(i);
     });
     for (const p of keep) if (p != null && p < n) for (const g of state.chains[p]) open.add(g);
     const front = packages.map((p, i) => {
@@ -507,7 +521,7 @@
     const { packages } = state.data;
     // An author picked keeps only their packages on the map.
     const f = scoped(frame);
-    const { size } = state.geom;
+    const size = state.geom.rs;
     const now = new Map(f.pkgs.map((p) => [p.p, p]));
     const focus = state.card && state.card.pkg != null ? state.pathIdx.get(state.card.pkg) : undefined;
     const fol = followNow();
@@ -669,8 +683,8 @@
     const st = $('stage'), W = st.clientWidth, H = st.clientHeight;
     const grp = state.data.groups[g];
     const { x, y } = toStage(grp);
-    const r = grp.r * state.geom.size * state.view.z;
-    const k = Math.min(state.maxZoom, Math.max(1, (0.42 * Math.min(W, H)) / r));
+    const { rx, ry } = radii(grp.r);
+    const k = Math.min(state.maxZoom, Math.max(1, Math.min((0.42 * W) / rx, (0.42 * H) / ry)));
     zoomTo(d3.zoomIdentity.translate(W / 2 - x * k, H / 2 - y * k).scale(k));
   }
 
@@ -680,26 +694,23 @@
   // drawn as a bubble instead.
   function renderGroups(f, ms) {
     const { groups } = state.data;
-    const { size } = state.geom;
     const live = new Set();
     for (const s of f.pkgs) if (s.live > 0) for (const g of state.chains[s.p]) live.add(g);
     const shown = groups.map((g, i) => ({ ...g, i })).filter((g) => g.parent >= 0 && live.has(g.i) && state.open.has(g.i));
-    const z = state.view.z;
     for (const g of shown) {
-      Object.assign(g, toStage(g));
-      g.rr = g.r * size * z;
+      Object.assign(g, toStage(g), radii(g.r));
       g.name = groupName(g.i);
     }
     d3.select('#clusters').selectAll(':scope > g').data(shown, (g) => g.i).join(
       (enter) => enter.append('g').attr('class', 'cluster').style('opacity', 0)
-        .call((en) => en.append('circle').attr('cx', (g) => g.x).attr('cy', (g) => g.y).attr('r', (g) => g.rr))
-        .call((en) => en.append('text').attr('dy', '1.3em').attr('x', (g) => g.x).attr('y', (g) => g.y - g.rr))
+        .call((en) => en.append('ellipse').attr('cx', (g) => g.x).attr('cy', (g) => g.y).attr('rx', (g) => g.rx).attr('ry', (g) => g.ry))
+        .call((en) => en.append('text').attr('dy', '1.3em').attr('x', (g) => g.x).attr('y', (g) => g.y - g.ry))
         .call((en) => en.transition().duration(ms).style('opacity', 1)),
-      (update) => update.call((u) => u.select('circle').transition('view').duration(ms).ease(d3.easeCubicInOut)
-        .attr('cx', (g) => g.x).attr('cy', (g) => g.y).attr('r', (g) => g.rr)),
+      (update) => update.call((u) => u.select('ellipse').transition('view').duration(ms).ease(d3.easeCubicInOut)
+        .attr('cx', (g) => g.x).attr('cy', (g) => g.y).attr('rx', (g) => g.rx).attr('ry', (g) => g.ry)),
       (exit) => exit.transition().duration(ms).style('opacity', 0).remove())
       .call((sel) => sel.select('text').text((g) => `${g.name}/`)
-        .transition('view').duration(ms).ease(d3.easeCubicInOut).attr('x', (g) => g.x).attr('y', (g) => g.y - g.rr));
+        .transition('view').duration(ms).ease(d3.easeCubicInOut).attr('x', (g) => g.x).attr('y', (g) => g.y - g.ry));
     nameGroups();
     cullNames();
   }
@@ -725,7 +736,7 @@
   // nameGroups names the groups wide enough on screen to hold a name.
   function nameGroups() {
     const k = state.zt.k;
-    d3.selectAll('#clusters > g').classed('named', (g) => g.rr * k >= 70);
+    d3.selectAll('#clusters > g').classed('named', (g) => g.rx * k >= 70);
   }
 
   // ---------- The hover card ----------
@@ -1085,14 +1096,13 @@
     const fol = followNow();
     const pi = fol.dir != null ? state.pathIdx.get(fol.dir) : undefined;
     const tag = $('folTag');
-    const { size, x0, y0 } = state.geom;
     let x, y, r;
     if (fol.e && state.drill && state.drill.dir === fol.dir) {
       const i = state.drill.v.symbols.findIndex((s) => s.id === state.follow.id);
       if (i >= 0 && state.drill.cur.has(i)) ({ x, y, r } = state.drill.pos[i]);
     } else if (fol.e && !state.drill && pi !== undefined) {
       ({ x, y } = at(pi));
-      r = (state.diam[pi] || 2 * state.data.packages[pi].r * size) / 2;
+      r = (state.diam[pi] || 2 * state.data.packages[pi].r * state.geom.rs) / 2;
     }
     tag.hidden = x === undefined;
     if (tag.hidden) return;

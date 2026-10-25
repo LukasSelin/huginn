@@ -44,7 +44,7 @@
 .deps > path.hot { stroke: var(--accent); opacity: .95; }
 /* Groups: an open directory is outlined around its packages, and
    dependencies between groups bundle through its middle. */
-.cluster circle { fill: none; stroke: #2A313B; stroke-width: calc(1px / var(--k)); }
+.cluster ellipse { fill: none; stroke: #2A313B; stroke-width: calc(1px / var(--k)); }
 /* The dependencies past the strongest show only while lit. */
 .deps > path.faint:not(.on) { display: none; }
 .cluster text {
