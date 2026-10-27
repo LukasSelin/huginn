@@ -22,6 +22,8 @@
   const BUNDLE = 0.85; // how tightly dependencies between groups bundle, 0 to 1
   const OPEN = 60; // how wide on screen a group grows before it opens to show its packages
   const SPREAD = 0.85; // a bubble's scale on the map, against the shorter side its packages spread over
+  const TIE_HOME = 1; // how strongly a package keeps to its spread place, against the strongest dependency's pull
+  const TIE_ROOM = 1.12; // how far apart two bubbles are kept at least, against their radii together
   // Where a bubble d pixels wide on screen is named: inside it if its name
   // fits there, else beneath it once it is NAME_UNDER wide, else not at
   // all. A closed group is always named beneath.
@@ -192,6 +194,17 @@
       for (let u = g.parent; u >= 0; u = groups[u].parent) c.push(u);
       return c;
     });
+    // Every pair of packages that ever depended on one another, either way,
+    // with the most references ever across it.
+    const n = state.data.packages.length, tied = new Map();
+    for (const f of state.data.frames) {
+      for (const [a, b, refs] of f.deps) {
+        if (a === b) continue;
+        const k = Math.min(a, b) * n + Math.max(a, b);
+        tied.set(k, Math.max(tied.get(k) || 0, refs || 1));
+      }
+    }
+    state.ties = [...tied].sort((p, q) => p[0] - q[0]).map(([k, refs]) => [Math.floor(k / n), k % n, refs]);
     const sized = state.data.packages.find((p) => p.peak > 0);
     state.unit = sized ? sized.r / Math.sqrt(sized.peak) : 0;
     for (const b of $('step').querySelectorAll('button')) b.setAttribute('aria-pressed', String(b.dataset.v === step));
@@ -315,6 +328,7 @@
     const mid = rs.length ? rs[rs.length >> 1] : 1;
     state.maxZoom = Math.min(128, Math.max(MAX_ZOOM, NAMED / (2 * mid * state.geom.rs)));
     state.zoom.scaleExtent([1, state.maxZoom]);
+    state.drawn = tighten();
     state.data.packages.forEach((p, i) => placeBubble(i));
     $('deps').setAttribute('viewBox', `0 0 ${W} ${H}`);
     d3.select('#deps').selectAll(':scope > path').attr('d', (e) => (e.d = edgePath(e)));
@@ -336,9 +350,10 @@
       }
       return b;
     };
-    const all = box(packages);
+    const drawn = (i) => ({ ...state.drawn[i], r: packages[i].r });
+    const all = box(packages.map((p, i) => drawn(i)));
     const fx = (all.x0 + all.x1) / 2, fy = (all.y0 + all.y1) / 2;
-    const live = box(f.pkgs.filter((s) => s.live > 0).map((s) => packages[s.p]));
+    const live = box(f.pkgs.filter((s) => s.live > 0).map((s) => drawn(s.p)));
     if (live.x0 > live.x1) return { cx: fx, cy: fy, z: 1, fx, fy };
     const pad = 1.3;
     const z = Math.max(1, Math.min(MAX_FIT,
@@ -352,7 +367,99 @@
   }
 
   // at places package pi on the stage, through the frame's view.
-  const at = (pi) => toStage(state.data.packages[pi]);
+  const at = (pi) => toStage(state.drawn[pi]);
+
+  // tighten returns where the packages are drawn in the unit square. Spread
+  // over the stage, every package moves away from the others, including the
+  // ones it depends on. So each package is pulled back towards the packages
+  // it shares a dependency with, until each such pair is about as far apart
+  // as on the layout, measured against the bubbles: the more references a
+  // dependency carries, the harder it pulls. A pull back to its spread
+  // place keeps the map spread. Afterwards no two bubbles overlap,
+  // and each package stays inside its group.
+  function tighten() {
+    const { packages, groups } = state.data;
+    const { sx, sy, rs } = state.geom;
+    const n = packages.length;
+    // On the stage, before the view: the spread places, and the bubbles.
+    const hx = packages.map((p) => p.x * sx), hy = packages.map((p) => p.y * sy);
+    const x = hx.slice(), y = hy.slice();
+    const r = packages.map((p) => p.r * rs);
+    // A dependency pulls by its references, against the most across any.
+    const adj = packages.map(() => []);
+    const most = state.ties.reduce((m, t) => Math.max(m, t[2]), 1);
+    for (const [a, b, refs] of state.ties) {
+      const pa = packages[a], pb = packages[b];
+      const len = rs * Math.hypot(pa.x - pb.x, pa.y - pb.y), w = Math.sqrt(refs / most);
+      adj[a].push([b, len, w]);
+      adj[b].push([a, len, w]);
+    }
+    const maxR = r.reduce((m, v) => Math.max(m, v), 1e-9);
+    for (let round = 0; round < 60; round++) {
+      for (let i = 0; i < n; i++) {
+        if (!adj[i].length) continue;
+        // Where each tied package would have i at the layout's distance,
+        // averaged, against i's spread place.
+        let tx = TIE_HOME * hx[i], ty = TIE_HOME * hy[i], w = TIE_HOME;
+        for (const [k, len, wk] of adj[i]) {
+          const dx = x[i] - x[k], dy = y[i] - y[k];
+          const d = Math.hypot(dx, dy) || 1;
+          tx += wk * (x[k] + (dx / d) * len);
+          ty += wk * (y[k] + (dy / d) * len);
+          w += wk;
+        }
+        x[i] += 0.5 * (tx / w - x[i]);
+        y[i] += 0.5 * (ty / w - y[i]);
+      }
+      apart(x, y, r, maxR);
+      for (let i = 0; i < n; i++) {
+        // Inside the group's outline, by the bubble's radius.
+        const g = groups[packages[i].group];
+        if (!g) continue;
+        const ax = Math.max(1e-9, g.r * sx - r[i]), ay = Math.max(1e-9, g.r * sy - r[i]);
+        const q = Math.hypot((x[i] - g.x * sx) / ax, (y[i] - g.y * sy) / ay);
+        if (q > 1) {
+          x[i] = g.x * sx + (x[i] - g.x * sx) / q;
+          y[i] = g.y * sy + (y[i] - g.y * sy) / q;
+        }
+      }
+    }
+    return packages.map((p, i) => ({ x: x[i] / sx, y: y[i] / sy }));
+  }
+
+  // apart pushes bubbles at x, y of radii r that come closer than a sliver
+  // of room apart, the smaller moving the more. Only neighbours on a grid as
+  // wide as the largest bubble are compared.
+  function apart(x, y, r, maxR) {
+    const cell = 2 * TIE_ROOM * maxR, grid = new Map();
+    x.forEach((_, i) => {
+      if (r[i] <= 0) return;
+      const cx = Math.floor(x[i] / cell), cy = Math.floor(y[i] / cell), k = `${cx},${cy}`;
+      if (!grid.has(k)) grid.set(k, { cx, cy, at: [] });
+      grid.get(k).at.push(i);
+    });
+    for (const { cx, cy, at } of grid.values()) {
+      for (let ox = -1; ox <= 1; ox++) {
+        for (let oy = -1; oy <= 1; oy++) {
+          const other = grid.get(`${cx + ox},${cy + oy}`);
+          if (!other) continue;
+          for (const i of at) {
+            for (const j of other.at) {
+              if (j <= i) continue;
+              const want = TIE_ROOM * (r[i] + r[j]);
+              const dx = x[j] - x[i], dy = y[j] - y[i];
+              const d = Math.hypot(dx, dy);
+              if (d >= want) continue;
+              const ux = d > 1e-9 ? dx / d : 0, uy = d > 1e-9 ? dy / d : 1;
+              const ai = r[i] * r[i], aj = r[j] * r[j], push = want - d;
+              x[i] -= ux * push * aj / (ai + aj); y[i] -= uy * push * aj / (ai + aj);
+              x[j] += ux * push * ai / (ai + aj); y[j] += uy * push * ai / (ai + aj);
+            }
+          }
+        }
+      }
+    }
+  }
 
   // A node is a package, by index, or a group, numbered after the packages.
   const isGroup = (id) => id >= state.data.packages.length;
@@ -502,17 +609,19 @@
     const grown = (s) => Math.sqrt(s.live / Math.max(1, packages[s.p].peak));
     const boost = 1 / Math.max(0.05, ...live.map(grown));
     const r = live.map((s) => packages[s.p].r * Math.min(1, boost * grown(s)));
+    // Distances go by where the packages are drawn, against the bubbles.
+    const { sx, sy, rs } = state.geom;
     let room = MAX_GROW;
     for (let i = 0; i < live.length; i++) {
       // No wider than a fifth of the stage.
       room = Math.min(room, 0.1 / (r[i] * z));
-      const a = packages[live[i].p];
+      const a = state.drawn[live[i].p];
       // Nor out of its group.
-      const g = state.data.groups[a.group];
+      const g = state.data.groups[packages[live[i].p].group];
       if (g) room = Math.min(room, (g.r - Math.hypot(a.x - g.x, a.y - g.y)) / r[i]);
       for (let j = i + 1; j < live.length; j++) {
-        const b = packages[live[j].p];
-        room = Math.min(room, (0.92 * Math.hypot(a.x - b.x, a.y - b.y)) / (r[i] + r[j]));
+        const b = state.drawn[live[j].p];
+        room = Math.min(room, (0.92 * Math.hypot((a.x - b.x) * sx, (a.y - b.y) * sy)) / (rs * (r[i] + r[j])));
       }
     }
     const k = Math.max(1, room);
