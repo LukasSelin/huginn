@@ -5,7 +5,8 @@
 // key moments to show what the commit changed; a package can be opened to
 // watch its symbols, and one symbol followed through renames and moves.
 // common.js provides KINDS, h, $, mark, api, plural, waitReady and fail;
-// vendor/d3.min.js provides d3, for zooming, tweens, edges and packing.
+// vendor/d3.min.js provides d3, for zooming, tweens, edges and packing;
+// gif.js provides GifWriter, for saving the playback as a GIF.
 (() => {
   const ACT = ['#2A2418', '#4A3A1E', '#7A5A26', '#B07F33', '#F0A64A'];
   const BASE_MS = 1100; // per frame at 1×
@@ -85,6 +86,7 @@
     picked: null, // the package clicked once: the map narrows to it and its neighbours
     links: null, // the package in the breakout: { dir, rev, v, nodes, adj, wires, lit }
     tip: null, // the node the hover card describes: { node } on the map or { sym } in a package
+    exporting: null, // the GIF export under way: { cancel }
   };
 
   const fmtShort = (t) => new Date(t * 1000).toLocaleDateString(undefined, { month: 'short', day: 'numeric', timeZone: 'UTC' });
@@ -2166,6 +2168,347 @@
     if (state.data) writeHash();
   }
 
+  // ---------- Export ----------
+
+  // The whole history at the current step can be saved as a GIF. Each frame
+  // is rendered on the stage as playback would, read back off it and drawn
+  // onto a canvas with its date, chapter, counters and caption, tweened into
+  // the next as the stage tweens; in story mode it holds on key moments.
+  const GIF_W = 960; // the widest a GIF is drawn, in pixels
+  const GIF_TWEENS = 5; // drawings per frame of a short history
+  const GIF_LONG = 200; // frames past which each is drawn once, untweened
+  const GIF_END_MS = 2500; // how long the last frame holds
+  const MONO = '"JetBrains Mono", ui-monospace, monospace', SANS = '"IBM Plex Sans", system-ui, sans-serif';
+
+  // snapStage reads frame f off the stage as last rendered, in pixels on
+  // screen: the target of every tween, not where it has got to.
+  function snapStage(f) {
+    const t = state.zt, st = $('stage');
+    const lit = st.classList.contains('lit'), picked = st.classList.contains('picked');
+    const know = state.colorBy === 'knowledge';
+    const now = new Map(f.pkgs.map((s) => [s.p, s]));
+    const nodes = new Map();
+    state.bubbles.forEach((el, id) => {
+      const c = el.classList;
+      const shown = c.contains('lit') || c.contains('near');
+      if (c.contains('gone') || (picked && !shown)) return;
+      const { x, y } = nodeAt(id);
+      const s = isGroup(id) ? null : now.get(id);
+      const named = (lit && shown) || !(c.contains('small') || (c.contains('under') && c.contains('unnamed')));
+      nodes.set(id, {
+        x: t.applyX(x), y: t.applyY(y), d: Math.max(8, (state.diam[id] || 0) * t.k),
+        fill: el.style.backgroundColor, ring: know && s && s.live > 0 && s.knowers ? s.knowers : null,
+        alpha: (el.style.opacity === '' ? 1 : Number(el.style.opacity)) * (lit && !shown ? 0.28 : 1),
+        border: c.contains('lit') ? [2, '#E6E9EE'] : c.contains('followed') ? [2, '#C792EA'] : [1, know ? '#3A4250' : '#3A3222'],
+        busy: c.contains('busy'), agg: c.contains('agg'), dark: c.contains('a3') || c.contains('a4'),
+        name: named ? el.firstChild.textContent : '', under: c.contains('under') || c.contains('small'), bright: lit && shown,
+      });
+    });
+    const edges = new Map();
+    d3.selectAll('#deps > path').each(function (e) {
+      const c = this.classList, on = c.contains('on');
+      if (c.contains('leaving') || ((e.faint || lit || picked) && !on)) return;
+      const color = on ? (c.contains('out') ? '#5BA8F5' : c.contains('in') ? '#6FCF97' : '#E6E9EE') : e.hot ? '#F0A64A' : '#5A6472';
+      edges.set(e.key, { d: e.d, w: e.hot ? Math.max(2.2, state.refs(e.refs)) : state.refs(e.refs), color, alpha: on || e.hot ? 0.95 : 0.3 });
+    });
+    // The groups outlined, as renderGroups picks them; the ones it dropped
+    // may still be fading out.
+    const live = new Set();
+    for (const s of scoped(f).pkgs) if (s.live > 0) for (const g of state.chains[s.p]) live.add(g);
+    const clusters = new Map();
+    d3.selectAll('#clusters > g').each((g) => {
+      if (g.parent < 0 || !live.has(g.i) || !state.open.has(g.i)) return;
+      clusters.set(g.i, { x: t.applyX(g.x), y: t.applyY(g.y), rx: g.rx * t.k, ry: g.ry * t.k, name: g.rx * t.k >= 70 ? `${g.name}/` : '', alpha: lit ? 0.45 : 1 });
+    });
+    return {
+      nodes, edges, clusters,
+      date: $('date').textContent, chap: $('chapLabel').textContent, caption: $('caption').textContent,
+      counts: [['Commits', f.total], ['Live symbols', f.live], ['Packages', f.pkgs.filter((p) => p.live > 0).length]],
+    };
+  }
+
+  // paintGif draws the stage t of the way from snapshot a to snapshot b,
+  // eased as the stage eases, at s canvas pixels per pixel on screen.
+  function paintGif(ctx, s, a, b, t) {
+    const W = ctx.canvas.width / s, H = ctx.canvas.height / s, zt = state.zt;
+    const e = d3.easeCubicInOut(t);
+    // What is in both snapshots moves from one to the other; what is in only
+    // one fades in or out.
+    const pairs = (ma, mb) => {
+      const out = [];
+      for (const [k, q] of mb) out.push([ma.get(k), q]);
+      for (const [k, p] of ma) if (!mb.has(k)) out.push([p, undefined]);
+      return out;
+    };
+    const mix = (p, q, keys) => {
+      const o = { ...(e < 0.5 ? p || q : q || p), fade: !p ? e : !q ? 1 - e : 1 };
+      if (p && q) for (const k of keys) o[k] = p[k] + (q[k] - p[k]) * e;
+      return o;
+    };
+    const circle = (x, y, r) => { ctx.beginPath(); ctx.arc(x, y, Math.max(0, r), 0, 2 * Math.PI); };
+    ctx.setTransform(s, 0, 0, s, 0, 0);
+    ctx.globalAlpha = 1;
+    ctx.fillStyle = '#12161C';
+    ctx.fillRect(0, 0, W, H);
+
+    ctx.textAlign = 'center';
+    for (const [p, q] of pairs(a.clusters, b.clusters)) {
+      const g = mix(p, q, ['x', 'y', 'rx', 'ry']);
+      ctx.globalAlpha = g.alpha * g.fade;
+      ctx.beginPath();
+      ctx.ellipse(g.x, g.y, g.rx, g.ry, 0, 0, 2 * Math.PI);
+      ctx.lineWidth = 1;
+      ctx.strokeStyle = '#2A313B';
+      ctx.stroke();
+      if (!g.name) continue;
+      ctx.globalAlpha *= 0.85;
+      ctx.font = `600 10px ${MONO}`;
+      ctx.textBaseline = 'alphabetic';
+      ctx.fillStyle = '#9AA4B2';
+      ctx.fillText(g.name, g.x, g.y - g.ry + 13);
+    }
+
+    // The dependencies are drawn on the map, through the zoom.
+    ctx.setTransform(s * zt.k, 0, 0, s * zt.k, s * zt.x, s * zt.y);
+    ctx.lineCap = 'round';
+    for (const [p, q] of pairs(a.edges, b.edges)) {
+      const l = mix(p, q, ['w', 'alpha']);
+      if (p && q && p.d !== q.d) l.d = d3.interpolateString(p.d, q.d)(e);
+      ctx.globalAlpha = l.alpha * l.fade;
+      ctx.lineWidth = l.w / zt.k;
+      ctx.strokeStyle = l.color;
+      ctx.stroke(new Path2D(l.d));
+    }
+    ctx.setTransform(s, 0, 0, s, 0, 0);
+
+    for (const [p, q] of pairs(a.nodes, b.nodes)) {
+      const n = mix(p, q, ['x', 'y', 'd', 'alpha']);
+      if (p && q && p.fill !== q.fill) n.fill = d3.interpolateRgb(p.fill, q.fill)(e);
+      // A bubble grows in from 40% of its size, as on the stage.
+      const r = (n.d / 2) * (0.4 + 0.6 * n.fade);
+      ctx.globalAlpha = n.alpha * n.fade;
+      if (n.busy) {
+        ctx.shadowColor = 'rgba(240, 166, 74, .35)';
+        ctx.shadowBlur = 22 * s;
+      }
+      circle(n.x, n.y, r);
+      ctx.fillStyle = n.fill;
+      ctx.fill();
+      ctx.shadowColor = 'transparent';
+      ctx.shadowBlur = 0;
+      if (n.ring) {
+        const g = ctx.createConicGradient(-Math.PI / 2, n.x, n.y);
+        let at = 0;
+        for (const [au, share, gone] of n.ring) {
+          const c = gone ? GONE : authorColor(state.data.authors[au]);
+          g.addColorStop(Math.min(1, at), c);
+          g.addColorStop(Math.min(1, at + share), c);
+          at += share;
+        }
+        if (at < 0.999) {
+          g.addColorStop(at, OTHERS);
+          g.addColorStop(1, OTHERS);
+        }
+        circle(n.x, n.y, r);
+        ctx.fillStyle = g;
+        ctx.fill();
+        circle(n.x, n.y, 0.65 * r);
+        ctx.fillStyle = RING_IN;
+        ctx.fill();
+      }
+      if (n.busy) {
+        circle(n.x, n.y, r + 1.5);
+        ctx.lineWidth = 3;
+        ctx.strokeStyle = 'rgba(240, 166, 74, .28)';
+        ctx.stroke();
+      }
+      if (n.agg) {
+        circle(n.x, n.y, r + 1);
+        ctx.lineWidth = 2;
+        ctx.strokeStyle = '#0E1116';
+        ctx.stroke();
+        circle(n.x, n.y, r + 2.75);
+        ctx.lineWidth = 1.5;
+        ctx.strokeStyle = '#6A7486';
+        ctx.stroke();
+      }
+      const [bw, bc] = n.border;
+      circle(n.x, n.y, r - bw / 2);
+      ctx.lineWidth = bw;
+      ctx.strokeStyle = bc;
+      ctx.stroke();
+      if (!n.name) continue;
+      if (n.under) {
+        ctx.font = `600 10px ${MONO}`;
+        ctx.textBaseline = 'top';
+        ctx.shadowColor = '#0E1116';
+        ctx.shadowBlur = 3 * s;
+        ctx.fillStyle = n.bright ? '#E6E9EE' : '#C9CFD8';
+        ctx.fillText(n.name, n.x, n.y + r + 4);
+        ctx.shadowColor = 'transparent';
+        ctx.shadowBlur = 0;
+      } else {
+        ctx.font = `600 11px ${MONO}`;
+        ctx.textBaseline = 'middle';
+        ctx.fillStyle = n.dark ? '#1A1408' : '#E6E9EE';
+        ctx.fillText(fitText(ctx, n.name, 1.8 * r), n.x, n.y);
+      }
+    }
+
+    // The overlays keep their places on the stage.
+    ctx.globalAlpha = 1;
+    ctx.textAlign = 'left';
+    ctx.textBaseline = 'middle';
+    ctx.fillStyle = '#E6E9EE';
+    ctx.font = `600 34px ${SANS}`;
+    ctx.fillText(b.date, 20, 40);
+    ctx.fillStyle = '#C9CFD8';
+    ctx.font = `13px ${SANS}`;
+    ctx.fillText(b.chap, 20, 75);
+    ctx.textAlign = 'right';
+    let x = W - 20;
+    for (let i = b.counts.length - 1; i >= 0; i--) {
+      const [label, v] = b.counts[i];
+      const from = a.counts[i][1];
+      const value = Math.round(from + (v - from) * d3.easeCubicOut(t)).toLocaleString();
+      ctx.font = `600 11px ${SANS}`;
+      if ('letterSpacing' in ctx) ctx.letterSpacing = '0.66px';
+      ctx.fillStyle = '#9AA4B2';
+      const lw = ctx.measureText(label.toUpperCase()).width;
+      ctx.fillText(label.toUpperCase(), x, 26);
+      if ('letterSpacing' in ctx) ctx.letterSpacing = '0px';
+      ctx.font = `600 20px ${MONO}`;
+      ctx.fillStyle = '#E6E9EE';
+      ctx.fillText(value, x, 46);
+      x -= Math.max(lw, ctx.measureText(value).width) + 22;
+    }
+    ctx.textAlign = 'left';
+    if (b.caption) {
+      ctx.font = `13px ${SANS}`;
+      const lines = wrapText(ctx, b.caption, Math.min(560, 0.7 * W) - 26, 3);
+      const w = Math.max(...lines.map((l) => ctx.measureText(l).width)) + 26;
+      const hgt = 18 * lines.length + 18;
+      ctx.beginPath();
+      ctx.roundRect(20.5, H - 16 - hgt + 0.5, w, hgt, 8);
+      ctx.fillStyle = 'rgba(14, 17, 22, .82)';
+      ctx.fill();
+      ctx.lineWidth = 1;
+      ctx.strokeStyle = '#2A323D';
+      ctx.stroke();
+      ctx.fillStyle = '#E6E9EE';
+      lines.forEach((l, i) => ctx.fillText(l, 33, H - 16 - hgt + 18 + 18 * i));
+    }
+    ctx.textAlign = 'right';
+    ctx.font = `12px ${MONO}`;
+    ctx.fillStyle = '#9AA4B2';
+    ctx.fillText(`huginn · ${state.status.repo}`, W - 20, H - 24);
+  }
+
+  // fitText cuts text short with an ellipsis to fit width w.
+  function fitText(ctx, text, w) {
+    if (ctx.measureText(text).width <= w) return text;
+    let n = text.length;
+    while (n > 0 && ctx.measureText(`${text.slice(0, n)}…`).width > w) n--;
+    return n ? `${text.slice(0, n)}…` : '';
+  }
+
+  // wrapText breaks text into at most max lines of width w, the last cut
+  // short if it runs over.
+  function wrapText(ctx, text, w, max) {
+    const lines = [];
+    let line = '';
+    for (const word of text.split(/\s+/)) {
+      const next = line ? `${line} ${word}` : word;
+      if (line && ctx.measureText(next).width > w) {
+        lines.push(line);
+        line = word;
+      } else line = next;
+    }
+    if (line) lines.push(line);
+    if (lines.length > max) lines.splice(max - 1, lines.length, `${lines[max - 1]} ${lines.slice(max).join(' ')}`);
+    return lines.map((l) => fitText(ctx, l, w));
+  }
+
+  // exportGif plays the history through at the current step, colouring, zoom
+  // and speed, and saves it as a GIF. A second press cancels it.
+  async function exportGif() {
+    if (state.exporting) {
+      state.exporting.cancel = true;
+      return;
+    }
+    const fs = state.data.frames;
+    if (!fs.length) return;
+    stop();
+    hideCard();
+    hideTip();
+    closeLinks(false);
+    if (state.drill) {
+      undrill();
+      await new Promise((r) => setTimeout(r, zoomMs() + 50));
+    }
+    const job = { cancel: false };
+    state.exporting = job;
+    const from = state.frame;
+    const label = $('exportLabel'), btn = $('exportGif');
+    btn.setAttribute('aria-pressed', 'true');
+    // Nothing else moves the stage while it is being read.
+    const still = [$('stage'), ...document.querySelectorAll('.playbar .controls > :not(#exportGif), .playbar .rows, aside.story')];
+    for (const el of still) el.inert = true;
+    state.hover = state.focused = null;
+    try {
+      await document.fonts.ready;
+      await Promise.all([`600 11px ${MONO}`, `600 34px ${SANS}`, `13px ${SANS}`].map((f) => document.fonts.load(f).catch(() => {})));
+      const st = $('stage');
+      const s = Math.min(1, GIF_W / st.clientWidth);
+      const canvas = document.createElement('canvas');
+      canvas.width = Math.round(st.clientWidth * s);
+      canvas.height = Math.round(st.clientHeight * s);
+      const ctx = canvas.getContext('2d', { willReadFrequently: true });
+      const gif = new GifWriter(canvas.width, canvas.height);
+      const draw = (a, b, t, ms) => {
+        paintGif(ctx, s, a, b, t);
+        gif.add(ctx.getImageData(0, 0, canvas.width, canvas.height).data, ms);
+      };
+      const tweens = fs.length > GIF_LONG ? 1 : GIF_TWEENS;
+      const frameMs = BASE_MS / state.speed, tweenTime = 600 / state.speed;
+      state.instant = true;
+      let prev = null;
+      for (let i = 0; i < fs.length; i++) {
+        if (job.cancel) break;
+        state.frame = i;
+        render(false);
+        const snap = snapStage(fs[i]);
+        let hold = i === fs.length - 1 ? GIF_END_MS : frameMs;
+        if (state.story && pausesIn(i).length) hold += PAUSE_MS / state.speed;
+        if (!prev || tweens === 1) draw(prev || snap, snap, 1, hold);
+        else {
+          for (let k = 1; k < tweens; k++) draw(prev, snap, k / tweens, tweenTime / tweens);
+          draw(prev, snap, 1, hold - ((tweens - 1) * tweenTime) / tweens);
+        }
+        prev = snap;
+        label.textContent = `Exporting ${Math.round((100 * (i + 1)) / fs.length)}% · cancel`;
+        // Let the page breathe, and the cancel through.
+        await new Promise((r) => setTimeout(r));
+      }
+      if (!job.cancel) {
+        label.textContent = 'Encoding…';
+        await new Promise((r) => setTimeout(r));
+        const url = URL.createObjectURL(gif.finish());
+        const name = `${state.status.repo.split(/[\\/]/).pop() || 'huginn'}-journey-${state.step}.gif`;
+        h('a', { href: url, download: name }).click();
+        setTimeout(() => URL.revokeObjectURL(url), 60000);
+      }
+    } finally {
+      state.instant = false;
+      state.exporting = null;
+      for (const el of still) el.inert = false;
+      btn.setAttribute('aria-pressed', 'false');
+      label.textContent = 'Export GIF';
+      state.frame = from;
+      render(false);
+    }
+  }
+
   // ---------- Links ----------
 
   // writeHash keeps the view in the URL so that it can be shared: the step,
@@ -2240,6 +2583,7 @@
     $('lines').addEventListener('click', (e) => { const b = e.target.closest('button'); if (b) setLines(b.dataset.v); });
     $('who').addEventListener('change', (e) => setWho(e.target.value));
     $('narrate').addEventListener('click', () => setNarrate(!state.narrate));
+    $('exportGif').addEventListener('click', () => exportGif().catch(fail));
     $('back').addEventListener('click', undrill);
     // A click on the map around the packages brings the rest of them back.
     $('stage').addEventListener('click', (e) => {
@@ -2276,7 +2620,7 @@
     });
     // Shortcuts belong to the page, not to fields being typed in.
     document.addEventListener('keydown', (e) => {
-      if (e.defaultPrevented || e.altKey || e.ctrlKey || e.metaKey) return;
+      if (e.defaultPrevented || e.altKey || e.ctrlKey || e.metaKey || state.exporting) return;
       if (e.target.closest && e.target.closest('input, textarea, select, [contenteditable]')) return;
       switch (e.key) {
         case ' ':
