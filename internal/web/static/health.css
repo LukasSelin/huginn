@@ -31,15 +31,16 @@
 .owners { flex: 1 0 300px; min-width: 0; padding: 18px; display: flex; flex-direction: column; gap: 12px; }
 
 .scroll { overflow-x: auto; }
-#hotspots { width: 100%; min-width: 720px; border-collapse: collapse; font-size: 13px; }
-#hotspots th { padding: 6px 8px; text-align: left; font-size: 11px; font-weight: 500; color: var(--muted); }
-#hotspots td { padding: 9px 8px; border-top: 1px solid var(--line); }
-#hotspots .num { text-align: right; font-variant-numeric: tabular-nums; }
-#hotspots .bar { width: 18%; }
-#hotspots td.mono { font-size: 12px; white-space: nowrap; }
-#hotspots td:last-child { white-space: nowrap; }
-#hotspots a { text-decoration: none; }
-#hotspots a:hover { text-decoration: underline; }
+.data { width: 100%; min-width: 480px; border-collapse: collapse; font-size: 13px; }
+.data th { padding: 6px 8px; text-align: left; font-size: 11px; font-weight: 500; color: var(--muted); }
+.data td { padding: 9px 8px; border-top: 1px solid var(--line); }
+.data .num { text-align: right; font-variant-numeric: tabular-nums; }
+.data .bar { width: 18%; }
+.data td.mono { font-size: 12px; white-space: nowrap; }
+.data td:last-child { white-space: nowrap; }
+.data a { text-decoration: none; }
+.data a:hover { text-decoration: underline; }
+#hotspots { min-width: 720px; }
 .meter { display: block; height: 8px; border-radius: 4px; background: var(--accent); }
 
 .stack { display: flex; height: 10px; border-radius: 5px; overflow: hidden; background: var(--raised); }
@@ -47,6 +48,36 @@
 .ownlist li { display: flex; align-items: center; gap: 8px; }
 .ownlist .sw { flex: none; width: 10px; height: 10px; border-radius: 2px; }
 .ownlist .who { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+.silos { display: flex; flex-direction: column; gap: 12px; }
+.h2.section { font-size: 18px; color: var(--text); }
+.silos .lede { font-size: 17px; max-width: 900px; }
+.silo-list { flex: 999 1 600px; min-width: 0; padding: 18px; display: flex; flex-direction: column; gap: 10px; }
+.leave { flex: 1 0 320px; min-width: 0; padding: 18px; display: flex; flex-direction: column; gap: 10px; }
+.coupling { padding: 18px; display: flex; flex-direction: column; gap: 10px; }
+.titlerow .seg { margin-left: auto; }
+.seg { display: inline-flex; gap: 2px; padding: 3px; background: var(--raised); border-radius: 8px; }
+.seg button { border: 0; padding: 4px 12px; border-radius: 6px; background: none; color: var(--muted); font: inherit; font-size: 12px; cursor: pointer; }
+.seg button[aria-pressed="true"] { background: var(--line-strong); color: var(--text); font-weight: 500; }
+.data td.unit { min-width: 260px; }
+.data .unit a { font-family: 'JetBrains Mono', monospace; font-size: 12px; overflow-wrap: anywhere; }
+.reasons { margin-top: 4px; font-size: 12px; line-height: 1.5; color: var(--muted); }
+.share { display: flex; align-items: center; gap: 8px; white-space: nowrap; }
+.share .meter { flex: none; width: 48px; }
+.meter.gauge { background: var(--raised); }
+.meter.gauge > span { display: block; height: 100%; border-radius: 4px; background: var(--accent); }
+.away { color: var(--deleted); }
+.who { display: flex; flex-wrap: wrap; gap: 6px; }
+.who label { display: inline-flex; align-items: center; gap: 6px; padding: 4px 10px; border: 1px solid var(--line-strong); border-radius: 999px; font-size: 12px; cursor: pointer; }
+.who label:has(input:checked) { border-color: var(--accent); background: var(--accent-bg); }
+.who input { margin: 0; accent-color: var(--accent); }
+.losses { margin: 0; padding: 0; list-style: none; display: flex; flex-direction: column; }
+.losses li { padding: 9px 0; border-top: 1px solid var(--line); }
+.losses .unit a { font-family: 'JetBrains Mono', monospace; font-size: 12px; text-decoration: none; overflow-wrap: anywhere; }
+.fate { display: inline-block; margin-right: 6px; padding: 1px 7px; border: 1px solid currentColor; border-radius: 999px; font-size: 10px; font-weight: 600; letter-spacing: .04em; text-transform: uppercase; vertical-align: 1px; }
+.fate.orphaned { color: var(--deleted); }
+.fate.single { color: var(--accent); }
+.leave .summ { margin: 0; font-size: 13px; line-height: 1.5; color: var(--text-2); }
 
 @media (max-width: 600px) {
   .health { padding: 20px 16px 32px; }

@@ -8,6 +8,7 @@ import (
 
 	"huginn/internal/ast"
 	"huginn/internal/lineage"
+	"huginn/internal/modpath"
 )
 
 // Link is a live symbol referring to identifiers of another package of the
@@ -67,7 +68,7 @@ func LinksAt(h *lineage.History, dir string, rev int, tests bool) *Links {
 			now = append(now, live{sym.ID, cur})
 		}
 	}
-	module := newResolver(all)
+	mods := modpath.Infer(all)
 
 	out := &Links{Dir: dir, Symbols: []LinkSymbol{}, Out: []Link{}, In: []Link{}}
 	for _, l := range now {
@@ -80,7 +81,7 @@ func LinksAt(h *lineage.History, dir string, rev int, tests bool) *Links {
 			if ref.Kind != ast.RefImport {
 				continue
 			}
-			to := module.dir(ref.Pkg)
+			to := mods.Dir(ref.Pkg)
 			if to == "" || to == from || (from != dir && to != dir) {
 				continue
 			}

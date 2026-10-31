@@ -10,6 +10,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"huginn/internal/silos"
 )
 
 func TestPrebuilt(t *testing.T) {
@@ -31,7 +33,7 @@ func TestPrebuilt(t *testing.T) {
 		// The prebuilt body is what the handler computes.
 		live := httptest.NewRecorder()
 		mux := http.NewServeMux()
-		fresh := &index{h: ix.h, cmap: ix.cmap, health: ix.health}
+		fresh := &index{h: ix.h, cmap: ix.cmap, health: ix.health, silos: silos.Build(ix.h, silos.Options{})}
 		srv.indexRoutes(mux, func() *index { return fresh })
 		mux.ServeHTTP(live, r)
 		if !bytes.Equal(e.(*encoded).body, live.Body.Bytes()) {

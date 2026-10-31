@@ -37,6 +37,7 @@ go test ./...
 huginn symbols [-C dir] [-branch rev] [-tests] [-no-cache] name
 huginn serve [-C dir] [-branch rev] [-tests] [-no-cache] [-addr host:port]
 huginn semdiff [-C dir] [-include-generated] [-callers n] rev
+huginn silos [-C dir] [-branch rev] [-no-cache] [-n count] [-leaves name,...]
 ```
 
 `-C` points at the repository (default: the current directory), `-branch`
@@ -63,7 +64,7 @@ Indexes the history in the background and serves the journey, map and health
 pages at `http://localhost:7878`, opening on the journey; the map is at `/map`.
 While indexing, the pages show progress. Once the history is indexed, the
 server encodes and gzips the responses the pages open with (the journey at
-every step, the health report, the map's preset
+every step, the health report and knowledge silos, the map's preset
 windows) before it reports ready, then the per-directory views in the
 background, so the pages draw from memory.
 
@@ -80,6 +81,46 @@ The UI is backed by a small JSON API:
 | `GET /api/status` | indexing progress, then live/total symbol counts and the time span |
 | `GET /api/symbol/{id}` | one symbol's declaration and its full list of events |
 | `GET /api/health` | trends over the whole history (exported symbols, complexity, restructuring, survival, test lines), hotspot files and owners |
+| `GET /api/silos` | knowledge silos: packages and symbols ranked by concentration × criticality, each with its reasons, everyone's share of the live code, and pairs coupled across knowledge boundaries |
+| `GET /api/silos/leave?author=name` | what would be orphaned or rest on one person if the named authors (repeat `author` for several) left now, ranked as a hand-over list |
+
+### `huginn silos`
+
+Ranks the live code by knowledge risk, as the health page's *Knowledge
+silos* section does. Who knows what comes from the same knowledge model the
+journey uses: each author's weight in a symbol grows with what they wrote
+and rewrote of it, fades with a half-life of about six months, and counts as
+orphaned once they have not committed for six months (as of the last
+commit). Test code is left out.
+
+- **Silos.** For every live symbol and package: the top knower still around
+  and their share, the bus factor (the fewest people still around who hold
+  more than half of what those people know), and the *concentration*, the
+  share lost if the top knower left. It is multiplied by a *criticality*
+  made of fan-in (distinct callers, three times for callers in other
+  packages, half for method calls matched by name only), cyclomatic
+  complexity and semantic edits, each on a log scale.
+- **`-leaves name,...`** treats the named authors as gone now and lists what
+  would be orphaned (the people left would know less than a third of it) or
+  would newly rest on one person, ranked by the share lost × criticality:
+  the order to hand things over in.
+- **Coupled across knowledge boundaries.** Symbol and package pairs that
+  refer to each other or change in the same commits (each commit weighted by
+  1/(n−1) for the n units it changed, huge commits left out), whose
+  knowers' weights have a cosine similarity of at most 25%.
+
+```
+$ huginn silos -n 2
+analyzed 673 live symbols in 46ms (39 commits cached, 0 walked)
+as of 2026-10-27 · 1 author
+
+Package silos (2 of 11)
+   394.0  internal/ast
+          Lukas Selin holds 100% · bus factor 1 · 392 call sites from 45 callers in 8 other packages (8 approx.) · cyclomatic 315 · 110 edits
+   267.4  internal/journey
+          Lukas Selin holds 100% · bus factor 1 · 33 call sites from 8 callers in 2 other packages (2 approx.) · cyclomatic 360 · 122 edits
+…
+```
 
 ### `huginn semdiff`
 
@@ -162,6 +203,12 @@ git log / cat-file ──► internal/git ──► internal/ast ──► inter
   JSON API from an in-memory index built once at startup.
 - **internal/semdiff** reports one commit: changed symbols, the callers of
   each across the tree at that commit, and the commit's blast radius.
+- **internal/knowledge** is the knowledge model: each author's decayed weight
+  in each live symbol, and who counts as departed. The journey rolls it up
+  per package frame by frame; **internal/silos** reads it at the last
+  revision, resolves callers among the live symbols with semdiff's index
+  (the module path inferred by **internal/modpath**, as the journey does),
+  and ranks silos, departures and cross-knowledge coupling.
 
 ### Index cache
 
@@ -198,7 +245,8 @@ size of the files they touched.
   collected per file without type checking. A call on the enclosing method's
   receiver (`ix.walk()` in `(*Indexer).Walk`) resolves to that receiver type,
   but `x.Name()` on any other value matches every method called `Name` in the
-  tree. `semdiff` marks such callers `(approx.)`.
+  tree. `semdiff` marks such callers `(approx.)`; `silos` counts them at half
+  weight in fan-in and says how many there are.
 - **First-parent history.** Lineage follows one line of history: a merge
   counts as one commit, diffed against its first parent, so the changes of a
   merged branch are attributed to the merge commit, its author and its date.

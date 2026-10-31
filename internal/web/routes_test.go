@@ -71,7 +71,7 @@ func TestBeforeIndex(t *testing.T) {
 	if st.Ready || st.Repo != "demo" {
 		t.Errorf("status = %+v, want not ready for demo", st)
 	}
-	for _, url := range []string{"/api/symbol/1", "/api/health", "/api/journey"} {
+	for _, url := range []string{"/api/symbol/1", "/api/health", "/api/silos", "/api/journey"} {
 		getJSON(t, h, url, http.StatusServiceUnavailable, nil)
 	}
 }
@@ -170,6 +170,27 @@ func TestAPI(t *testing.T) {
 		if hj.Tests || hj.Authors != 1 || hj.BusFactor != 1 || len(hj.Owners) != 1 || hj.Owners[0].Symbols != 4 {
 			t.Errorf("tests %v, authors %d, bus factor %d, owners %+v", hj.Tests, hj.Authors, hj.BusFactor, hj.Owners)
 		}
+	})
+
+	t.Run("silos", func(t *testing.T) {
+		var sj silosJSON
+		getJSON(t, h, "/api/silos", http.StatusOK, &sj)
+		// Ada alone wrote everything: every live symbol and both packages
+		// rest on her.
+		if !slices.Equal(sj.Authors, []string{"Ada"}) || sj.SymbolSilos != 4 || sj.PackageSilos != 2 || len(sj.SymbolPairs) != 0 {
+			t.Errorf("silos = %+v", sj)
+		}
+		if p := sj.Packages[0]; p.Name != "geo" || p.Holder != "Ada" || p.BusFactor != 1 || p.Concentration != 1 || len(p.Reasons) == 0 {
+			t.Errorf("first package = %+v", p)
+		}
+
+		var lj leaveJSON
+		getJSON(t, h, "/api/silos/leave?author=ada&author=Bob", http.StatusOK, &lj)
+		if !slices.Equal(lj.Leaving, []string{"Ada"}) || !slices.Equal(lj.Unknown, []string{"Bob"}) || lj.Share != 1 ||
+			lj.OrphanedSymbols != 4 || lj.OrphanedPackages != 2 || !lj.Symbols[0].Orphaned {
+			t.Errorf("leave = %+v", lj)
+		}
+		getJSON(t, h, "/api/silos/leave", http.StatusBadRequest, nil)
 	})
 
 	t.Run("journey", func(t *testing.T) {

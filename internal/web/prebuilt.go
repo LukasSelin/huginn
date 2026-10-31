@@ -165,7 +165,7 @@ var steps = []journey.Step{journey.Commit, journey.Week, journey.Month}
 // pageURLs are what the pages ask for when they open. They are built before
 // the index is published, so no page waits on them.
 func (s *Server) pageURLs(ix *index) []string {
-	urls := []string{"/api/health"}
+	urls := []string{"/api/health", "/api/silos"}
 	for _, st := range steps {
 		urls = append(urls, "/api/journey?step="+st.String())
 	}
