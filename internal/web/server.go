@@ -26,6 +26,7 @@ import (
 	"huginn/internal/git"
 	"huginn/internal/health"
 	"huginn/internal/lineage"
+	"huginn/internal/silos"
 )
 
 //go:embed static
@@ -54,6 +55,7 @@ type index struct {
 	h      *lineage.History
 	cmap   *codemap.Map
 	health *health.Report
+	silos  *silos.Report
 	took   time.Duration
 
 	journeys journeys // built with the prebuilt responses, or on first request
@@ -85,7 +87,7 @@ func (s *Server) Index(ctx context.Context) error {
 		s.settle.Do(func() { close(s.settled) })
 		return err
 	}
-	ix := &index{h: h, cmap: codemap.Build(h), health: health.Build(h, health.Options{})}
+	ix := &index{h: h, cmap: codemap.Build(h), health: health.Build(h, health.Options{}), silos: silos.Build(h, silos.Options{})}
 	// The responses saved for this history are loaded rather than built
 	// again. They were saved once all were built, the detail ones too.
 	// Without a key they are neither loaded nor saved.
@@ -134,6 +136,8 @@ func (s *Server) indexRoutes(mux *http.ServeMux, load func() *index) {
 	mux.HandleFunc("GET /api/map", ready(prebuilt(s.codeMap)))
 	mux.HandleFunc("GET /api/map/{dir...}", ready(prebuilt(s.mapDir)))
 	mux.HandleFunc("GET /api/health", ready(prebuilt(s.health)))
+	mux.HandleFunc("GET /api/silos", ready(prebuilt(s.silosAPI)))
+	mux.HandleFunc("GET /api/silos/leave", ready(s.silosLeave))
 	mux.HandleFunc("GET /api/journey", ready(prebuilt(s.journeyAPI)))
 	mux.HandleFunc("GET /api/journey/package/{dir...}", ready(prebuilt(s.journeyPackage)))
 	mux.HandleFunc("GET /api/journey/links/{dir...}", ready(s.journeyLinks))

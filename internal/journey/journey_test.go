@@ -299,24 +299,3 @@ func TestLayoutGroups(t *testing.T) {
 		t.Errorf("groups of packages %v, want %v", in, want)
 	}
 }
-
-// TestResolverRenamedModule checks that a module imported under its old
-// and its new path resolves under both, and that an import that merely
-// ends like a directory of the repository does not.
-func TestResolverRenamedModule(t *testing.T) {
-	r := newResolver([]*ast.Symbol{
-		fn("main.go", "Main"),
-		fn("api/api.go", "Serve", "example.com/old/core", "example.com/old/store"),
-		fn("api/v2.go", "Serve2", "example.com/new/core", "example.com/new/store", "example.com/new"),
-		fn("core/core.go", "Run", "example.com/old/store"),
-		fn("store/store.go", "Get", "github.com/other/core"),
-	})
-	for imp, want := range map[string]string{
-		"example.com/old/core": "core", "example.com/new/store": "store", "example.com/new": ".",
-		"github.com/other/core": "", "example.com/new/missing": "",
-	} {
-		if got := r.dir(imp); got != want {
-			t.Errorf("dir(%q) = %q, want %q", imp, got, want)
-		}
-	}
-}

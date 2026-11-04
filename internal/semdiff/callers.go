@@ -1,6 +1,7 @@
 package semdiff
 
 import (
+	"slices"
 	"strings"
 
 	"huginn/internal/ast"
@@ -129,23 +130,10 @@ func newIndex(tree []*ast.File, pkgOf func(path, pkg string) string) *index {
 // from code that can plausibly hold a value of the method's type: the
 // method's own package and the files that import it.
 func (idx *index) callers(s *ast.Symbol, pkg string, record func(callerID, Caller)) ([]Caller, bool) {
-	sites := idx.exact[symID(pkg, s.Key)]
-	if s.Kind == ast.KindMethod {
-		importable := strings.TrimSuffix(pkg, "_test")
-		for _, st := range idx.byMethod[s.Name] {
-			if st.pkg == pkg || idx.imports[st.file][importable] {
-				sites = append(sites, st)
-			}
-		}
-	}
-
 	byCaller := map[callerID]*Caller{}
 	var order []callerID
-	for _, st := range sites {
+	for _, st := range idx.sites(s, pkg) {
 		id := callerID{st.pkg, st.file.Path, st.caller.Key}
-		if id.pkg == pkg && st.caller.Key == s.Key {
-			continue // recursion
-		}
 		c := byCaller[id]
 		if c == nil {
 			c = &Caller{
@@ -174,6 +162,59 @@ func (idx *index) callers(s *ast.Symbol, pkg string, record func(callerID, Calle
 	}
 	sortCallers(out)
 	return out, approx
+}
+
+// sites returns the references to s, which lives in package pkg, leaving
+// out its references to itself.
+func (idx *index) sites(s *ast.Symbol, pkg string) []site {
+	sites := idx.exact[symID(pkg, s.Key)]
+	if s.Kind == ast.KindMethod {
+		importable := strings.TrimSuffix(pkg, "_test")
+		for _, st := range idx.byMethod[s.Name] {
+			if st.pkg == pkg || idx.imports[st.file][importable] {
+				sites = append(sites, st)
+			}
+		}
+	}
+	return slices.DeleteFunc(slices.Clone(sites), func(st site) bool {
+		return st.pkg == pkg && st.caller.Key == s.Key // recursion
+	})
+}
+
+// Index resolves the references between the declarations of one tree, as
+// the callers in a Report are resolved.
+type Index struct{ idx *index }
+
+// NewIndex indexes tree. pkgOf returns the import path of the package
+// declared as pkg in the file at path.
+func NewIndex(tree []*ast.File, pkgOf func(path, pkg string) string) *Index {
+	return &Index{newIndex(tree, pkgOf)}
+}
+
+// Use is one declaration's references to a symbol.
+type Use struct {
+	Caller      *ast.Symbol // as it appears in the indexed tree
+	Package     string      // the caller's import path
+	Calls       int         // occurrences
+	Approximate bool        // some were matched by method name only
+}
+
+// Uses returns the declarations referring to s, which lives in package pkg,
+// each once.
+func (x *Index) Uses(s *ast.Symbol, pkg string) []Use {
+	at := map[*ast.Symbol]int{}
+	var out []Use
+	for _, st := range x.idx.sites(s, pkg) {
+		i, ok := at[st.caller]
+		if !ok {
+			i = len(out)
+			at[st.caller] = i
+			out = append(out, Use{Caller: st.caller, Package: st.pkg})
+		}
+		out[i].Calls += st.uses
+		out[i].Approximate = out[i].Approximate || st.approx
+	}
+	return out
 }
 
 // unkeyedLiterals counts the unkeyed literals T{1, "x"} of type typ,

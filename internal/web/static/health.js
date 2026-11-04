@@ -73,7 +73,7 @@ function card({ title, value, delta, verdict, series, why }) {
     h('p', { class: 'why' }, why));
 }
 
-const state = { status: null, data: null };
+const state = { status: null, data: null, silos: null };
 
 // axisLabels names the ends of every series: by date, or by commit when the
 // whole history fits in one day.
@@ -223,15 +223,137 @@ function renderOwners(owners) {
     h('p', { class: 'muted small' }, 'Each live symbol is credited to whoever changed it last.'));
 }
 
+// Knowledge silos: what few people know and much depends on, what a
+// departure would leave behind, and what is coupled across who knows what.
+
+const silo = { risks: 'packages', pairs: 'packages', leaving: new Set(), asked: 0 };
+
+// unitLink links a package to its directory on the map, a symbol to its
+// lane on the journey.
+const unitLink = (u) => (u.id
+  ? h('a', { href: `/journey#sym=${u.id}`, title: u.path }, u.name)
+  : h('a', { href: `/map#s=${encodeURIComponent(u.dir)}&w=all` }, u.name));
+
+const meter = (x, max, title) => h('span', { class: 'meter', style: `width:${Math.max(2, Math.round((x / (max || 1)) * 100))}%`, title });
+
+// seg draws a two-way toggle into el, calling pick with the chosen value.
+function seg(el, value, pick) {
+  el.replaceChildren(...[['packages', 'Packages'], ['symbols', 'Symbols']].map(([v, label]) =>
+    h('button', { type: 'button', 'aria-pressed': String(v === value), onclick: () => pick(v) }, label)));
+}
+
+function renderSilos() {
+  const S = state.silos;
+  const top = S.knowers[0];
+  const lede = [];
+  if (top) lede.push(`${top.name} holds ${pct(top.share)} of what is known of the live code${S.knowers.length > 1 ? `, out of ${plural(S.knowers.length, 'author')} who know some of it` : ''}.`);
+  lede.push(`${plural(S.packageSilos, 'package')} and ${plural(S.symbolSilos, 'symbol')} would lose more than half of what is known of them if their top knower left.`);
+  if (S.departed.length) lede.push(`${S.departed.join(', ')} ${S.departed.length === 1 ? 'has' : 'have'} not committed for six months; what they knew is counted as orphaned.`);
+  $('siloLede').textContent = lede.join(' ');
+  renderRisks();
+  renderPairs();
+  renderWho();
+}
+
+function renderRisks() {
+  seg($('riskSeg'), silo.risks, (v) => { silo.risks = v; renderRisks(); });
+  const rows = state.silos[silo.risks];
+  if (!rows.length) {
+    $('risks').replaceChildren(h('caption', { class: 'muted small' }, 'Nobody holds most of what is known of any of them.'));
+    return;
+  }
+  const head = h('thead', null, h('tr', null,
+    h('th', { scope: 'col' }, silo.risks === 'packages' ? 'Package' : 'Symbol'),
+    h('th', { scope: 'col' }, 'Top knower'),
+    h('th', { scope: 'col', class: 'num', title: 'Fewest authors still around who hold more than half of what those authors know' }, 'Bus'),
+    h('th', { scope: 'col', class: 'bar' }, 'Score')));
+  const max = rows[0].score;
+  const body = rows.map((r) => h('tr', null,
+    h('td', { class: 'unit' }, unitLink(r), h('div', { class: 'reasons' }, r.reasons.join(' · '))),
+    h('td', null, r.holder
+      ? h('span', { class: 'share' }, h('span', { class: 'meter gauge' }, h('span', { style: `width:${Math.round(r.held * 100)}%` })), `${r.holder} ${pct(r.held)}`)
+      : h('span', { class: 'away' }, 'nobody around')),
+    h('td', { class: 'num' }, r.busFactor),
+    h('td', { class: 'bar' }, meter(r.score, max, r.score.toFixed(1)))));
+  $('risks').replaceChildren(head, h('tbody', null, body));
+}
+
+function renderPairs() {
+  seg($('pairSeg'), silo.pairs, (v) => { silo.pairs = v; renderPairs(); });
+  const rows = state.silos[silo.pairs === 'packages' ? 'packagePairs' : 'symbolPairs'];
+  if (!rows.length) {
+    const why = state.silos.knowers.length <= 1
+      ? 'One person knows all of the live code, so nothing is coupled across people yet.'
+      : 'Whatever is coupled is known by overlapping people.';
+    $('pairs').replaceChildren(h('caption', { class: 'muted small' }, why));
+    return;
+  }
+  const who = (ks) => ks.map((k) => `${k.name}${k.departed ? ' (gone)' : ''} ${pct(k.share)}`).join(', ');
+  const head = h('thead', null, h('tr', null,
+    h('th', { scope: 'col' }, 'Pair'),
+    h('th', { scope: 'col' }, 'Known by'),
+    h('th', { scope: 'col', class: 'num', title: 'Cosine similarity of the two sides\' knower weights' }, 'Overlap'),
+    h('th', { scope: 'col', class: 'bar' }, 'Score')));
+  const max = rows[0].score;
+  const body = rows.map((p) => h('tr', null,
+    h('td', { class: 'unit' }, unitLink(p.a), ' ↔ ', unitLink(p.b), h('div', { class: 'reasons' }, p.reasons.slice(0, -1).join(' · '))),
+    h('td', { class: 'small' }, h('div', null, who(p.aKnowers)), h('div', { class: 'muted' }, who(p.bKnowers))),
+    h('td', { class: 'num' }, pct(p.overlap)),
+    h('td', { class: 'bar' }, meter(p.score, max, p.score.toFixed(2)))));
+  $('pairs').replaceChildren(head, h('tbody', null, body));
+}
+
+// renderWho offers the authors who know the most of the live code, still
+// around or not, as the ones who might leave.
+function renderWho() {
+  const ks = state.silos.knowers.filter((k) => !k.departed).slice(0, 12);
+  $('leaveWho').replaceChildren(...ks.map((k) => h('label', null,
+    h('input', { type: 'checkbox', checked: silo.leaving.has(k.name), onchange: (e) => {
+      if (e.target.checked) silo.leaving.add(k.name); else silo.leaving.delete(k.name);
+      simulate();
+    } }),
+    k.name, h('span', { class: 'muted' }, pct(k.share)))));
+  if (!ks.length) $('leaveWho').replaceChildren(h('span', { class: 'muted small' }, 'Nobody who knows the live code is still around.'));
+  simulate();
+}
+
+async function simulate() {
+  const n = ++silo.asked;
+  if (!silo.leaving.size) {
+    $('leave').replaceChildren(h('p', { class: 'muted small' }, 'Nobody picked.'));
+    return;
+  }
+  const q = [...silo.leaving].map((a) => `author=${encodeURIComponent(a)}`).join('&');
+  let d;
+  try {
+    d = await api(`/api/silos/leave?${q}`);
+  } catch (err) {
+    $('leave').replaceChildren(h('p', { class: 'muted small' }, String(err)));
+    return;
+  }
+  if (n !== silo.asked) return; // a later pick is on its way
+  const items = [...d.packages, ...d.symbols].sort((x, y) => y.score - x.score).slice(0, 15);
+  $('leave').replaceChildren(
+    h('p', { class: 'summ' }, `${d.leaving.join(', ')} ${d.leaving.length === 1 ? 'holds' : 'hold'} ${pct(d.share)} of what is known of the live code. `,
+      `Orphaned: ${plural(d.orphanedPackages, 'package')}, ${plural(d.orphanedSymbols, 'symbol')}. `,
+      `Resting on one person: ${plural(d.singlePackages, 'package')}, ${plural(d.singleSymbols, 'symbol')}.`),
+    items.length
+      ? h('ol', { class: 'losses' }, items.map((l) => h('li', null,
+        h('div', { class: 'unit' }, h('span', { class: `fate ${l.orphaned ? 'orphaned' : 'single'}` }, l.orphaned ? 'orphaned' : 'one person'), unitLink(l)),
+        h('div', { class: 'reasons' }, l.reasons.join(' · ')))))
+      : h('p', { class: 'muted small' }, 'Nothing would be orphaned or left resting on one person.'));
+}
+
 (async () => {
   try {
     state.status = await waitReady();
     if (!state.status) return;
     const st = state.status;
     $('repo').textContent = `${st.repo} · ${st.commits.toLocaleString()} commits · ${st.live.toLocaleString()} live symbols`;
-    state.data = await api('/api/health');
+    [state.data, state.silos] = await Promise.all([api('/api/health'), api('/api/silos')]);
     if (!state.data.buckets.length) throw new Error('No commits indexed.');
     render();
+    renderSilos();
     $('loading').hidden = true;
     $('app').hidden = false;
   } catch (err) {

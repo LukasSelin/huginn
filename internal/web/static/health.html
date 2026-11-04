@@ -40,7 +40,7 @@
         <h2 class="h2" id="hotTitle">Hotspots</h2>
         <span class="muted small">files edited often and carrying the most complexity · score = semantic edits × cyclomatic complexity</span>
       </div>
-      <div class="scroll"><table id="hotspots"></table></div>
+      <div class="scroll"><table class="data" id="hotspots"></table></div>
     </section>
 
     <section class="panel owners" aria-labelledby="ownTitle">
@@ -48,6 +48,41 @@
       <div id="owners"></div>
     </section>
   </div>
+
+  <section class="silos" aria-labelledby="siloTitle">
+    <div class="titlerow">
+      <h2 class="h2 section" id="siloTitle">Knowledge silos</h2>
+      <span class="muted small">who knows the live code, weighted by how much of each symbol they wrote and how recently · tests left out</span>
+    </div>
+    <p class="lede" id="siloLede"></p>
+
+    <div class="pair">
+      <section class="panel silo-list" aria-labelledby="riskTitle">
+        <div class="titlerow">
+          <h3 class="h2" id="riskTitle">Thinnest knowledge, most depended on</h3>
+          <div class="seg" role="group" aria-label="Show silos of" id="riskSeg"></div>
+        </div>
+        <span class="muted small">score = concentration (what is lost if the top knower leaves) × criticality (fan-in, complexity, edits)</span>
+        <div class="scroll"><table class="data" id="risks"></table></div>
+      </section>
+
+      <section class="panel leave" aria-labelledby="leaveTitle">
+        <h3 class="h2" id="leaveTitle">What if they leave?</h3>
+        <span class="muted small">pick authors to treat as gone now: what would be orphaned or rest on one person, in the order to hand it over</span>
+        <div class="who" id="leaveWho" role="group" aria-label="Authors leaving"></div>
+        <div id="leave" aria-live="polite"></div>
+      </section>
+    </div>
+
+    <section class="panel coupling" aria-labelledby="pairTitle">
+      <div class="titlerow">
+        <h3 class="h2" id="pairTitle">Coupled across knowledge boundaries</h3>
+        <div class="seg" role="group" aria-label="Show pairs of" id="pairSeg"></div>
+      </div>
+      <span class="muted small">pairs that call each other or change together, known by nearly disjoint people · score = coupling × (1 − knowledge overlap)</span>
+      <div class="scroll"><table class="data" id="pairs"></table></div>
+    </section>
+  </section>
 </main>
 <script src="common.js"></script>
 <script src="health.js"></script>

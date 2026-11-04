@@ -7,6 +7,7 @@ import (
 
 	"huginn/internal/ast"
 	"huginn/internal/codemap"
+	"huginn/internal/knowledge"
 	"huginn/internal/lineage"
 )
 
@@ -85,8 +86,8 @@ func TestKnowledgeWeighting(t *testing.T) {
 
 	// G weighs 1 for bob, plus 0.5 for alice's move.
 	got, p = knowers(j, j.Frames[4], "a")
-	total += 1 + touch
-	if !near(got["alice"], (2.25+touch)/total) || !near(got["bob"], (0.9375+1)/total) {
+	total += 1 + knowledge.Touch
+	if !near(got["alice"], (2.25+knowledge.Touch)/total) || !near(got["bob"], (0.9375+1)/total) {
 		t.Errorf("after the move: %v", got)
 	}
 	if p.BusFactor != 2 {
@@ -116,11 +117,11 @@ func TestKnowledgeDecayAndDeparture(t *testing.T) {
 	h := lineage.New()
 	h.Apply(lineage.Revision{SHA: "a", Time: t0, Author: "alice", Changes: []ast.Change{{Flags: ast.Added, New: x}}})
 	// One half-life later, bob's knowledge counts twice alice's.
-	h.Apply(lineage.Revision{SHA: "b", Time: t0.Add(halfLife), Author: "bob", Changes: []ast.Change{{Flags: ast.Added, New: y}}})
+	h.Apply(lineage.Revision{SHA: "b", Time: t0.Add(knowledge.HalfLife), Author: "bob", Changes: []ast.Change{{Flags: ast.Added, New: y}}})
 	// A week later alice has been away more than six months.
-	h.Apply(lineage.Revision{SHA: "c", Time: t0.Add(halfLife + 7*24*time.Hour), Author: "bob", Changes: []ast.Change{{Flags: ast.Added, New: z}}})
+	h.Apply(lineage.Revision{SHA: "c", Time: t0.Add(knowledge.HalfLife + 7*24*time.Hour), Author: "bob", Changes: []ast.Change{{Flags: ast.Added, New: z}}})
 	// She comes back, in another package.
-	h.Apply(lineage.Revision{SHA: "d", Time: t0.Add(halfLife + 14*24*time.Hour), Author: "alice", Changes: []ast.Change{{Flags: ast.Deleted, Old: z}}})
+	h.Apply(lineage.Revision{SHA: "d", Time: t0.Add(knowledge.HalfLife + 14*24*time.Hour), Author: "alice", Changes: []ast.Change{{Flags: ast.Deleted, Old: z}}})
 	j := buildHist(h, Commit)
 
 	got, p := knowers(j, j.Frames[1], "a")

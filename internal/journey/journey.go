@@ -19,6 +19,7 @@ import (
 	"huginn/internal/ast"
 	"huginn/internal/codemap"
 	"huginn/internal/lineage"
+	"huginn/internal/modpath"
 )
 
 // Step is how much history one frame covers.
@@ -143,7 +144,7 @@ type Options struct {
 // in order.
 func Build(h *lineage.History, m *codemap.Map, step Step, opts Options) *Journey {
 	r := newReplay(h, opts.Tests)
-	j := &Journey{Step: step, Authors: r.know.authors}
+	j := &Journey{Step: step, Authors: r.know.Authors()}
 	if h.Revisions() == 0 {
 		return j
 	}
@@ -248,14 +249,14 @@ type replay struct {
 	peak   map[string]int // per directory that ever held a symbol
 	total  int
 	refs   map[[2]string]int // live symbols in [0] referring to [1]
-	module *resolver
+	module *modpath.Resolver
 
 	// peakRefs is the most refs ever held between two directories at the
 	// end of a revision; dirty holds the pairs the current revision moved.
 	peakRefs map[[2]string]int
 	dirty    [][2]string
 
-	know *knowledge
+	know *dirKnowledge
 
 	// names numbers directories for the frames until they are sorted.
 	names []string
@@ -271,7 +272,7 @@ func newReplay(h *lineage.History, tests bool) *replay {
 	r := &replay{
 		tests: tests, byRev: make([][]change, h.Revisions()), syms: map[lineage.ID]*ast.Symbol{},
 		live: map[string]int{}, peak: map[string]int{}, refs: map[[2]string]int{}, num: map[string]int{},
-		peakRefs: map[[2]string]int{}, know: newKnowledge(h),
+		peakRefs: map[[2]string]int{}, know: newDirKnowledge(h),
 	}
 	var all []*ast.Symbol
 	for sym := range h.All() {
@@ -287,7 +288,7 @@ func newReplay(h *lineage.History, tests bool) *replay {
 			}
 		}
 	}
-	r.module = newResolver(all)
+	r.module = modpath.Infer(all)
 	return r
 }
 
@@ -324,7 +325,7 @@ func (r *replay) add(s *ast.Symbol, delta int) {
 	if r.live[dir] > r.peak[dir] {
 		r.peak[dir] = r.live[dir]
 	}
-	for _, to := range r.module.targets(s) {
+	for _, to := range r.module.Targets(s) {
 		if to == dir {
 			continue
 		}
@@ -406,113 +407,6 @@ func (r *replay) deps() []Dep {
 			out = append(out, Dep{From: r.id(k[0]), To: r.id(k[1]), Refs: n})
 		}
 	}
-	return out
-}
-
-// resolver maps the import paths in symbol references to repository
-// directories.
-//
-// The history does not record go.mod, so the module path is inferred: it is
-// the prefix that turns the most directories into import paths that the
-// code actually imports. A repository that renamed its module, as
-// github.com/dotcloud/docker became github.com/docker/docker and then
-// github.com/moby/moby/v2, imports itself under each name in turn, so more
-// prefixes follow: each the one that resolves the most imports the earlier
-// ones left, while it resolves two or more and at least a tenth as many as
-// the first. That covers the main module of a repository; imports of nested
-// modules are resolved only if they are as common.
-type resolver struct {
-	modules []string // longest first
-	dirs    map[string]bool
-	cache   map[string]string
-}
-
-func newResolver(syms []*ast.Symbol) *resolver {
-	r := &resolver{dirs: map[string]bool{}, cache: map[string]string{}}
-	seen := map[string]bool{}
-	var imports []string
-	for _, s := range syms {
-		r.dirs[path.Dir(s.Path)] = true
-		for _, ref := range s.Refs {
-			if ref.Kind == ast.RefImport && !seen[ref.Pkg] {
-				seen[ref.Pkg] = true
-				imports = append(imports, ref.Pkg)
-			}
-		}
-	}
-	slices.Sort(imports)
-	first := 0
-	for len(imports) > 0 {
-		// Every import ending in a directory other than the root makes the
-		// rest of it a candidate.
-		matches := map[string]int{}
-		for _, imp := range imports {
-			for i := range len(imp) {
-				if imp[i] == '/' && r.dirs[imp[i+1:]] && imp[i+1:] != "." {
-					matches[imp[:i]]++
-				}
-			}
-		}
-		mod, best := "", 0
-		for m, n := range matches {
-			if n > best || n == best && m < mod {
-				mod, best = m, n
-			}
-		}
-		if best == 0 || first > 0 && (best < 2 || best*10 < first) {
-			break
-		}
-		first = max(first, best)
-		r.modules = append(r.modules, mod)
-		imports = slices.DeleteFunc(imports, func(imp string) bool { return r.under(mod, imp) != "" })
-	}
-	slices.SortStableFunc(r.modules, func(a, b string) int { return cmp.Compare(len(b), len(a)) })
-	return r
-}
-
-// under returns the directory of the package imported as imp if it is in
-// module mod, or "".
-func (r *resolver) under(mod, imp string) string {
-	d := ""
-	switch {
-	case imp == mod:
-		d = "."
-	case strings.HasPrefix(imp, mod+"/"):
-		d = imp[len(mod)+1:]
-	}
-	if !r.dirs[d] {
-		return ""
-	}
-	return d
-}
-
-// dir returns the directory of the package imported as imp, or "".
-func (r *resolver) dir(imp string) string {
-	if d, ok := r.cache[imp]; ok {
-		return d
-	}
-	d := ""
-	for _, mod := range r.modules {
-		if d = r.under(mod, imp); d != "" {
-			break
-		}
-	}
-	r.cache[imp] = d
-	return d
-}
-
-// targets returns the directories s refers to, each once, sorted.
-func (r *resolver) targets(s *ast.Symbol) []string {
-	var out []string
-	for _, ref := range s.Refs {
-		if ref.Kind != ast.RefImport {
-			continue
-		}
-		if d := r.dir(ref.Pkg); d != "" && !slices.Contains(out, d) {
-			out = append(out, d)
-		}
-	}
-	slices.Sort(out)
 	return out
 }
 

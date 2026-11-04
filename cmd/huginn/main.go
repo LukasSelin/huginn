@@ -23,6 +23,12 @@
 //
 // prints the semantic diff of one commit: its changed symbols, their
 // callers, the blast radius and the files that changed only in formatting.
+//
+//	huginn silos [-C dir] [-branch rev] [-no-cache] [-n count] [-leaves name,...]
+//
+// ranks the packages and symbols few people know that much depends on, and
+// the pairs coupled across who knows what; with -leaves, what the named
+// authors would leave orphaned or resting on one person.
 package main
 
 import (
@@ -46,7 +52,8 @@ const usage = `usage:
   huginn symbols [-C dir] [-branch rev] [-max-count n] [-tests] [-no-cache] name
   huginn serve [-C dir] [-branch rev] [-tests] [-no-cache] [-addr host:port]
   huginn story [-C dir] [-branch rev] [-tests] [-no-cache] [-moments]
-  huginn semdiff [-C dir] [-include-generated] [-callers n] rev`
+  huginn semdiff [-C dir] [-include-generated] [-callers n] rev
+  huginn silos [-C dir] [-branch rev] [-no-cache] [-n count] [-leaves name,...]`
 
 func main() {
 	cmds := map[string]func(context.Context, io.Writer, io.Writer, []string) error{
@@ -54,6 +61,7 @@ func main() {
 		"serve":   serve,
 		"semdiff": semanticDiff,
 		"story":   tell,
+		"silos":   listSilos,
 	}
 	if len(os.Args) < 2 || cmds[os.Args[1]] == nil {
 		fmt.Fprintln(os.Stderr, usage)
