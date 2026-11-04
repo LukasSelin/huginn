@@ -2137,14 +2137,10 @@
     sel.disabled = authors.length === 0;
   }
 
-  // renderKnowLegend names who knows the code at the playhead: each
-  // author's share of the live packages, weighed by their symbols.
-  function renderKnowLegend(f) {
-    const know = state.colorBy === 'knowledge';
-    $('actLegend').hidden = know;
-    const el = $('knowLegend');
-    el.hidden = !know;
-    if (!know) return;
+  // knowShares is who knows the code in frame f: the six authors with the
+  // largest share of the live packages, weighed by their symbols, as
+  // { name, share, gone }.
+  function knowShares(f) {
     const by = new Map();
     let total = 0;
     for (const p of f.pkgs) {
@@ -2157,12 +2153,21 @@
         by.set(a, k);
       }
     }
-    const top = [...by.entries()].sort((x, y) => y[1].share - x[1].share || x[0] - y[0]).slice(0, 6);
-    el.replaceChildren(...top.map(([a, k]) => {
-      const name = state.data.authors[a];
-      return h('span', { class: `kn${k.gone ? ' gone' : ''}`, title: `${name}${k.gone ? ', no commits for six months' : ''}: ${pct(k.share / total)} of what is known` },
-        h('i', { style: `background:${k.gone ? GONE : authorColor(name)}` }), `${name} ${pct(k.share / total)}`);
-    }), h('span', { class: 'kn' }, h('i', { style: `background:${GONE}` }), 'departed'));
+    return [...by.entries()].sort((x, y) => y[1].share - x[1].share || x[0] - y[0]).slice(0, 6)
+      .map(([a, k]) => ({ name: state.data.authors[a], share: k.share / total, gone: k.gone }));
+  }
+
+  // renderKnowLegend names who knows the code at the playhead.
+  function renderKnowLegend(f) {
+    const know = state.colorBy === 'knowledge';
+    $('actLegend').hidden = know;
+    const el = $('knowLegend');
+    el.hidden = !know;
+    if (!know) return;
+    el.replaceChildren(...knowShares(f).map(({ name, share, gone }) =>
+      h('span', { class: `kn${gone ? ' gone' : ''}`, title: `${name}${gone ? ', no commits for six months' : ''}: ${pct(share)} of what is known` },
+        h('i', { style: `background:${gone ? GONE : authorColor(name)}` }), `${name} ${pct(share)}`)),
+    h('span', { class: 'kn' }, h('i', { style: `background:${GONE}` }), 'departed'));
   }
 
   function setColorBy(v) {
@@ -2337,6 +2342,7 @@
       nodes, edges, clusters,
       date: $('date').textContent, chap: $('chapLabel').textContent, caption: $('caption').textContent,
       counts: [['Commits', f.total], ['Live symbols', f.live], ['Packages', f.pkgs.filter((p) => p.live > 0).length]],
+      know: know ? knowShares(f) : null,
     };
   }
 
@@ -2515,6 +2521,63 @@
     ctx.font = `12px ${MONO}`;
     ctx.fillStyle = '#9AA4B2';
     ctx.fillText(`huginn · ${state.status.repo}`, W - 20, H - 24);
+    paintLegend(ctx, b.know, W - 20, H - 48, Math.min(420, 0.5 * W));
+  }
+
+  // paintLegend says what the colours mean, right-aligned at x above y, in
+  // rows at most w wide: in knowledge mode who each ring's colours are and
+  // their share of what is known; otherwise the activity scale.
+  function paintLegend(ctx, know, x, y, w) {
+    const dot = (cx, cy, c) => { ctx.beginPath(); ctx.arc(cx, cy, 5, 0, 2 * Math.PI); ctx.fillStyle = c; ctx.fill(); };
+    ctx.globalAlpha = 1;
+    ctx.textBaseline = 'middle';
+    ctx.textAlign = 'left';
+    if (!know) {
+      ctx.font = `11px ${SANS}`;
+      ctx.fillStyle = '#9AA4B2';
+      const bw = ctx.measureText('busy').width, sw = ACT.length * 18 - 4;
+      let at = x - bw;
+      ctx.fillText('busy', at, y);
+      at -= 6 + sw;
+      ACT.forEach((c, i) => { ctx.fillStyle = c; ctx.fillRect(at + 18 * i, y - 5, 14, 10); });
+      ctx.fillStyle = '#9AA4B2';
+      ctx.fillText('quiet', at - 6 - ctx.measureText('quiet').width, y);
+      return;
+    }
+    const items = [...know.map((k) => ({ text: `${k.name} ${pct(k.share)}`, color: k.gone ? GONE : authorColor(k.name), gone: k.gone })),
+      { text: 'departed', color: GONE }];
+    ctx.font = `11px ${SANS}`;
+    // Laid out in rows from the bottom up, the last row holding the end.
+    const rows = [[]];
+    let used = 0;
+    for (let i = items.length - 1; i >= 0; i--) {
+      const it = items[i];
+      it.w = 15 + ctx.measureText(it.text).width;
+      if (rows[0].length && used + 10 + it.w > w) {
+        rows.unshift([]);
+        used = 0;
+      }
+      rows[0].unshift(it);
+      used += (rows[0].length > 1 ? 10 : 0) + it.w;
+    }
+    for (let r = rows.length - 1, ry = y; r >= 0; r--, ry -= 18) {
+      let at = x;
+      for (let i = rows[r].length - 1; i >= 0; i--) {
+        const it = rows[r][i];
+        at -= it.w;
+        dot(at + 5, ry, it.color);
+        ctx.fillStyle = it.gone ? '#6E7785' : '#C9CFD8';
+        ctx.fillText(it.text, at + 15, ry);
+        if (it.gone) ctx.fillRect(at + 15, ry, it.w - 15, 1);
+        at -= 10;
+      }
+    }
+    ctx.font = `600 10px ${SANS}`;
+    if ('letterSpacing' in ctx) ctx.letterSpacing = '0.6px';
+    ctx.fillStyle = '#9AA4B2';
+    ctx.textAlign = 'right';
+    ctx.fillText('RINGS · WHO KNOWS THE CODE', x, y - 18 * rows.length);
+    if ('letterSpacing' in ctx) ctx.letterSpacing = '0px';
   }
 
   // fitText cuts text short with an ellipsis to fit width w.
