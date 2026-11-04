@@ -6,7 +6,8 @@
 // watch its symbols, and one symbol followed through renames and moves.
 // common.js provides KINDS, h, $, mark, api, plural, waitReady and fail;
 // vendor/d3.min.js provides d3, for zooming, tweens, edges and packing;
-// gif.js provides GifWriter, for saving the playback as a GIF.
+// video.js provides VideoWriter, for saving the playback as a video, and
+// gif.js GifWriter, for a GIF where the browser cannot encode video.
 (() => {
   const ACT = ['#2A2418', '#4A3A1E', '#7A5A26', '#B07F33', '#F0A64A'];
   const BASE_MS = 1100; // per frame at 1×
@@ -88,7 +89,7 @@
     picked: null, // the package clicked once: the map narrows to it and its neighbours
     links: null, // the package in the breakout: { dir, rev, v, nodes, adj, wires, lit }
     tip: null, // the node the hover card describes: { node } on the map or { sym } in a package
-    exporting: null, // the GIF export under way: { cancel }
+    exporting: null, // the export under way: { cancel, video }
   };
 
   const fmtShort = (t) => new Date(t * 1000).toLocaleDateString(undefined, { month: 'short', day: 'numeric', timeZone: 'UTC' });
@@ -2279,10 +2280,13 @@
 
   // ---------- Export ----------
 
-  // The whole history at the current step can be saved as a GIF. Each frame
-  // is rendered on the stage as playback would, read back off it and drawn
-  // onto a canvas with its date, chapter, counters and caption, tweened into
-  // the next as the stage tweens; in story mode it holds on key moments.
+  // The whole history at the current step can be saved as a video, or as a
+  // GIF where the browser cannot encode video. Each frame is rendered on the
+  // stage as playback would, read back off it and drawn onto a canvas with its
+  // date, chapter, counters and caption, tweened into the next as the stage
+  // tweens; in story mode it holds on key moments.
+  const VIDEO_W = 1920; // the widest a video is drawn, in pixels
+  const VIDEO_FPS = 60;
   const GIF_W = 960; // the widest a GIF is drawn, in pixels
   const GIF_TWEENS = 5; // drawings per frame of a short history
   const GIF_LONG = 200; // frames past which each is drawn once, untweened
@@ -2538,9 +2542,10 @@
     return lines.map((l) => fitText(ctx, l, w));
   }
 
-  // exportGif plays the history through at the current step, colouring, zoom
-  // and speed, and saves it as a GIF. A second press cancels it.
-  async function exportGif() {
+  // exportVideo plays the history through at the current step, colouring,
+  // zoom and speed, and saves it as a video (or a GIF). A second press
+  // cancels it.
+  async function exportVideo() {
     if (state.exporting) {
       state.exporting.cancel = true;
       return;
@@ -2558,28 +2563,42 @@
     const job = { cancel: false };
     state.exporting = job;
     const from = state.frame;
-    const label = $('exportLabel'), btn = $('exportGif');
+    const label = $('exportLabel'), btn = $('exportVideo');
     btn.setAttribute('aria-pressed', 'true');
     // Nothing else moves the stage while it is being read.
-    const still = [$('stage'), ...document.querySelectorAll('.playbar .controls > :not(#exportGif), .playbar .rows, aside.story')];
+    const still = [$('stage'), ...document.querySelectorAll('.playbar .controls > :not(#exportVideo), .playbar .rows, aside.story')];
     for (const el of still) el.inert = true;
     state.hover = state.focused = null;
     try {
       await document.fonts.ready;
       await Promise.all([`600 11px ${MONO}`, `600 34px ${SANS}`, `13px ${SANS}`].map((f) => document.fonts.load(f).catch(() => {})));
       const st = $('stage');
-      const s = Math.min(1, GIF_W / st.clientWidth);
+      // Video is drawn sharper than the screen, to 1080p and past; codecs
+      // want even sizes.
+      const even = (v) => 2 * Math.round(v / 2);
       const canvas = document.createElement('canvas');
-      canvas.width = Math.round(st.clientWidth * s);
-      canvas.height = Math.round(st.clientHeight * s);
-      const ctx = canvas.getContext('2d', { willReadFrequently: true });
-      const gif = new GifWriter(canvas.width, canvas.height);
-      const draw = (a, b, t, ms) => {
+      let s = Math.min(2, VIDEO_W / st.clientWidth);
+      canvas.width = even(st.clientWidth * s);
+      canvas.height = even(st.clientHeight * s);
+      const video = await VideoWriter.open(canvas, VIDEO_FPS);
+      job.video = video;
+      let gif = null;
+      if (!video) {
+        s = Math.min(1, GIF_W / st.clientWidth);
+        canvas.width = Math.round(st.clientWidth * s);
+        canvas.height = Math.round(st.clientHeight * s);
+        gif = new GifWriter(canvas.width, canvas.height);
+      }
+      const ctx = canvas.getContext('2d', { willReadFrequently: !video });
+      const draw = async (a, b, t, ms) => {
         paintGif(ctx, s, a, b, t);
-        gif.add(ctx.getImageData(0, 0, canvas.width, canvas.height).data, ms);
+        if (video) await video.add(ms);
+        else gif.add(ctx.getImageData(0, 0, canvas.width, canvas.height).data, ms);
       };
-      const tweens = fs.length > GIF_LONG ? 1 : GIF_TWEENS;
       const frameMs = BASE_MS / state.speed, tweenTime = 600 / state.speed;
+      // Video tweens at its frame rate; a GIF in a few steps, or none on a
+      // long history.
+      const tweens = video ? Math.max(1, Math.round((tweenTime * VIDEO_FPS) / 1000)) : fs.length > GIF_LONG ? 1 : GIF_TWEENS;
       state.instant = true;
       let prev = null;
       for (let i = 0; i < fs.length; i++) {
@@ -2589,10 +2608,10 @@
         const snap = snapStage(fs[i]);
         let hold = i === fs.length - 1 ? GIF_END_MS : frameMs;
         if (state.story && pausesIn(i).length) hold += PAUSE_MS / state.speed;
-        if (!prev || tweens === 1) draw(prev || snap, snap, 1, hold);
+        if (!prev || tweens === 1) await draw(prev || snap, snap, 1, hold);
         else {
-          for (let k = 1; k < tweens; k++) draw(prev, snap, k / tweens, tweenTime / tweens);
-          draw(prev, snap, 1, hold - ((tweens - 1) * tweenTime) / tweens);
+          for (let k = 1; k < tweens; k++) await draw(prev, snap, k / tweens, tweenTime / tweens);
+          await draw(prev, snap, 1, hold - ((tweens - 1) * tweenTime) / tweens);
         }
         prev = snap;
         label.textContent = `Exporting ${Math.round((100 * (i + 1)) / fs.length)}% · cancel`;
@@ -2602,17 +2621,18 @@
       if (!job.cancel) {
         label.textContent = 'Encoding…';
         await new Promise((r) => setTimeout(r));
-        const url = URL.createObjectURL(gif.finish());
-        const name = `${state.status.repo.split(/[\\/]/).pop() || 'huginn'}-journey-${state.step}.gif`;
+        const url = URL.createObjectURL(video ? await video.finish() : gif.finish());
+        const name = `${state.status.repo.split(/[\\/]/).pop() || 'huginn'}-journey-${state.step}.${video ? 'webm' : 'gif'}`;
         h('a', { href: url, download: name }).click();
         setTimeout(() => URL.revokeObjectURL(url), 60000);
       }
     } finally {
+      if (job.cancel && job.video) job.video.cancel();
       state.instant = false;
       state.exporting = null;
       for (const el of still) el.inert = false;
       btn.setAttribute('aria-pressed', 'false');
-      label.textContent = 'Export GIF';
+      label.textContent = 'Export video';
       state.frame = from;
       render(false);
     }
@@ -2692,7 +2712,7 @@
     $('lines').addEventListener('click', (e) => { const b = e.target.closest('button'); if (b) setLines(b.dataset.v); });
     $('who').addEventListener('change', (e) => setWho(e.target.value));
     $('narrate').addEventListener('click', () => setNarrate(!state.narrate));
-    $('exportGif').addEventListener('click', () => exportGif().catch(fail));
+    $('exportVideo').addEventListener('click', () => exportVideo().catch(fail));
     $('back').addEventListener('click', undrill);
     // A click on the map around the packages brings the rest of them back.
     $('stage').addEventListener('click', (e) => {
