@@ -121,6 +121,7 @@ func (s *Server) Handler() http.Handler {
 	mux.Handle("GET /journey", s.file("journey.html"))
 	mux.Handle("GET /map", s.file("index.html"))
 	mux.Handle("GET /health", s.file("health.html"))
+	mux.Handle("GET /layers", s.file("layers.html"))
 	mux.HandleFunc("GET /api/status", s.status)
 	s.indexRoutes(mux, s.index.Load)
 	mux.HandleFunc("GET /api/commit/{rev...}", s.commit)
@@ -142,6 +143,7 @@ func (s *Server) indexRoutes(mux *http.ServeMux, load func() *index) {
 	mux.HandleFunc("GET /api/journey/package/{dir...}", ready(prebuilt(s.journeyPackage)))
 	mux.HandleFunc("GET /api/journey/links/{dir...}", ready(s.journeyLinks))
 	mux.HandleFunc("GET /api/journey/symbols", ready(s.journeySymbols))
+	mux.HandleFunc("GET /api/layers", ready(prebuilt(s.layersAPI)))
 }
 
 // file serves the static file name, or the one the request names when name

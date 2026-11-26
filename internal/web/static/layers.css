@@ -1,0 +1,82 @@
+/* The layers page; app.css holds the shared base. The controls look like the journey's. */
+
+.center { gap: 14px; }
+.detail { max-width: 420px; }
+
+/* Stage */
+.stage { position: relative; height: max(380px, calc(100vh - 250px)); overflow: hidden; padding: 0; cursor: grab; touch-action: none; }
+.stage.dragging { cursor: grabbing; }
+.stage.over { cursor: pointer; }
+#canvas { position: absolute; inset: 0; width: 100%; height: 100%; display: block; }
+
+.ov { position: absolute; margin: 0; pointer-events: none; }
+.ov-tl { left: 20px; top: 16px; }
+.date { font-size: 30px; font-weight: 600; letter-spacing: -.01em; }
+.sub { color: var(--text-2); font-size: 13px; margin-top: 2px; }
+.ov-tr { right: 20px; top: 18px; display: flex; gap: 22px; text-align: right; }
+.counters dt { font-size: 11px; color: var(--muted); text-transform: uppercase; letter-spacing: .06em; }
+.counters dd { margin: 0; font: 600 20px/1.2 'JetBrains Mono', monospace; }
+.ov-views { right: 20px; bottom: 16px; display: flex; align-items: center; gap: 8px; pointer-events: auto; cursor: auto; }
+.ov-bl { left: 20px; bottom: 16px; max-width: min(520px, 60%); display: flex; flex-direction: column; gap: 8px; }
+.caption { margin: 0; padding: 6px 10px; border-radius: 8px; background: rgba(14, 17, 22, .82); border: 1px solid var(--line-strong); font-size: 12px; color: var(--text-2); }
+.caption:empty { display: none; }
+.legend .sw { display: inline-block; width: 14px; height: 3px; border-radius: 2px; }
+.sw.out { background: var(--accent); } .sw.in { background: var(--moved); } .sw.cyc { background: var(--deleted); }
+.empty.ov { inset: 0; display: grid; place-items: center; }
+
+.icon {
+  display: inline-flex; align-items: center; justify-content: center; width: 34px; height: 34px;
+  border: 1px solid var(--line-strong); border-radius: 50%; background: var(--raised); cursor: pointer; color: var(--text-2);
+}
+.icon:hover { color: var(--text); border-color: var(--muted); }
+.icon.play { width: 42px; height: 42px; background: var(--accent); border-color: var(--accent); color: #1A1408; }
+.icon.play:hover { background: #FFC27A; }
+.icon.zb { width: 30px; height: 30px; border-radius: 8px; }
+.seg { display: flex; gap: 2px; padding: 3px; background: var(--raised); border-radius: 8px; }
+.seg button { border: 0; background: none; padding: 4px 10px; border-radius: 5px; color: var(--muted); cursor: pointer; font-size: 12px; }
+.seg button[aria-pressed="true"] { background: var(--line-strong); color: var(--text); }
+.icon:focus-visible, .seg button:focus-visible, .layers button:focus-visible, .pick button:focus-visible, .scrub:focus-visible {
+  outline: 2px solid var(--text); outline-offset: 2px;
+}
+
+/* The hover card on a package */
+.tip {
+  z-index: 7; width: max-content; max-width: min(300px, calc(100% - 16px)); padding: 10px 12px; border-radius: 8px;
+  background: rgba(18, 22, 28, .97); border: 1px solid var(--line-strong); box-shadow: 0 8px 24px rgba(0, 0, 0, .45);
+  display: flex; flex-direction: column; gap: 6px; font-size: 12px;
+}
+.tip-name { font-size: 13px; font-weight: 600; overflow-wrap: anywhere; }
+.tip-rows { display: grid; grid-template-columns: auto 1fr; gap: 3px 12px; color: var(--text-2); }
+.tip-rows dt { color: var(--muted); }
+.tip-rows dd { margin: 0; }
+.tip-hint { color: var(--muted); font-size: 11px; font-style: italic; }
+
+/* Playback */
+.playbar { padding: 12px 16px; }
+.controls { display: flex; flex-wrap: wrap; align-items: center; gap: 12px 16px; }
+.transport { display: flex; align-items: center; gap: 6px; }
+.scrub { flex: 1 1 200px; min-width: 120px; accent-color: var(--accent); }
+
+/* The picked package and the list of layers */
+.pick { display: flex; flex-direction: column; gap: 10px; padding-bottom: 16px; border-bottom: 1px solid var(--line); }
+.pick-head { display: flex; align-items: flex-start; gap: 8px; }
+.pick-head .sel-name { flex: 1; }
+.pick .close { border: 0; background: none; color: var(--muted); font-size: 18px; line-height: 1; cursor: pointer; padding: 0 2px; }
+.pick .close:hover { color: var(--text); }
+.pick h3 { margin: 4px 0 0; }
+.refs { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 2px; }
+.refs button, .layers button {
+  display: grid; grid-template-columns: 1fr auto; gap: 10px; width: 100%; padding: 4px 8px; border: 0; border-radius: 5px;
+  background: none; color: var(--text-2); text-align: left; cursor: pointer; font: 12px/1.4 'JetBrains Mono', monospace;
+}
+.refs button span, .layers button span { overflow-wrap: anywhere; }
+.refs button:hover, .layers button:hover, .layers button.lit { background: var(--raised); color: var(--text); }
+.refs .n, .layers .n { color: var(--muted); }
+.refs.out button span:first-child::before { content: "→ "; color: var(--accent); }
+.refs.in button span:first-child::before { content: "← "; color: var(--moved); }
+.cyc-note { margin: 0; padding: 6px 10px; border-left: 2px solid var(--deleted); color: var(--text-2); font-size: 12px; }
+.layers { display: flex; flex-direction: column; gap: 12px; margin-top: 8px; }
+.layer h3 { margin: 0 0 4px; display: flex; justify-content: space-between; }
+.layer ul { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 1px; }
+.layers button[aria-pressed="true"] { background: var(--accent-bg); color: var(--accent); }
+.layers button.cyc span:first-child::after { content: " ●"; color: var(--deleted); }

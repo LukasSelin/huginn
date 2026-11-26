@@ -197,14 +197,11 @@ func (s *Server) journeyAPI(ix *index, w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	j := s.journey(ix, step)
-	out := journeyJSON{Step: step.String(), Packages: []packageJSON{}, Groups: []groupJSON{}, Authors: nonNil(j.Authors), Frames: []frameJSON{}, Chapters: []chapterJSON{}, Moments: momentsJSON(st.Moments), Releases: momentsJSON(st.Releases)}
+	out := journeyJSON{Step: step.String(), Packages: packagesJSON(j.Packages), Groups: []groupJSON{}, Authors: nonNil(j.Authors), Frames: []frameJSON{}, Chapters: []chapterJSON{}, Moments: momentsJSON(st.Moments), Releases: momentsJSON(st.Releases)}
 	out.RevTimes = make([]int64, ix.h.Revisions())
 	for i := range out.RevTimes {
 		_, t := ix.h.RevisionAt(i)
 		out.RevTimes[i] = t.Unix()
-	}
-	for _, p := range j.Packages {
-		out.Packages = append(out.Packages, packageJSON{Path: p.Path, Peak: p.Peak, X: p.X, Y: p.Y, R: p.R, Group: p.Group})
 	}
 	for _, g := range j.Groups {
 		out.Groups = append(out.Groups, groupJSON{Path: g.Path, Parent: g.Parent, X: g.X, Y: g.Y, R: g.R})
@@ -248,6 +245,15 @@ func (s *Server) journeyAPI(ix *index, w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	writeJSON(w, out)
+}
+
+// packagesJSON lists packages with their place on the map, never nil.
+func packagesJSON(ps []journey.Package) []packageJSON {
+	out := make([]packageJSON, 0, len(ps))
+	for _, p := range ps {
+		out = append(out, packageJSON{Path: p.Path, Peak: p.Peak, X: p.X, Y: p.Y, R: p.R, Group: p.Group})
+	}
+	return out
 }
 
 // round3 rounds a share to three decimals, which is all a ring can show,

@@ -167,7 +167,7 @@ var steps = []journey.Step{journey.Commit, journey.Week, journey.Month}
 func (s *Server) pageURLs(ix *index) []string {
 	urls := []string{"/api/health", "/api/silos"}
 	for _, st := range steps {
-		urls = append(urls, "/api/journey?step="+st.String())
+		urls = append(urls, "/api/journey?step="+st.String(), "/api/layers?step="+st.String())
 	}
 	tests := []bool{false}
 	if s.opts.Tests {

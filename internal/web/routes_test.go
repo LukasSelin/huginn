@@ -71,7 +71,7 @@ func TestBeforeIndex(t *testing.T) {
 	if st.Ready || st.Repo != "demo" {
 		t.Errorf("status = %+v, want not ready for demo", st)
 	}
-	for _, url := range []string{"/api/symbol/1", "/api/health", "/api/silos", "/api/journey"} {
+	for _, url := range []string{"/api/symbol/1", "/api/health", "/api/silos", "/api/journey", "/api/layers"} {
 		getJSON(t, h, url, http.StatusServiceUnavailable, nil)
 	}
 }
@@ -226,6 +226,32 @@ func TestAPI(t *testing.T) {
 		getJSON(t, h, "/api/journey?step=day", http.StatusBadRequest, nil)
 	})
 
+	t.Run("layers", func(t *testing.T) {
+		var l layersJSON
+		getJSON(t, h, "/api/layers?step=commit", http.StatusOK, &l)
+		if l.Step != "commit" || len(l.Frames) != 3 || len(l.Packages) != 2 || l.Packages[0].Path != "." || l.Packages[1].Path != "geo" {
+			t.Fatalf("layers = %+v", l)
+		}
+		// main calls geo.Hello without importing geo, so nothing resolves
+		// between them and both sit on the bottom layer: [package, live
+		// symbols, layer]. journey.Layers is tested with references.
+		last := l.Frames[2]
+		if want := [][3]int{{0, 1, 0}, {1, 3, 0}}; !slices.Equal(last.Pkgs, want) {
+			t.Errorf("packages %v, want %v", last.Pkgs, want)
+		}
+		if last.Deps == nil || len(last.Deps) != 0 {
+			t.Errorf("deps %v, want none", last.Deps)
+		}
+		if last.SHA != hashes[2] || last.Live != 4 || last.Total != 3 {
+			t.Errorf("last frame = %+v", last)
+		}
+		getJSON(t, h, "/api/layers", http.StatusOK, &l)
+		if l.Step != "week" || len(l.Frames) == 0 {
+			t.Errorf("default step %q, %d frames", l.Step, len(l.Frames))
+		}
+		getJSON(t, h, "/api/layers?step=day", http.StatusBadRequest, nil)
+	})
+
 	t.Run("journey package", func(t *testing.T) {
 		var v symViewJSON
 		getJSON(t, h, "/api/journey/package/geo?step=commit", http.StatusOK, &v)
@@ -314,6 +340,7 @@ func TestAPI(t *testing.T) {
 			"/journey": "<title>huginn · journey",
 			"/map":     "<title>huginn · code map",
 			"/health":  "<title>huginn · health",
+			"/layers":  "<title>huginn · layers",
 		}
 		for page, title := range pages {
 			rec := httptest.NewRecorder()
