@@ -371,9 +371,11 @@ func newChange(c ast.Change, pkgOf func(path, pkg string) string) Change {
 	return rc
 }
 
-// isAPI reports whether a symbol can be used from other packages.
+// isAPI reports whether a symbol can be used from other packages. Nothing
+// declared in a _test.go file can: test files, external test packages
+// included, are never imported.
 func isAPI(s *ast.Symbol) bool {
-	if !s.Exported || s.Package == "main" || strings.HasSuffix(s.Package, "_test") {
+	if !s.Exported || s.Package == "main" || strings.HasSuffix(s.Path, "_test.go") {
 		return false
 	}
 	return s.Recv == "" || goast.IsExported(s.Recv)

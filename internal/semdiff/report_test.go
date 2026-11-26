@@ -317,6 +317,62 @@ func TestAddedAndDeleted(t *testing.T) {
 	}
 }
 
+// Exported names in _test.go files cannot be imported by other packages, so
+// deleting, renaming, moving or re-signing them never breaks a caller.
+func TestTestFilesAreNotAPI(t *testing.T) {
+	const moved = `func TestResolve(t *testing.T) {
+	if Resolve("a") != "a" {
+		t.Fatal("resolve")
+	}
+}
+`
+	newMoved := parse(t, "mod/mod_test.go", "package mod\n\nimport \"testing\"\n\n"+moved)
+	newHelpers := parse(t, "a/helpers_test.go", `package a
+
+type Fixture struct{ Size int }
+
+func Helper(s string, n int) int { return len(s) + n }
+
+func RenamedHelper() int { return 2 }
+`)
+	newA := parse(t, "a/a.go", "package a\n\nfunc Keep() {}\n")
+	r := Build(Input{
+		Files: []FileDiff{
+			// Moved to another package, as huginn's own PR #42 did.
+			{Old: parse(t, "journey/journey_test.go", "package journey\n\nimport \"testing\"\n\n"+moved)},
+			{New: newMoved},
+			{Old: parse(t, "a/helpers_test.go", `package a
+
+type Fixture struct {
+	Name string
+	Size int
+}
+
+func Helper(s string) int { return len(s) }
+
+func OldHelper() int { return 2 }
+
+func TestGone(t *testing.T) {}
+`), New: newHelpers},
+			{Old: parse(t, "a/a.go", "package a\n\nfunc Keep() {}\n\nfunc Legacy() int { return 1 }\n"), New: newA},
+		},
+		Tree:  []*ast.File{newMoved, newHelpers, newA},
+		GoMod: goMod,
+	})
+
+	for _, name := range []string{"mod.TestResolve", "a.Fixture", "a.Helper", "a.RenamedHelper", "a.TestGone"} {
+		if c := change(t, r, name); c.APIChange {
+			t.Errorf("%s (%v) is an API change", name, c.Kinds)
+		}
+	}
+	if c := change(t, r, "a.Legacy"); !c.APIChange {
+		t.Errorf("deleting a.Legacy is not an API change")
+	}
+	if fmt.Sprint(r.Blast.APIChanges) != "[a.Legacy]" {
+		t.Errorf("Blast.APIChanges = %v", r.Blast.APIChanges)
+	}
+}
+
 func TestImportPath(t *testing.T) {
 	mods := newModules(map[string][]byte{
 		"go.mod":       []byte("module example.com/app\n"),
