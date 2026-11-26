@@ -1,0 +1,107 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>huginn · layers</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600&amp;family=JetBrains+Mono:wght@400;600&amp;display=swap" rel="stylesheet">
+<link rel="stylesheet" href="app.css">
+<link rel="stylesheet" href="layers.css">
+</head>
+<body>
+<header class="top">
+  <div class="brand">
+    <svg width="26" height="26" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 12c3-5 6-7 9-7s6 2 9 7c-3 5-6 7-9 7s-6-2-9-7z"></path><circle cx="12" cy="12" r="3"></circle></svg>
+    <span class="mono">huginn</span>
+    <span class="repo" id="repo"></span>
+  </div>
+  <nav aria-label="Views" class="views">
+    <a href="/">Journey</a>
+    <a href="/layers" aria-current="page">Layers</a>
+    <a href="/map">Map</a>
+    <a href="/health">Health</a>
+  </nav>
+</header>
+
+<div id="loading" class="loading" role="status">Starting…</div>
+
+<div id="app" class="cols" hidden>
+  <main class="center">
+    <div class="titlerow">
+      <h1>Layers</h1>
+      <span class="muted">Every package stacked above the packages it refers to</span>
+    </div>
+
+    <section class="panel stage" id="stage" aria-label="Packages in layers; drag to turn, scroll to zoom">
+      <canvas id="canvas" aria-hidden="true"></canvas>
+      <div class="ov ov-tl">
+        <div class="date" id="date"></div>
+        <div class="sub" id="frameNote"></div>
+      </div>
+      <dl class="ov ov-tr counters">
+        <div><dt>Layers</dt><dd id="cLayers">0</dd></div>
+        <div><dt>Packages</dt><dd id="cPkgs">0</dd></div>
+        <div><dt>In cycles</dt><dd id="cCycles">0</dd></div>
+      </dl>
+      <div class="ov ov-views">
+        <div class="seg" role="group" aria-label="Look from" id="views">
+          <button type="button" data-v="side" title="Look from the side: the layers edge on">Side</button>
+          <button type="button" data-v="angle" title="Look from above at an angle">Angle</button>
+          <button type="button" data-v="top" title="Look from above: the journey map">Top</button>
+        </div>
+        <button type="button" class="icon zb" id="zoomIn" aria-label="Zoom in" title="Zoom in (+, or scroll)">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" aria-hidden="true"><path d="M12 5v14M5 12h14"></path></svg>
+        </button>
+        <button type="button" class="icon zb" id="zoomOut" aria-label="Zoom out" title="Zoom out (−)">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" aria-hidden="true"><path d="M5 12h14"></path></svg>
+        </button>
+      </div>
+      <div class="ov tip" id="tip" role="tooltip" hidden></div>
+      <div class="ov ov-bl">
+        <p class="caption" id="caption"></p>
+        <div class="legend" aria-label="Line colours">
+          <span><i class="sw out"></i>refers to</span>
+          <span><i class="sw in"></i>referred to by</span>
+          <span><i class="sw cyc"></i>in a cycle</span>
+        </div>
+      </div>
+      <p class="empty ov" id="empty" hidden>No Go packages in this history yet.</p>
+    </section>
+
+    <section class="panel playbar" aria-label="Playback">
+      <div class="controls">
+        <div class="transport">
+          <button type="button" class="icon" id="prev" aria-label="Previous frame" title="Previous frame (←)">
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M6 5h2v14H6zM20 5v14L9 12z"></path></svg>
+          </button>
+          <button type="button" class="icon play" id="play" aria-label="Play">
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true" id="playIcon"><path d="M7 4v16l13-8z"></path></svg>
+          </button>
+          <button type="button" class="icon" id="next" aria-label="Next frame" title="Next frame (→)">
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M16 5h2v14h-2zM4 5v14l11-7z"></path></svg>
+          </button>
+        </div>
+        <input type="range" class="scrub" id="frame" min="0" max="0" step="1" value="0" aria-label="Frame">
+        <div class="seg" role="group" aria-label="Step by" id="step">
+          <button type="button" data-v="commit">Commit</button>
+          <button type="button" data-v="week">Week</button>
+          <button type="button" data-v="month">Month</button>
+        </div>
+        <span class="muted small mono" id="frameLabel"></span>
+      </div>
+    </section>
+  </main>
+
+  <aside class="detail" aria-label="Packages by layer">
+    <section class="pick" id="pick" aria-live="polite"></section>
+    <section aria-labelledby="listHead">
+      <h2 class="eyebrow" id="listHead">Layers, top first</h2>
+      <div class="layers" id="list"></div>
+    </section>
+  </aside>
+</div>
+<script src="common.js"></script>
+<script src="layers.js"></script>
+</body>
+</html>

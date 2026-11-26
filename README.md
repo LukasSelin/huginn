@@ -60,13 +60,25 @@ indexed 210 live symbols in 249ms (0 commits cached, 4 walked)
 
 ### `huginn serve`
 
-Indexes the history in the background and serves the journey, map and health
-pages at `http://localhost:7878`, opening on the journey; the map is at `/map`.
-While indexing, the pages show progress. Once the history is indexed, the
-server encodes and gzips the responses the pages open with (the journey at
-every step, the health report and knowledge silos, the map's preset
-windows) before it reports ready, then the per-directory views in the
-background, so the pages draw from memory.
+Indexes the history in the background and serves the journey, layers, map
+and health pages at `http://localhost:7878`, opening on the journey; the
+others are at `/layers`, `/map` and `/health`. While indexing, the pages
+show progress. Once the history is indexed, the server encodes and gzips
+the responses the pages open with (the journey and the layers at every
+step, the health report and knowledge silos, the map's preset windows)
+before it reports ready, then the per-directory views in the background, so
+the pages draw from memory.
+
+The layers page stacks the packages in 3D, frame by frame: a package that
+refers to no other package of the repository sits on the bottom layer, and
+every other one a layer above the highest package it refers to, so every
+reference points down. Each package keeps its place on the journey map
+within its layer, so the view from above is the journey map and the view
+from the side is the architecture's layering. Packages that refer to each
+other in a cycle, which Go allows only through tests or build variants,
+share a layer and the references between them are drawn red. Drag to turn
+the view, scroll to zoom, and point at or pick a package to light up what
+it refers to and what refers to it.
 
 ```
 $ huginn serve
@@ -83,6 +95,7 @@ The UI is backed by a small JSON API:
 | `GET /api/health` | trends over the whole history (exported symbols, complexity, restructuring, survival, test lines), hotspot files and owners |
 | `GET /api/silos` | knowledge silos: packages and symbols ranked by concentration × criticality, each with its reasons, everyone's share of the live code, and pairs coupled across knowledge boundaries |
 | `GET /api/silos/leave?author=name` | what would be orphaned or rest on one person if the named authors (repeat `author` for several) left now, ranked as a hand-over list |
+| `GET /api/layers?step=commit\|week\|month` | every frame's live packages with their layer, and the references between them, marking those that run within a cycle; packages carry the journey's map layout |
 
 ### `huginn silos`
 
