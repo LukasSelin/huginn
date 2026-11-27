@@ -1355,7 +1355,7 @@
   }
 
   // setSpread lays the map and the architecture out again with more or less
-  // room between the packages. Alt and the wheel change it many times a
+  // room between the packages. Ctrl and the wheel change it many times a
   // second, so the map waits for the next frame.
   function setSpread(v) {
     state.spread = v;
