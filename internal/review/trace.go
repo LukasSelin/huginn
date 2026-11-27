@@ -391,14 +391,19 @@ func lastChanged(path []capslock.Call, inRepo func(string) bool, changed map[cap
 }
 
 // declaring returns the declared function a step of a capslock path is
-// in: itself, or for a function literal, "Tree.func1" or
-// "Tree.func1.func2", the function declaring it, "Tree".
+// in: itself, or for a function literal, the function declaring it.
 func declaring(c capslock.Call) capslock.Func {
-	name := c.Name
+	return capslock.Func{Package: c.Package, Name: declaredName(c.Name)}
+}
+
+// declaredName returns the name of the declared function a name stands
+// for: itself, or for a function literal, "Tree.func1" or
+// "Tree.func1.func2", the function declaring it, "Tree".
+func declaredName(name string) string {
 	for {
 		i := strings.LastIndex(name, ".func")
 		if i < 0 || i+len(".func") == len(name) || strings.Trim(name[i+len(".func"):], "0123456789") != "" {
-			return capslock.Func{Package: c.Package, Name: name}
+			return name
 		}
 		name = name[:i]
 	}

@@ -57,7 +57,7 @@ type typeJSON struct {
 // change indexes the changes, -1 for none. Exit is the call an "external"
 // item's first capability leaves the code the change adds or edits by; the
 // items right after it sharing that exit (review.Focus.SameExit) are
-// listed with it.
+// listed with it, from through, the function where their paths meet.
 type focusJSON struct {
 	Kind         string           `json:"kind"`
 	Name         string           `json:"name"`
@@ -71,11 +71,13 @@ type focusJSON struct {
 	Implementers bool             `json:"implementers,omitempty"`
 	Capabilities []capabilityJSON `json:"capabilities,omitempty"`
 	Exit         *stepJSON        `json:"exit,omitempty"`
+	Through      *stepJSON        `json:"through,omitempty"`
 }
 
 // capabilityJSON is a way out of the process, as review.Capability has it:
-// leaves indexes the step leaving the repository's code, and leavesChange
-// the one leaving the code the change adds or edits, -1 for none.
+// leaves indexes the step leaving the repository's code, leavesChange the
+// one leaving the code the change adds or edits, and throughAt the item's
+// through (review.Focus.ThroughAt), -1 for none.
 type capabilityJSON struct {
 	Name         string     `json:"name"`
 	Label        string     `json:"label"`
@@ -84,6 +86,7 @@ type capabilityJSON struct {
 	Elided       int        `json:"elided"`
 	Leaves       int        `json:"leaves"`
 	LeavesChange int        `json:"leavesChange"`
+	ThroughAt    int        `json:"throughAt"`
 }
 
 type stepJSON struct {
@@ -101,7 +104,10 @@ func focusesJSON(fs []review.Focus) []focusJSON {
 			Change: f.Change, Reaches: callersJSON(f.Reaches), Tests: f.Tests, Implementers: f.Implementers,
 		}
 		for _, c := range f.Capabilities {
-			cj := capabilityJSON{Name: c.Name, Label: c.Label(), New: c.New, Elided: c.Elided, Leaves: c.Leaves(), LeavesChange: c.LeavesChange()}
+			cj := capabilityJSON{
+				Name: c.Name, Label: c.Label(), New: c.New, Elided: c.Elided,
+				Leaves: c.Leaves(), LeavesChange: c.LeavesChange(), ThroughAt: f.ThroughAt(c),
+			}
 			for _, s := range c.Path {
 				cj.Path = append(cj.Path, stepJSON{Package: s.Package, Name: s.Name, Path: s.Path, Line: s.Line})
 			}
@@ -109,6 +115,9 @@ func focusesJSON(fs []review.Focus) []focusJSON {
 		}
 		if s, ok := f.Exit(); ok {
 			out[i].Exit = &stepJSON{Package: s.Package, Name: s.Name, Path: s.Path, Line: s.Line}
+		}
+		if s := f.Through; s.Name != "" {
+			out[i].Through = &stepJSON{Package: s.Package, Name: s.Name}
 		}
 	}
 	return out

@@ -238,7 +238,7 @@ function look() {
       if (!n) continue;
       fit = run.slice(0, n);
     }
-    items.push(run.length > 1 ? lookGroup(fit, run.length) : lookItem(fit[0]));
+    items.push(run.length > 1 ? lookGroup(fit, run) : lookItem(fit[0]));
   }
   const left = [
     hidden.external ? `${plural(hidden.external, 'more change')} reaching outside the process` : '',
@@ -289,26 +289,42 @@ function lookItem(f) {
 }
 
 // lookGroup lists the items leaving the changed code by the same call
-// under it: the call, what it leads to and where it is made, how many of
-// the changes (total) reach outside through it and, when the path leaves
-// the repository's code further on, where, then each item shown, its
-// paths by that call stopping there.
-function lookGroup(fs, total) {
-  const c = fs[0].capabilities[0], exit = fs[0].exit;
-  const leave = c.leaves !== c.leavesChange ? c.path[c.leaves] : null;
+// together, as cmd/huginn's exitText and exitDetail say them: from the
+// function where their paths meet (through) on to the capability, and
+// where that function is declared, or from the call and where it is made
+// when there is none; how many of the changes (run) reach outside through
+// it, and where the path leaves the changed code and the repository's;
+// then each item shown (fs), its path stopping where they meet.
+function lookGroup(fs, run) {
+  const first = run[0].capabilities[0];
+  const exit = first.path[first.leavesChange], leave = first.path[first.leaves];
+  let from = first.path.slice(first.leavesChange), elided = first.elided, where = `${exit.path}:${exit.line}`;
+  const met = run.find((f) => f.capabilities[0].throughAt >= 0);
+  if (met) {
+    const c = met.capabilities[0];
+    from = c.path.slice(c.throughAt);
+    elided = c.elided;
+  }
+  const own = run.find((f) => f.capabilities[0].throughAt === 0);
+  if (own) where = `${own.path}:${own.line}`;
+  const at = (s) => h('code', {}, `${s.path}:${s.line}`);
+  const differ = !sameCall(exit, leave);
+  let detail;
+  if (!run[0].through) detail = ['this call', ...(differ ? [', leaving the repository’s code at ', at(leave)] : [])];
+  else if (differ) detail = ['it, leaving the changed code at ', at(exit), ' and the repository’s at ', at(leave)];
+  else detail = ['it, leaving the repository’s code at ', at(leave)];
   return h('li', { class: 'look-item l-external look-group' },
     h('span', { class: 'look-kind' }, LOOK_KIND.external),
     h('div', { class: 'look-body' },
-      h('div', { class: 'look-head' }, h('span', { class: 'cap-path' }, ...pathNodes(c.path.slice(c.leavesChange), c.elided)),
-        h('span', { class: 'muted code' }, `${exit.path}:${exit.line}`)),
-      h('div', { class: 'look-what' }, `${plural(total, 'change')} reach outside through this call`,
-        leave ? h('span', { class: 'muted' }, ', leaving the repository’s code at ', h('code', {}, `${leave.path}:${leave.line}`)) : null),
+      h('div', { class: 'look-head' }, h('span', { class: 'cap-path' }, ...pathNodes(from, elided)),
+        h('span', { class: 'muted code' }, where)),
+      h('div', { class: 'look-what' }, `${plural(run.length, 'change')} reach outside through `, ...detail),
       h('ul', { class: 'look-members' }, ...fs.map((f) => h('li', { class: 'look-member' }, ...lookBody(f, true))))));
 }
 
 // lookBody is what an item says: its name and place, what the change does
 // to its paths, what changed, whom it reaches and how it reaches outside
-// the process. Grouped, its paths by the group's call stop there.
+// the process. Grouped, its paths stop where the group's paths meet.
 function lookBody(f, grouped) {
   const rv = state.rv;
   const ch = f.change >= 0 ? rv.changes[f.change] : null;
@@ -335,12 +351,13 @@ function lookBody(f, grouped) {
 // capabilityLine says how an item reaches outside the process: "network
 // new  http.Get → … → net.(*Dialer).DialContext  payments/payments.go:6",
 // the place being where the call leaving the repository's code is made.
-// Grouped under the call it leaves the changed code by, the path stops
-// there.
+// Grouped with the items sharing the call it leaves the changed code by,
+// the path stops where their paths meet, or at the call when it does not
+// pass there.
 function capabilityLine(f, c, grouped) {
   let steps = c.path, elided = c.elided, leave = c.leaves >= 0 ? c.path[c.leaves] : null;
   if (grouped && c.leavesChange >= 0 && sameCall(c.path[c.leavesChange], f.exit)) {
-    steps = c.path.slice(0, c.leavesChange + 1);
+    steps = c.path.slice(0, (c.throughAt >= 0 ? c.throughAt : c.leavesChange) + 1);
     elided = 0;
     leave = null;
   }

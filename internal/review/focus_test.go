@@ -145,3 +145,50 @@ func TestByExit(t *testing.T) {
 		t.Errorf("json:\n%s", b)
 	}
 }
+
+// TestMeet heads a group at the function where its paths meet: entry
+// points calling a changed builder, which goes on through changed helpers
+// to an unchanged client, meet at the builder, the first function on the
+// path they all pass through, not at the call into the client.
+func TestMeet(t *testing.T) {
+	const pkg = "example.com/m/tickets"
+	step := func(name, path string, line int) Step { return Step{Package: pkg, Name: name, Path: path, Line: line} }
+	chain := []Step{
+		step("tickets.build", "tickets/submit.go", 9),
+		step("tickets.resolve", "tickets/build.go", 20),
+		step("tickets.country", "tickets/build.go", 31),
+		{Package: "example.com/m/flags", Name: "flags.New", Path: "tickets/build.go", Line: 40},
+		{Package: "os", Name: "os.Setenv", Path: "config/load.go", Line: 7},
+	}
+	item := func(name string, from int) Focus {
+		path := append([]Step{{Package: pkg, Name: name}}, chain[from:]...)
+		lastChanged := len(path) - 3 // tickets.country, the last changed function
+		return Focus{Kind: FocusExternal, Name: name, Capabilities: []Capability{{Name: "MODIFY_SYSTEM_STATE/ENV", Path: path, LastChanged: lastChanged}}}
+	}
+	fs := []Focus{
+		item("tickets.build", 1),
+		item("tickets.SubmitClaim", 0),
+		item("tickets.SubmitLost", 0),
+		item("tickets.resolve", 2),
+		item("tickets.country", 3),
+	}
+	meet(fs)
+	want := Step{Package: pkg, Name: "tickets.build"}
+	for i, f := range fs {
+		if f.Through != want {
+			t.Errorf("%s meets at %+v, want tickets.build", fs[i].Name, f.Through)
+		}
+	}
+	for i, at := range []int{0, 1, 1, -1, -1} {
+		if got := fs[i].ThroughAt(fs[i].Capabilities[0]); got != at {
+			t.Errorf("%s passes tickets.build at %d, want %d", fs[i].Name, got, at)
+		}
+	}
+
+	// An item alone meets nowhere.
+	alone := []Focus{item("tickets.SubmitClaim", 0)}
+	meet(alone)
+	if alone[0].Through != (Step{}) || alone[0].ThroughAt(alone[0].Capabilities[0]) != -1 {
+		t.Errorf("an item alone meets at %+v", alone[0].Through)
+	}
+}
