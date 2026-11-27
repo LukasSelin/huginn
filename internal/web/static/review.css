@@ -72,6 +72,11 @@ code, .code { font-family: 'JetBrains Mono', monospace; font-size: 12px; overflo
 .look-cap .tag { margin-left: 0; }
 .tag.new { border-color: var(--deleted); color: var(--deleted); }
 .look-cap .cap-path code { color: var(--text-2); }
+/* The changes reaching outside through the same call, under it. */
+.look-group .look-head .cap-path { font-size: 13px; color: var(--muted); }
+.look-group .look-head .cap-path code { color: var(--text); }
+.look-members { margin: 4px 0 0; padding: 0; list-style: none; display: flex; flex-direction: column; gap: 6px; }
+.look-member { display: flex; flex-direction: column; gap: 3px; min-width: 0; padding: 2px 0 2px 12px; border-left: 2px solid var(--line-strong); }
 .look-note { padding: 7px 0; border-top: 1px solid var(--line); }
 .look-note:first-child { border-top: 0; padding-top: 2px; }
 .look-note code { font-size: 12px; }

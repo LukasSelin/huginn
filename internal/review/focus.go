@@ -86,6 +86,23 @@ type Focus struct {
 	Capabilities []Capability
 }
 
+// Exit returns the call by which a FocusExternal item's first capability
+// leaves the repository's code. Several functions the change adds or edits
+// often reach outside through the same line; the focus lists the items
+// whose exits are made at the same place together, so that line is read
+// once.
+func (f Focus) Exit() (Step, bool) {
+	if len(f.Capabilities) == 0 {
+		return Step{}, false
+	}
+	c := f.Capabilities[0]
+	i := c.Leaves()
+	if i < 0 {
+		return Step{}, false
+	}
+	return c.Path[i], true
+}
+
 // focus lists what to look at first in r, most important first: the code
 // the change adds or edits whose calls reach outside the process, by caps
 // (indexed as the changes), then exported API changes that break code,
@@ -96,7 +113,9 @@ type Focus struct {
 // Code reaching outside the process comes first: what it does there
 // depends on the world, which tests rarely bring along. Of it, existing
 // code the change makes reach somewhere new comes first, then new code,
-// then the rest, each the largest edit reaching the most callers first.
+// then the rest, each the largest edit reaching the most callers first;
+// and the items leaving the repository's code at the same place come
+// together, where the first of them is.
 func focus(r *semdiff.Report, types []TypeReview, caps map[int][]Capability) []Focus {
 	var external, breaking, behavior []Focus
 	weights := map[int]float64{}
@@ -131,7 +150,7 @@ func focus(r *semdiff.Report, types []TypeReview, caps map[int][]Capability) []F
 		return cmp.Or(cmp.Compare(novelty(r, b), novelty(r, a)), byWeight(a, b))
 	})
 
-	out := append(external, breaking...)
+	out := append(byExit(external), breaking...)
 	out = append(out, behavior...)
 	out = append(out, dependencies(r.Relations)...)
 	for _, t := range types {
@@ -140,6 +159,40 @@ func focus(r *semdiff.Report, types []TypeReview, caps map[int][]Capability) []F
 				out = append(out, Focus{Kind: FocusStructure, Name: t.Name, Path: t.Path, Line: t.Line, What: n.Text, Change: -1})
 			}
 		}
+	}
+	return out
+}
+
+// byExit moves up next to each item the later ones whose exits are made at
+// the same place, keeping the order otherwise: the items before a group's
+// first stay before it, and its members keep their order.
+func byExit(fs []Focus) []Focus {
+	type site struct {
+		path string
+		line int
+	}
+	first := map[site]int{}
+	lead := make([]int, len(fs)) // the first item leaving at the same place, by index
+	for i, f := range fs {
+		lead[i] = i
+		exit, ok := f.Exit()
+		if !ok {
+			continue
+		}
+		if j, seen := first[site{exit.Path, exit.Line}]; seen {
+			lead[i] = j
+		} else {
+			first[site{exit.Path, exit.Line}] = i
+		}
+	}
+	order := make([]int, len(fs))
+	for i := range order {
+		order[i] = i
+	}
+	slices.SortStableFunc(order, func(a, b int) int { return cmp.Compare(lead[a], lead[b]) })
+	out := make([]Focus, len(fs))
+	for k, i := range order {
+		out[k] = fs[i]
 	}
 	return out
 }

@@ -2,6 +2,7 @@ package review
 
 import (
 	"context"
+	"slices"
 	"testing"
 
 	"huginn/internal/git"
@@ -76,5 +77,46 @@ func TestFocus(t *testing.T) {
 	dep := rv.Focus[3]
 	if dep.Change != -1 || dep.Path != "billing/billing.go" || dep.Line == 0 {
 		t.Errorf("dependency at change %d, %s:%d", dep.Change, dep.Path, dep.Line)
+	}
+}
+
+// TestByExit keeps together the items reaching outside the process
+// through the same call, each group where its first item is: Charge and
+// Refund, ranked after Load, move up to Authorize, which pays through the
+// same line, while Sync, which leaves nowhere in the repository, and Load
+// keep their places.
+func TestByExit(t *testing.T) {
+	item := func(name string, path string, line int) Focus {
+		c := Capability{Name: "NETWORK", Path: []Step{{Name: name}}}
+		if path != "" {
+			c.Path = append(c.Path, Step{Name: "http.Get", Path: path, Line: line})
+		}
+		return Focus{Kind: FocusExternal, Name: name, Capabilities: []Capability{c}}
+	}
+	fs := []Focus{
+		item("payments.Authorize", "payments/payments.go", 6),
+		item("sync.Sync", "", 0),
+		item("store.Load", "store/store.go", 5),
+		item("billing.Charge", "payments/payments.go", 6),
+		item("store.Save", "store/store.go", 9),
+		item("billing.Refund", "payments/payments.go", 6),
+	}
+	var got []string
+	for _, f := range byExit(fs) {
+		got = append(got, f.Name)
+	}
+	want := []string{"payments.Authorize", "billing.Charge", "billing.Refund", "sync.Sync", "store.Load", "store.Save"}
+	if !slices.Equal(got, want) {
+		t.Errorf("byExit = %q, want %q", got, want)
+	}
+
+	if exit, ok := fs[3].Exit(); !ok || exit.Name != "http.Get" || exit.Path != "payments/payments.go" || exit.Line != 6 {
+		t.Errorf("Charge's exit = %+v, %v", exit, ok)
+	}
+	if exit, ok := fs[1].Exit(); ok {
+		t.Errorf("Sync's exit = %+v, want none", exit)
+	}
+	if _, ok := (Focus{Kind: FocusBehavior}).Exit(); ok {
+		t.Error("an edit has an exit")
 	}
 }

@@ -214,9 +214,11 @@ const LOOK_KIND = {
 // the code the change adds or edits that reaches outside the process, the
 // exported API it breaks, the edits of existing code, the largest reaching
 // most first, the imports it starts and the warnings about the types it
-// touches. Past the first few, the edits and the code reaching outside fold
-// away. Above them it says whether capslock is still tracing, and below
-// them what it found when it found nothing, or how to have it.
+// touches. The code reaching outside that leaves the repository's code at
+// the same place is listed under it. Past the first few, the edits and the
+// code reaching outside fold away. Above them it says whether capslock is
+// still tracing, and below them what it found when it found nothing, or
+// how to have it.
 function look() {
   const rv = state.rv, fs = rv.focus || [];
   const items = [];
@@ -225,15 +227,22 @@ function look() {
       h('span', { class: 'spin', 'aria-hidden': 'true' }), 'Tracing with capslock which changes reach the network, files or other programs…'));
   }
   const all = state.showAll.has('look');
-  const shown = { external: 0, behavior: 0 };
-  for (const f of fs) {
-    if (f.kind in shown && !all && ++shown[f.kind] > LOOK_EDITS) continue;
-    items.push(lookItem(f));
+  const shown = { external: 0, behavior: 0 }, hidden = { external: 0, behavior: 0 };
+  for (const run of lookRuns(fs)) {
+    const kind = run[0].kind;
+    let fit = run;
+    if (kind in shown && !all) {
+      const n = Math.min(run.length, Math.max(0, LOOK_EDITS - shown[kind]));
+      shown[kind] += n;
+      hidden[kind] += run.length - n;
+      if (!n) continue;
+      fit = run.slice(0, n);
+    }
+    items.push(run.length > 1 ? lookGroup(fit, run.length) : lookItem(fit[0]));
   }
-  const hidden = (kind) => Math.max(0, fs.filter((f) => f.kind === kind).length - LOOK_EDITS);
   const left = [
-    hidden('external') ? `${plural(hidden('external'), 'more change')} reaching outside the process` : '',
-    hidden('behavior') ? `${plural(hidden('behavior'), 'more edit')} of existing code` : '',
+    hidden.external ? `${plural(hidden.external, 'more change')} reaching outside the process` : '',
+    hidden.behavior ? `${plural(hidden.behavior, 'more edit')} of existing code` : '',
   ].filter(Boolean);
   if (!all && left.length) {
     items.push(h('li', { class: 'look-more' }, h('button', {
@@ -256,7 +265,47 @@ function look() {
   $('look').replaceChildren(...items);
 }
 
+// sameSite reports whether two calls are made at the same place.
+const sameSite = (a, b) => !!a && !!b && a.path === b.path && a.line === b.line;
+
+// lookRuns cuts the focus into runs: each item reaching outside the process
+// with those right after it whose exits are made at the same place, as the
+// review orders them, and every other item alone.
+function lookRuns(fs) {
+  const runs = [];
+  for (const f of fs) {
+    const last = runs[runs.length - 1];
+    if (last && f.kind === 'external' && last[0].kind === 'external' && sameSite(last[0].exit, f.exit)) last.push(f);
+    else runs.push([f]);
+  }
+  return runs;
+}
+
 function lookItem(f) {
+  return h('li', { class: `look-item l-${f.kind}` },
+    h('span', { class: 'look-kind' }, LOOK_KIND[f.kind] || f.kind),
+    h('div', { class: 'look-body' }, ...lookBody(f, false)));
+}
+
+// lookGroup lists the items reaching outside the process through the same
+// place under it: the call made there and what it leads to, how many of
+// the changes (total) reach outside through it, then each item shown, its
+// paths through that place stopping at the call.
+function lookGroup(fs, total) {
+  const c = fs[0].capabilities[0], exit = fs[0].exit;
+  return h('li', { class: 'look-item l-external look-group' },
+    h('span', { class: 'look-kind' }, LOOK_KIND.external),
+    h('div', { class: 'look-body' },
+      h('div', { class: 'look-head' }, h('span', { class: 'cap-path' }, ...pathNodes(c.path.slice(c.leaves), c.elided)),
+        h('span', { class: 'muted code' }, `${exit.path}:${exit.line}`)),
+      h('div', { class: 'look-what' }, `${plural(total, 'change')} reach outside through this call`),
+      h('ul', { class: 'look-members' }, ...fs.map((f) => h('li', { class: 'look-member' }, ...lookBody(f, true))))));
+}
+
+// lookBody is what an item says: its name and place, what the change does
+// to its paths, what changed, whom it reaches and how it reaches outside
+// the process. Grouped, its paths through the group's place stop there.
+function lookBody(f, grouped) {
   const rv = state.rv;
   const ch = f.change >= 0 ? rv.changes[f.change] : null;
   let name;
@@ -270,34 +319,45 @@ function lookItem(f) {
   }
   const where = f.line ? `${f.path}:${f.line}` : f.path;
   const p = f.change >= 0 ? pathsOf(f.change) : null;
-  return h('li', { class: `look-item l-${f.kind}` },
-    h('span', { class: 'look-kind' }, LOOK_KIND[f.kind] || f.kind),
-    h('div', { class: 'look-body' },
-      h('div', { class: 'look-head' }, name, where ? h('span', { class: 'muted code' }, where) : null),
-      p ? verdictLine(p, 'look-verdict') : null,
-      h('div', { class: 'look-what' }, f.what, f.why ? h('span', { class: 'why' }, ` · ${f.why}`) : null),
-      reachLine(f, ch),
-      ...(f.capabilities || []).map((c) => capabilityLine(f, c))));
+  return [
+    h('div', { class: 'look-head' }, name, where ? h('span', { class: 'muted code' }, where) : null),
+    p ? verdictLine(p, 'look-verdict') : null,
+    h('div', { class: 'look-what' }, f.what, f.why ? h('span', { class: 'why' }, ` · ${f.why}`) : null),
+    reachLine(f, ch),
+    ...(f.capabilities || []).map((c) => capabilityLine(f, c, grouped)),
+  ];
 }
 
 // capabilityLine says how an item reaches outside the process: "network
 // new  http.Get → … → net.(*Dialer).DialContext  payments/payments.go:6",
 // the place being where the call leaving the repository's code is made.
-function capabilityLine(f, c) {
-  let steps = c.path;
+// Grouped under that place, the path stops at the call made there.
+function capabilityLine(f, c, grouped) {
+  let steps = c.path, elided = c.elided, leave = c.leaves >= 0 ? c.path[c.leaves] : null;
+  if (grouped && sameSite(leave, f.exit)) {
+    steps = c.path.slice(0, c.leaves + 1);
+    elided = 0;
+    leave = null;
+  }
   if (steps.length && steps[0].name === f.name) steps = steps.slice(1); // the item itself, unless a function literal of it
-  let names = [];
-  steps.forEach((s, i) => {
-    if (c.elided > 0 && i === steps.length - 1) names.push('…');
-    names.push(s);
-  });
-  if (names.length > PATH_NAMES) names = [...names.slice(0, 2), '…', ...names.slice(-3)];
-  const leave = c.leaves >= 0 ? c.path[c.leaves] : null;
   return h('div', { class: 'look-cap small' },
     h('span', { class: `cap${c.new ? ' new' : ''}`, title: c.name }, c.label),
     c.new ? h('span', { class: 'tag new', title: 'not reached at the merge base' }, 'new') : null,
-    h('span', { class: 'cap-path' }, ...names.flatMap((s, i) => [i ? ' → ' : '', s === '…' ? '…' : h('code', { title: s.package }, s.name)])),
+    h('span', { class: 'cap-path' }, ...pathNodes(steps, elided)),
     leave ? h('span', { class: 'muted code' }, `${leave.path}:${leave.line}`) : null);
+}
+
+// pathNodes names the calls on a path with arrows between them, "…"
+// standing for the elided calls before the last and for the middle of a
+// path with more than PATH_NAMES.
+function pathNodes(steps, elided) {
+  let names = [];
+  steps.forEach((s, i) => {
+    if (elided > 0 && i === steps.length - 1) names.push('…');
+    names.push(s);
+  });
+  if (names.length > PATH_NAMES) names = [...names.slice(0, 2), '…', ...names.slice(-3)];
+  return names.flatMap((s, i) => [i ? ' → ' : '', s === '…' ? '…' : h('code', { title: s.package }, s.name)]);
 }
 
 // reachLine says whom an item reaches: "called by a, b and 3 more · 29 in

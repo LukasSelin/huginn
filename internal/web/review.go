@@ -54,7 +54,9 @@ type typeJSON struct {
 
 // focusJSON is one thing to look at first, as review.Focus has it: kind is
 // "external", "breaking", "behavior", "dependency" or "structure", and
-// change indexes the changes, -1 for none.
+// change indexes the changes, -1 for none. Exit is the call an "external"
+// item's first capability leaves the repository's code by; the items right
+// after it whose exits are made at the same place are listed with it.
 type focusJSON struct {
 	Kind         string           `json:"kind"`
 	Name         string           `json:"name"`
@@ -67,6 +69,7 @@ type focusJSON struct {
 	Tests        int              `json:"tests"`
 	Implementers bool             `json:"implementers,omitempty"`
 	Capabilities []capabilityJSON `json:"capabilities,omitempty"`
+	Exit         *stepJSON        `json:"exit,omitempty"`
 }
 
 // capabilityJSON is a way out of the process, as review.Capability has it:
@@ -100,6 +103,9 @@ func focusesJSON(fs []review.Focus) []focusJSON {
 				cj.Path = append(cj.Path, stepJSON{Package: s.Package, Name: s.Name, Path: s.Path, Line: s.Line})
 			}
 			out[i].Capabilities = append(out[i].Capabilities, cj)
+		}
+		if s, ok := f.Exit(); ok {
+			out[i].Exit = &stepJSON{Package: s.Package, Name: s.Name, Path: s.Path, Line: s.Line}
 		}
 	}
 	return out

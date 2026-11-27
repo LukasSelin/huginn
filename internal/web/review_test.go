@@ -85,6 +85,12 @@ func TestFocusJSON(t *testing.T) {
 	if c.Label != "env" || !c.New || c.Elided != 2 || c.Leaves != 1 || len(c.Path) != 3 || c.Path[1].Name != "os.Setenv" || c.Path[1].Line != 7 {
 		t.Errorf("capability = %+v", c)
 	}
+	if e := fs[0].Exit; e == nil || e.Name != "os.Setenv" || e.Path != "payments/payments.go" || e.Line != 7 {
+		t.Errorf("exit = %+v, want os.Setenv at payments/payments.go:7", e)
+	}
+	if fs[1].Exit != nil {
+		t.Errorf("an edit's exit = %+v", fs[1].Exit)
+	}
 }
 
 func TestReviewOptions(t *testing.T) {
