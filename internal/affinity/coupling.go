@@ -37,9 +37,12 @@ func (b *build) coupling() {
 	r.Coupling.Commits = len(revs)
 
 	changes, pairs := cochange.Count(revs, n)
-	b.couplingPairs(changes, pairs)
+	keys := slices.SortedFunc(maps.Keys(pairs), func(x, y [2]int) int {
+		return cmp.Or(cmp.Compare(x[0], y[0]), cmp.Compare(x[1], y[1]))
+	})
+	b.couplingPairs(changes, keys, pairs)
 	for nb := range r.Blocks {
-		b.blockCoupling(nb, revs, pairs)
+		b.blockCoupling(nb, revs, keys, pairs)
 	}
 	b.outside(revs, positions)
 }
@@ -92,13 +95,12 @@ func (b *build) keptRevisions(byRev map[int][]int, limit int) (revs [][]int, pos
 }
 
 // couplingPairs lists the pairs of rows that changed together, the most
-// coupled first, and says why the strong ones across blocks did.
-func (b *build) couplingPairs(changes map[int]int, pairs map[[2]int]cochange.Pair) {
+// coupled first, and says why the strong ones across blocks did. keys are
+// the keys of pairs, sorted.
+func (b *build) couplingPairs(changes map[int]int, keys [][2]int, pairs map[[2]int]cochange.Pair) {
 	r := b.r
 	reach := b.closures()
-	for _, k := range slices.SortedFunc(maps.Keys(pairs), func(x, y [2]int) int {
-		return cmp.Or(cmp.Compare(x[0], y[0]), cmp.Compare(x[1], y[1]))
-	}) {
+	for _, k := range keys {
 		x, y, p := k[0], k[1], pairs[k]
 		pr := Pair{A: x, B: y, N: p.N, Logical: cochange.Logical(p, changes[x], changes[y], 1), Strong: p.N >= b.opts.MinCoChanges}
 		bx, by := b.rowBlock[x], b.rowBlock[y]
@@ -117,8 +119,8 @@ func (b *build) couplingPairs(changes map[int]int, pairs map[[2]int]cochange.Pai
 
 // blockCoupling counts block nb's edits and the commits changing it and,
 // for two methods or more, how much of its co-change weight stays inside
-// it rather than going to other blocks.
-func (b *build) blockCoupling(nb int, revs [][]int, pairs map[[2]int]cochange.Pair) {
+// it rather than going to other blocks. keys are the keys of pairs, sorted.
+func (b *build) blockCoupling(nb int, revs [][]int, keys [][2]int, pairs map[[2]int]cochange.Pair) {
 	r := b.r
 	bl := &r.Blocks[nb]
 	inBlock := func(i int) bool { return b.rowBlock[i] == nb }
@@ -130,20 +132,33 @@ func (b *build) blockCoupling(nb int, revs [][]int, pairs map[[2]int]cochange.Pa
 			bl.Commits++
 		}
 	}
-	var inside, across float64
-	for k, p := range pairs {
-		x, y := inBlock(k[0]), inBlock(k[1])
-		switch {
-		case x && y:
-			inside += p.W
-		case x && b.rowBlock[k[1]] >= 0, y && b.rowBlock[k[0]] >= 0:
-			across += p.W
-		}
-	}
-	if inside+across > 0 && len(bl.Rows) >= 2 {
-		c := inside / (inside + across)
+	if c, ok := blockCohesion(b.rowBlock, nb, keys, pairs); ok && len(bl.Rows) >= 2 {
 		bl.Cohesion = &c
 	}
+}
+
+// blockCohesion is the share of the co-change weight between block nb and
+// the blocks, itself included, that stays inside nb; ok is false when
+// there is none. rowBlock gives each row's block, -1 for none.
+//
+// The weights are added in the order of keys, sorted, not in map order:
+// float addition depends on the order, and map order changes from run to
+// run, so the last digit would too.
+func blockCohesion(rowBlock []int, nb int, keys [][2]int, pairs map[[2]int]cochange.Pair) (c float64, ok bool) {
+	var inside, across float64
+	for _, k := range keys {
+		x, y := rowBlock[k[0]] == nb, rowBlock[k[1]] == nb
+		switch {
+		case x && y:
+			inside += pairs[k].W
+		case x && rowBlock[k[1]] >= 0, y && rowBlock[k[0]] >= 0:
+			across += pairs[k].W
+		}
+	}
+	if inside+across > 0 {
+		return inside / (inside + across), true
+	}
+	return 0, false
 }
 
 // crossKind tells why two methods of different blocks change together.
