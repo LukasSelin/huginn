@@ -795,6 +795,39 @@ func (b *build) mergeHelpers() {
 // fields, then bridges and free methods.
 func (b *build) order() {
 	r := b.r
+	live := b.liveBlocks()
+	b.pickCore(live)
+	slices.SortStableFunc(live, b.compareBlocks)
+	newBlock := fill(len(b.blocks), -1)
+	for n, x := range live {
+		newBlock[x] = n
+	}
+
+	// Display order of the columns and rows, as old indexes.
+	cols, rows := b.displayCols(live), b.displayRows(live)
+	colAt, rowAt := invert(cols), invert(rows)
+
+	// Permute everything.
+	b.permuteCols(cols, newBlock)
+	b.permuteRows(rows, newBlock, colAt, rowAt)
+	b.permuteCells(cols, rows)
+	b.glue = remap(b.glue, rowAt)
+	b.remapShared(colAt)
+	b.keepLive(live, colAt, rowAt)
+
+	// Cells, calls and the report's blocks.
+	b.fillRows()
+	b.reportBlocks()
+	b.rowNotes()
+	for n := range r.Blocks {
+		b.label(n)
+	}
+	r.LCOM4 = b.lcom4()
+}
+
+// liveBlocks returns the blocks not merged into another, with their columns
+// and rows sorted.
+func (b *build) liveBlocks() []int {
 	var live []int
 	for x, bl := range b.blocks {
 		if bl.dead {
@@ -804,80 +837,117 @@ func (b *build) order() {
 		slices.Sort(bl.rows)
 		live = append(live, x)
 	}
-	first := func(xs []int) int {
-		if len(xs) == 0 {
-			return 1 << 30
-		}
-		return xs[0]
-	}
-	size := func(x int) int { return len(b.blocks[x].cols) + len(b.blocks[x].rows) }
+	return live
+}
+
+// pickCore makes the largest state block of live the core, the first of
+// them on a tie.
+func (b *build) pickCore(live []int) {
 	core := -1
 	for _, x := range live {
-		if b.blocks[x].kind == State && (core < 0 || size(x) > size(core)) {
+		if b.blocks[x].kind == State && (core < 0 || b.stateSize(x) > b.stateSize(core)) {
 			core = x
 		}
 	}
 	if core >= 0 {
 		b.blocks[core].kind = Core
 	}
-	rank := map[BlockKind]int{Core: 0, State: 1, Service: 2, Shared: 3}
-	slices.SortStableFunc(live, func(x, y int) int {
-		bx, by := b.blocks[x], b.blocks[y]
-		if c := cmp.Compare(rank[bx.kind], rank[by.kind]); c != 0 {
-			return c
-		}
-		switch bx.kind {
-		case State:
-			return cmp.Or(cmp.Compare(size(y), size(x)), cmp.Compare(first(bx.cols), first(by.cols)))
-		case Service:
-			return cmp.Compare(first(bx.cols), first(by.cols))
-		case Core, Shared:
-		}
-		return cmp.Compare(first(bx.rows), first(by.rows))
-	})
-	newBlock := fill(len(b.blocks), -1)
-	for n, x := range live {
-		newBlock[x] = n
-	}
+}
 
-	// Display order of the columns and rows, as old indexes.
-	var cols, rows []int
+// stateSize counts the columns and rows of block x, which rank the state
+// blocks.
+func (b *build) stateSize(x int) int { return len(b.blocks[x].cols) + len(b.blocks[x].rows) }
+
+// blockKindRank puts the core first, then state, services and shared blocks.
+var blockKindRank = map[BlockKind]int{Core: 0, State: 1, Service: 2, Shared: 3}
+
+// compareBlocks orders blocks x and y for display: by kind, then the larger
+// state block first, services by their first column and the rest by their
+// first row.
+func (b *build) compareBlocks(x, y int) int {
+	bx, by := b.blocks[x], b.blocks[y]
+	if c := cmp.Compare(blockKindRank[bx.kind], blockKindRank[by.kind]); c != 0 {
+		return c
+	}
+	switch bx.kind {
+	case State:
+		return cmp.Or(cmp.Compare(b.stateSize(y), b.stateSize(x)), cmp.Compare(firstOrEnd(bx.cols), firstOrEnd(by.cols)))
+	case Service:
+		return cmp.Compare(firstOrEnd(bx.cols), firstOrEnd(by.cols))
+	case Core, Shared:
+	}
+	return cmp.Compare(firstOrEnd(bx.rows), firstOrEnd(by.rows))
+}
+
+// firstOrEnd returns the first of xs, or a number past any index when xs is
+// empty, so that an empty block sorts last.
+func firstOrEnd(xs []int) int {
+	if len(xs) == 0 {
+		return 1 << 30
+	}
+	return xs[0]
+}
+
+// displayCols lists the columns in display order, as old indexes: block by
+// block, then the hubs, infrastructure and unused fields outside blocks.
+func (b *build) displayCols(live []int) []int {
+	var cols []int
 	for _, x := range live {
 		cols = append(cols, b.blocks[x].cols...)
-		rows = append(rows, b.blocks[x].rows...)
 	}
 	for _, class := range []func(Column) bool{
 		func(c Column) bool { return c.Hub },
 		func(c Column) bool { return c.Class == Infra },
 		func(c Column) bool { return c.Class == Unused },
 	} {
-		for j, c := range r.Columns {
+		for j, c := range b.r.Columns {
 			if c.Block < 0 && class(c) && !slices.Contains(cols, j) {
 				cols = append(cols, j)
 			}
 		}
 	}
+	return cols
+}
+
+// displayRows lists the rows in display order, as old indexes: block by
+// block, then the bridges and the free methods.
+func (b *build) displayRows(live []int) []int {
+	var rows []int
+	for _, x := range live {
+		rows = append(rows, b.blocks[x].rows...)
+	}
 	for _, k := range []RowKind{Bridge, Free} {
-		for i, row := range r.Rows {
+		for i, row := range b.r.Rows {
 			if row.Kind == k {
 				rows = append(rows, i)
 			}
 		}
 	}
-	colAt, rowAt := invert(cols), invert(rows)
+	return rows
+}
 
-	// Permute everything.
-	oldCols, oldRows, oldCell, oldCall, oldVal := r.Columns, r.Rows, b.cell, b.call, b.val
-	oldSyms, oldRowBlock, oldWhy, oldReads := b.syms, b.rowBlock, b.why, b.readsAt
-	r.Columns, r.Rows = make([]Column, len(cols)), make([]Row, len(rows))
-	b.syms, b.rowBlock, b.why, b.readsAt = make([]*ast.Symbol, len(rows)), make([]int, len(rows)), make([]why, len(rows)), make([][]int, len(rows))
-	b.cell, b.call, b.val = make([][]use, len(rows)), make([][]int, len(rows)), make([][]bool, len(rows))
+// permuteCols puts the report's columns in the display order cols, with
+// their blocks renumbered by newBlock.
+func (b *build) permuteCols(cols, newBlock []int) {
+	r := b.r
+	oldCols := r.Columns
+	r.Columns = make([]Column, len(cols))
 	for n, j := range cols {
 		r.Columns[n] = oldCols[j]
 		if c := &r.Columns[n]; c.Block >= 0 {
 			c.Block = newBlock[c.Block]
 		}
 	}
+}
+
+// permuteRows puts the report's rows, and what is kept per row, in the
+// display order rows, with the indexes they hold mapped through newBlock,
+// colAt and rowAt.
+func (b *build) permuteRows(rows, newBlock, colAt, rowAt []int) {
+	r := b.r
+	oldRows, oldSyms, oldRowBlock, oldWhy, oldReads := r.Rows, b.syms, b.rowBlock, b.why, b.readsAt
+	r.Rows = make([]Row, len(rows))
+	b.syms, b.rowBlock, b.why, b.readsAt = make([]*ast.Symbol, len(rows)), make([]int, len(rows)), make([]why, len(rows)), make([][]int, len(rows))
 	for n, i := range rows {
 		r.Rows[n] = oldRows[i]
 		b.syms[n] = oldSyms[i]
@@ -890,6 +960,15 @@ func (b *build) order() {
 		w.cols, w.blocks, w.callees, w.infra = remap(w.cols, colAt), remap(w.blocks, newBlock), remap(w.callees, rowAt), remap(w.infra, colAt)
 		b.why[n] = w
 		b.readsAt[n] = remap(oldReads[i], colAt)
+	}
+}
+
+// permuteCells puts the cells, calls and value uses in the display order
+// cols and rows.
+func (b *build) permuteCells(cols, rows []int) {
+	oldCell, oldCall, oldVal := b.cell, b.call, b.val
+	b.cell, b.call, b.val = make([][]use, len(rows)), make([][]int, len(rows)), make([][]bool, len(rows))
+	for n, i := range rows {
 		b.cell[n] = make([]use, len(cols))
 		b.call[n] = make([]int, len(rows))
 		b.val[n] = make([]bool, len(rows))
@@ -901,13 +980,21 @@ func (b *build) order() {
 			b.val[n][m] = oldVal[i][k]
 		}
 	}
-	b.glue = remap(b.glue, rowAt)
+}
+
+// remapShared maps the columns of the shared state through colAt.
+func (b *build) remapShared(colAt []int) {
 	for s := range b.shared {
 		b.shared[s].col = colAt[b.shared[s].col]
 		for p := range b.shared[s].parts {
 			b.shared[s].parts[p] = remap(b.shared[s].parts[p], colAt)
 		}
 	}
+}
+
+// keepLive keeps only the live blocks, in their display order, with their
+// columns and rows mapped through colAt and rowAt.
+func (b *build) keepLive(live, colAt, rowAt []int) {
 	blocks := make([]*blk, len(live))
 	for n, x := range live {
 		bl := b.blocks[x]
@@ -918,8 +1005,12 @@ func (b *build) order() {
 		blocks[n] = bl
 	}
 	b.blocks = blocks
+}
 
-	// Cells, calls and the report's blocks.
+// fillRows gives each report row its cells and calls, and lists the
+// bridges and free methods.
+func (b *build) fillRows() {
+	r := b.r
 	for i := range r.Rows {
 		row := &r.Rows[i]
 		for j, u := range b.cell[i] {
@@ -940,6 +1031,12 @@ func (b *build) order() {
 		case Member:
 		}
 	}
+}
+
+// reportBlocks adds the blocks to the report and counts those that are not
+// shared.
+func (b *build) reportBlocks() {
+	r := b.r
 	for n, bl := range b.blocks {
 		r.Blocks = append(r.Blocks, Block{Letter: letter(n), Kind: bl.kind, Columns: orEmpty(bl.cols), Rows: orEmpty(bl.rows),
 			Crossings: []Crossing{}, Outside: []Outside{}})
@@ -947,6 +1044,12 @@ func (b *build) order() {
 			r.Split++
 		}
 	}
+}
+
+// rowNotes gives each row its reason, and notes on what it reads from a
+// service block and, for glue, which services it also uses.
+func (b *build) rowNotes() {
+	r := b.r
 	for i := range r.Rows {
 		r.Rows[i].Reason = b.reason(i)
 		if reads := b.readsAt[i]; len(reads) > 0 {
@@ -954,18 +1057,19 @@ func (b *build) order() {
 		}
 	}
 	for _, i := range b.glue {
-		var uses []int
-		for j, u := range b.cell[i] {
-			if u.any() && b.isService(j) {
-				uses = append(uses, j)
-			}
+		r.Rows[i].Notes = append(r.Rows[i].Notes, fmt.Sprintf("also uses %s: extract that part first", b.colsIn(b.serviceUses(i))))
+	}
+}
+
+// serviceUses returns the service columns row i uses.
+func (b *build) serviceUses(i int) []int {
+	var uses []int
+	for j, u := range b.cell[i] {
+		if u.any() && b.isService(j) {
+			uses = append(uses, j)
 		}
-		r.Rows[i].Notes = append(r.Rows[i].Notes, fmt.Sprintf("also uses %s: extract that part first", b.colsIn(uses)))
 	}
-	for n := range r.Blocks {
-		b.label(n)
-	}
-	r.LCOM4 = b.lcom4()
+	return uses
 }
 
 // reason renders why row i was placed.
@@ -1010,22 +1114,7 @@ func (b *build) label(n int) {
 	case State:
 		out.Reason = "state of its own: " + b.colNames(bl.cols) + ", written by " + b.writersOf(bl.cols)
 	case Service:
-		var kinds []string
-		for _, c := range []Class{Config, Collaborator, Temporary} {
-			var of []int
-			for _, j := range bl.cols {
-				if r.Columns[j].Class == c {
-					of = append(of, j)
-				}
-			}
-			if len(of) > 0 {
-				kinds = append(kinds, map[Class]string{Config: "configuration", Collaborator: "collaborators", Temporary: "the state of one operation"}[c]+" "+b.colNames(of))
-			}
-		}
-		out.Reason = strings.Join(kinds, ", ") + " and the methods using them"
-		for _, m := range bl.merged {
-			out.Reason += fmt.Sprintf("; %s only called from %s", b.rowNames(m.rows, 3), b.rowNames(m.callers, 3))
-		}
+		out.Reason = b.serviceReason(bl)
 	case Shared:
 		out.Label = "needs only " + b.colNames(bl.hubs)
 		out.Reason = "methods that use only the hub " + b.colNames(bl.hubs)
@@ -1041,6 +1130,28 @@ func (b *build) label(n int) {
 			out.Label = r.Rows[bl.rows[0]].Method
 		}
 	}
+}
+
+// serviceReason says what service block bl holds: its configuration,
+// collaborators and state of one operation, and the helpers merged into it.
+func (b *build) serviceReason(bl *blk) string {
+	var kinds []string
+	for _, c := range []Class{Config, Collaborator, Temporary} {
+		var of []int
+		for _, j := range bl.cols {
+			if b.r.Columns[j].Class == c {
+				of = append(of, j)
+			}
+		}
+		if len(of) > 0 {
+			kinds = append(kinds, map[Class]string{Config: "configuration", Collaborator: "collaborators", Temporary: "the state of one operation"}[c]+" "+b.colNames(of))
+		}
+	}
+	reason := strings.Join(kinds, ", ") + " and the methods using them"
+	for _, m := range bl.merged {
+		reason += fmt.Sprintf("; %s only called from %s", b.rowNames(m.rows, 3), b.rowNames(m.callers, 3))
+	}
+	return reason
 }
 
 func (b *build) writersOf(cols []int) string {
@@ -1087,52 +1198,111 @@ func (b *build) lcom4() int {
 // findings reports the patterns of the matrix.
 func (b *build) findings() {
 	r := b.r
-	add := func(f Finding) {
-		f.Rows, f.Cols, f.Blocks = orEmpty(f.Rows), orEmpty(f.Cols), orEmpty(f.Blocks)
-		r.Findings = append(r.Findings, f)
+	b.glueFindings()
+	b.sharedStateFindings()
+	b.articulationFindings()
+	if len(b.bridges) > 0 {
+		b.addFinding(Finding{Kind: "bridge", Rows: b.bridges,
+			Text:   b.rowNames(b.bridges, 0) + " only call methods of several blocks",
+			Advice: "Orchestration: keep them in a thin coordinator, an application service that holds the extracted parts"})
 	}
+	b.freeFinding()
+	b.hubFindings()
+	for n, bl := range b.blocks {
+		if bl.kind == Shared {
+			b.addFinding(Finding{Kind: "hubOnly", Rows: bl.rows, Cols: bl.hubs, Blocks: []int{n},
+				Text:   fmt.Sprintf("%s need only %s (%s)", b.rowNames(bl.rows, 0), b.colNames(bl.hubs), letter(n)),
+				Advice: "They depend on nothing but configuration: pass them only what they read of it"})
+		}
+	}
+	for j, c := range r.Columns {
+		if c.Class == Temporary {
+			b.addFinding(Finding{Kind: "temporary", Cols: []int{j}, Blocks: []int{c.Block}, Text: c.Name + " is " + c.Reason,
+				Advice: "Extract that operation into an object of its own that holds it: a method object"})
+		}
+	}
+	for _, cl := range b.clumps() {
+		b.addFinding(Finding{Kind: "clump", Rows: cl.Rows, Cols: cl.Cols,
+			Text:   fmt.Sprintf("%s are used by exactly the same methods (%s)", b.colNames(cl.Cols), b.rowNames(cl.Rows, 4)),
+			Advice: "Fields that always travel together may be one value type"})
+	}
+	b.unusedFinding()
+	b.crossings()
+}
+
+// addFinding adds f to the report, with empty lists rather than nil ones.
+func (b *build) addFinding(f Finding) {
+	f.Rows, f.Cols, f.Blocks = orEmpty(f.Rows), orEmpty(f.Cols), orEmpty(f.Blocks)
+	b.r.Findings = append(b.r.Findings, f)
+}
+
+// glueFindings reports each row that writes the state of its block and also
+// uses service blocks.
+func (b *build) glueFindings() {
+	r := b.r
 	for _, i := range b.glue {
-		var uses []int
+		uses := b.serviceUses(i)
 		var blocks []int
-		for j, u := range b.cell[i] {
-			if u.any() && b.isService(j) {
-				uses = append(uses, j)
-				if !slices.Contains(blocks, r.Columns[j].Block) {
-					blocks = append(blocks, r.Columns[j].Block)
-				}
+		for _, j := range uses {
+			if !slices.Contains(blocks, r.Columns[j].Block) {
+				blocks = append(blocks, r.Columns[j].Block)
 			}
 		}
 		own := b.rowBlock[i]
-		add(Finding{Kind: "glue", Rows: []int{i}, Cols: uses, Blocks: append([]int{own}, blocks...),
+		b.addFinding(Finding{Kind: "glue", Rows: []int{i}, Cols: uses, Blocks: append([]int{own}, blocks...),
 			Text:   fmt.Sprintf("%s writes %s (%s) and uses %s", r.Rows[i].Method, b.colNames(b.why[i].cols), letter(own), b.colsIn(uses)),
 			Advice: "Split it with Extract Method until each piece falls inside one block, then look again: long methods are often what ties the blocks together"})
 	}
+}
+
+// sharedStateFindings reports each column that is state of two blocks, with
+// the methods of each block that write it.
+func (b *build) sharedStateFindings() {
+	r := b.r
 	for _, s := range b.shared {
 		var parts []string
 		var blocks []int
 		for _, p := range s.parts {
-			bl := -1
-			for _, j := range p {
-				if j != s.col && r.Columns[j].Block >= 0 {
-					bl = r.Columns[j].Block
-					break
-				}
+			bl := b.partBlock(s.col, p)
+			if bl < 0 {
+				continue
 			}
-			var writers []int
-			for i := range r.Rows {
-				if b.cell[i][s.col].wr && b.rowBlock[i] == bl {
-					writers = append(writers, i)
-				}
-			}
-			if bl >= 0 {
-				blocks = append(blocks, bl)
-				parts = append(parts, fmt.Sprintf("%s (%s)", or(b.rowNames(writers, 3), "no method"), letter(bl)))
-			}
+			blocks = append(blocks, bl)
+			parts = append(parts, fmt.Sprintf("%s (%s)", or(b.rowNames(b.blockWriters(s.col, bl), 3), "no method"), letter(bl)))
 		}
-		add(Finding{Kind: "sharedState", Cols: []int{s.col}, Blocks: blocks,
+		b.addFinding(Finding{Kind: "sharedState", Cols: []int{s.col}, Blocks: blocks,
 			Text:   fmt.Sprintf("%s is state of two blocks, written by %s", r.Columns[s.col].Name, strings.Join(parts, " and ")),
 			Advice: "Ownership follows writes: choose one block to own it; the other gets the value passed in or asks the owner to change it"})
 	}
+}
+
+// partBlock returns the block of the first column in part other than col,
+// or -1 when none is in a block.
+func (b *build) partBlock(col int, part []int) int {
+	for _, j := range part {
+		if j != col && b.r.Columns[j].Block >= 0 {
+			return b.r.Columns[j].Block
+		}
+	}
+	return -1
+}
+
+// blockWriters returns the rows of block bl that write column col.
+func (b *build) blockWriters(col, bl int) []int {
+	var writers []int
+	for i := range b.r.Rows {
+		if b.cell[i][col].wr && b.rowBlock[i] == bl {
+			writers = append(writers, i)
+		}
+	}
+	return writers
+}
+
+// articulationFindings reports each method that alone ties the columns of
+// its block together: without it, the block's columns fall into two or more
+// parts.
+func (b *build) articulationFindings() {
+	r := b.r
 	for n, bl := range b.blocks {
 		if bl.kind == Shared || len(bl.cols) < 2 || len(bl.rows) < 2 {
 			continue
@@ -1147,26 +1317,32 @@ func (b *build) findings() {
 			for _, p := range parts {
 				sides = append(sides, b.colNames(p))
 			}
-			add(Finding{Kind: "articulation", Rows: []int{m}, Cols: bl.cols, Blocks: []int{n},
+			b.addFinding(Finding{Kind: "articulation", Rows: []int{m}, Cols: bl.cols, Blocks: []int{n},
 				Text:   fmt.Sprintf("only %s ties %s together in %s", r.Rows[m].Method, strings.Join(sides, " and "), letter(n)),
 				Advice: "Extract Method on it until each piece uses one side, then look again: the block may be two"})
 		}
 	}
-	if len(b.bridges) > 0 {
-		add(Finding{Kind: "bridge", Rows: b.bridges,
-			Text:   b.rowNames(b.bridges, 0) + " only call methods of several blocks",
-			Advice: "Orchestration: keep them in a thin coordinator, an application service that holds the extracted parts"})
+}
+
+// freeFinding reports the methods that touch no field and call no method,
+// and the parameter type they all take, if any.
+func (b *build) freeFinding() {
+	if len(b.free) == 0 {
+		return
 	}
-	if len(b.free) > 0 {
-		f := Finding{Kind: "free", Rows: b.free,
-			Text:   b.rowNames(b.free, 0) + " touch no field and call no method",
-			Advice: "Move them out first: functions are the safest extraction"}
-		if p := b.sharedParam(b.free); p != "" && len(b.free) > 1 {
-			f.Text += "; all take " + p
-			f.Advice += "; they may belong with " + strings.TrimLeft(p, "*[]")
-		}
-		add(f)
+	f := Finding{Kind: "free", Rows: b.free,
+		Text:   b.rowNames(b.free, 0) + " touch no field and call no method",
+		Advice: "Move them out first: functions are the safest extraction"}
+	if p := b.sharedParam(b.free); p != "" && len(b.free) > 1 {
+		f.Text += "; all take " + p
+		f.Advice += "; they may belong with " + strings.TrimLeft(p, "*[]")
 	}
+	b.addFinding(f)
+}
+
+// hubFindings reports each hub column with the rows that use it.
+func (b *build) hubFindings() {
+	r := b.r
 	for j, c := range r.Columns {
 		if !c.Hub {
 			continue
@@ -1177,38 +1353,23 @@ func (b *build) findings() {
 				rows = append(rows, i)
 			}
 		}
-		add(Finding{Kind: "hub", Rows: rows, Cols: []int{j}, Text: c.Name + " is " + c.Reason[:strings.Index(c.Reason, ":")],
+		b.addFinding(Finding{Kind: "hub", Rows: rows, Cols: []int{j}, Text: c.Name + " is " + c.Reason[:strings.Index(c.Reason, ":")],
 			Advice: "Give each extracted part what it needs of it rather than splitting along it"})
 	}
-	for n, bl := range b.blocks {
-		if bl.kind == Shared {
-			add(Finding{Kind: "hubOnly", Rows: bl.rows, Cols: bl.hubs, Blocks: []int{n},
-				Text:   fmt.Sprintf("%s need only %s (%s)", b.rowNames(bl.rows, 0), b.colNames(bl.hubs), letter(n)),
-				Advice: "They depend on nothing but configuration: pass them only what they read of it"})
-		}
-	}
-	for j, c := range r.Columns {
-		if c.Class == Temporary {
-			add(Finding{Kind: "temporary", Cols: []int{j}, Blocks: []int{c.Block}, Text: c.Name + " is " + c.Reason,
-				Advice: "Extract that operation into an object of its own that holds it: a method object"})
-		}
-	}
-	for _, cl := range b.clumps() {
-		add(Finding{Kind: "clump", Rows: cl.Rows, Cols: cl.Cols,
-			Text:   fmt.Sprintf("%s are used by exactly the same methods (%s)", b.colNames(cl.Cols), b.rowNames(cl.Rows, 4)),
-			Advice: "Fields that always travel together may be one value type"})
-	}
+}
+
+// unusedFinding reports the columns no method uses.
+func (b *build) unusedFinding() {
 	var unused []int
-	for j, c := range r.Columns {
+	for j, c := range b.r.Columns {
 		if c.Class == Unused {
 			unused = append(unused, j)
 		}
 	}
 	if len(unused) > 0 {
-		add(Finding{Kind: "unused", Cols: unused, Text: b.colNames(unused) + " used by no method",
+		b.addFinding(Finding{Kind: "unused", Cols: unused, Text: b.colNames(unused) + " used by no method",
 			Advice: "Delete what nothing uses, or find the code outside the type that does"})
 	}
-	b.crossings()
 }
 
 // componentsBy groups cols into the sets linked by the given rows.
@@ -1281,33 +1442,45 @@ func (b *build) crossings() {
 		}
 		bl.Exclusive = true
 		for i := range r.Rows {
-			in := b.rowBlock[i] == n
-			for j, u := range b.cell[i] {
-				cb := r.Columns[j].Block
-				if !u.any() || cb < 0 {
-					continue
-				}
-				switch {
-				case in && cb != n:
-					bl.Crossings = append(bl.Crossings, Crossing{Row: i, Col: j, Callee: -1, Out: true, Write: u.wr})
-					if u.wr {
-						bl.Exclusive = false
-					}
-				case !in && cb == n:
-					bl.Crossings = append(bl.Crossings, Crossing{Row: i, Col: j, Callee: -1, Write: u.wr})
-					if u.wr {
-						bl.Exclusive = false
-					}
-				}
+			b.fieldCrossings(bl, n, i)
+			if b.rowBlock[i] == n {
+				b.callCrossings(bl, n, i)
 			}
-			if !in {
-				continue
+		}
+	}
+}
+
+// fieldCrossings adds to bl, block n, the fields row i uses across its
+// edge: other blocks' fields from inside, its own from outside. A write
+// across makes the block not exclusive.
+func (b *build) fieldCrossings(bl *Block, n, i int) {
+	in := b.rowBlock[i] == n
+	for j, u := range b.cell[i] {
+		cb := b.r.Columns[j].Block
+		if !u.any() || cb < 0 {
+			continue
+		}
+		switch {
+		case in && cb != n:
+			bl.Crossings = append(bl.Crossings, Crossing{Row: i, Col: j, Callee: -1, Out: true, Write: u.wr})
+			if u.wr {
+				bl.Exclusive = false
 			}
-			for _, k := range b.callees(i) {
-				if kb := b.rowBlock[k]; kb >= 0 && kb != n {
-					bl.Crossings = append(bl.Crossings, Crossing{Row: i, Col: -1, Callee: k, Out: true})
-				}
+		case !in && cb == n:
+			bl.Crossings = append(bl.Crossings, Crossing{Row: i, Col: j, Callee: -1, Write: u.wr})
+			if u.wr {
+				bl.Exclusive = false
 			}
+		}
+	}
+}
+
+// callCrossings adds to bl, block n, the methods of other blocks that row
+// i, one of its own, calls.
+func (b *build) callCrossings(bl *Block, n, i int) {
+	for _, k := range b.callees(i) {
+		if kb := b.rowBlock[k]; kb >= 0 && kb != n {
+			bl.Crossings = append(bl.Crossings, Crossing{Row: i, Col: -1, Callee: k, Out: true})
 		}
 	}
 }
