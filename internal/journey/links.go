@@ -4,7 +4,6 @@ import (
 	"cmp"
 	"path"
 	"slices"
-	"strings"
 
 	"huginn/internal/ast"
 	"huginn/internal/lineage"
@@ -45,29 +44,7 @@ type LinkSymbol struct {
 // among the symbols live after revision rev, an index into the applied
 // revisions; with rev < 0 nothing is live.
 func LinksAt(h *lineage.History, dir string, rev int, tests bool) *Links {
-	counts := func(s *ast.Symbol) bool { return s != nil && (tests || !strings.HasSuffix(s.Path, "_test.go")) }
-	type live struct {
-		id  lineage.ID
-		sym *ast.Symbol
-	}
-	var all []*ast.Symbol
-	var now []live
-	for sym := range h.All() {
-		var cur *ast.Symbol
-		for _, e := range sym.Events {
-			for _, s := range []*ast.Symbol{e.Old, e.New} {
-				if counts(s) {
-					all = append(all, s)
-				}
-			}
-			if pos, ok := h.Position(e.SHA); ok && pos <= rev {
-				cur = e.New
-			}
-		}
-		if counts(cur) {
-			now = append(now, live{sym.ID, cur})
-		}
-	}
+	all, now := liveAt(h, rev, symbolScope{tests: tests})
 	mods := modpath.Infer(all)
 
 	out := &Links{Dir: dir, Symbols: []LinkSymbol{}, Out: []Link{}, In: []Link{}}
@@ -76,26 +53,7 @@ func LinksAt(h *lineage.History, dir string, rev int, tests bool) *Links {
 		if from == dir {
 			out.Symbols = append(out.Symbols, LinkSymbol{ID: l.id, Name: l.sym.QualifiedName(), Kind: l.sym.Kind})
 		}
-		byDir := map[string]*Link{}
-		for _, ref := range l.sym.Refs {
-			if ref.Kind != ast.RefImport {
-				continue
-			}
-			to := mods.Dir(ref.Pkg)
-			if to == "" || to == from || (from != dir && to != dir) {
-				continue
-			}
-			k := byDir[to]
-			if k == nil {
-				k = &Link{ID: l.id, Name: l.sym.QualifiedName(), Kind: l.sym.Kind, From: from, To: to}
-				byDir[to] = k
-			}
-			if !slices.Contains(k.Names, ref.Name) {
-				k.Names = append(k.Names, ref.Name)
-			}
-			k.Refs += max(1, ref.Count)
-		}
-		for _, k := range byDir {
+		for _, k := range linksOf(l, from, dir, mods) {
 			slices.Sort(k.Names)
 			if from == dir {
 				out.Out = append(out.Out, *k)
@@ -112,4 +70,58 @@ func LinksAt(h *lineage.History, dir string, rev int, tests bool) *Links {
 		return cmp.Or(cmp.Compare(a.From, b.From), cmp.Compare(a.Name, b.Name), cmp.Compare(a.ID, b.ID))
 	})
 	return out
+}
+
+// liveSym is a symbol and its declaration at some revision.
+type liveSym struct {
+	id  lineage.ID
+	sym *ast.Symbol
+}
+
+// liveAt returns every declaration in h that sc counts, to infer the
+// module's packages from, and the symbols live after revision rev.
+func liveAt(h *lineage.History, rev int, sc symbolScope) (all []*ast.Symbol, now []liveSym) {
+	for sym := range h.All() {
+		var cur *ast.Symbol
+		for _, e := range sym.Events {
+			for _, s := range []*ast.Symbol{e.Old, e.New} {
+				if sc.counts(s) {
+					all = append(all, s)
+				}
+			}
+			if pos, ok := h.Position(e.SHA); ok && pos <= rev {
+				cur = e.New
+			}
+		}
+		if sc.counts(cur) {
+			now = append(now, liveSym{sym.ID, cur})
+		}
+	}
+	return all, now
+}
+
+// linksOf groups l's references to other packages of the module by the
+// directory they point to, keeping those into or out of dir. from is l's
+// own directory.
+func linksOf(l liveSym, from, dir string, mods *modpath.Resolver) map[string]*Link {
+	byDir := map[string]*Link{}
+	for _, ref := range l.sym.Refs {
+		if ref.Kind != ast.RefImport {
+			continue
+		}
+		to := mods.Dir(ref.Pkg)
+		if to == "" || to == from || (from != dir && to != dir) {
+			continue
+		}
+		k := byDir[to]
+		if k == nil {
+			k = &Link{ID: l.id, Name: l.sym.QualifiedName(), Kind: l.sym.Kind, From: from, To: to}
+			byDir[to] = k
+		}
+		if !slices.Contains(k.Names, ref.Name) {
+			k.Names = append(k.Names, ref.Name)
+		}
+		k.Refs += max(1, ref.Count)
+	}
+	return byDir
 }

@@ -106,49 +106,12 @@ type SymbolOptions struct {
 // Symbols replays the symbols of package directory dir over j's frames. h
 // must be the history j was built from.
 func (j *Journey) Symbols(h *lineage.History, dir string, opts SymbolOptions) *SymbolView {
-	counts := func(s *ast.Symbol) bool { return s != nil && (opts.Tests || !strings.HasSuffix(s.Path, "_test.go")) }
-	in := func(s *ast.Symbol) bool { return counts(s) && path.Dir(s.Path) == dir }
-
-	type cand struct {
-		sym   *lineage.Symbol
-		first *ast.Symbol // first declaration in dir
-		rev   int         // of that declaration
-		peak  int
-	}
-	var cands []cand
-	for sym := range h.All() {
-		c := cand{sym: sym, rev: -1}
-		for _, e := range sym.Events {
-			if !in(e.New) {
-				continue
-			}
-			if c.first == nil {
-				c.first = e.New
-				c.rev, _ = h.Position(e.SHA)
-			}
-			c.peak = max(c.peak, e.New.Stmts)
-		}
-		if c.first != nil {
-			cands = append(cands, c)
-		}
-	}
+	sc := symbolScope{tests: opts.Tests, dir: dir}
+	cands := symbolCands(h, sc)
 	v := &SymbolView{Dir: dir, Total: len(cands), Symbols: []SymbolPlace{}}
-	if opts.Limit > 0 && len(cands) > opts.Limit {
-		slices.SortStableFunc(cands, func(a, b cand) int {
-			ka, kb := a.sym.ID == opts.Keep, b.sym.ID == opts.Keep
-			if ka != kb {
-				if ka {
-					return -1
-				}
-				return 1
-			}
-			return cmp.Or(cmp.Compare(b.peak, a.peak), cmp.Compare(a.sym.ID, b.sym.ID))
-		})
-		cands = cands[:opts.Limit]
-		v.Truncated = true
-	}
+	cands, v.Truncated = keepBiggest(cands, opts.Limit, opts.Keep)
 	// Place in file order, so a file's symbols sit together.
-	slices.SortFunc(cands, func(a, b cand) int {
+	slices.SortFunc(cands, func(a, b symbolCand) int {
 		return cmp.Or(cmp.Compare(a.first.Path, b.first.Path), cmp.Compare(a.first.StartLine, b.first.StartLine), cmp.Compare(a.sym.ID, b.sym.ID))
 	})
 	idx := map[lineage.ID]int{}
@@ -160,88 +123,221 @@ func (j *Journey) Symbols(h *lineage.History, dir string, opts SymbolOptions) *S
 	}
 	placeSymbols(v.Symbols)
 
-	// Events of the shown symbols, by revision.
-	type change struct {
-		sym int
-		e   *lineage.Event
+	r := symbolReplay{sc: sc, byRev: symbolChanges(h, sc, cands, idx), live: map[int]int{}}
+	v.Frames = make([]SymbolFrame, len(j.Frames))
+	for fi, f := range j.Frames {
+		v.Frames[fi] = r.frame(f)
 	}
-	byRev := map[int][]change{}
+	return v
+}
+
+// symbolScope says which declarations a package view counts.
+type symbolScope struct {
+	tests bool
+	dir   string
+}
+
+// counts reports whether s is a declaration the view counts in any package.
+func (sc symbolScope) counts(s *ast.Symbol) bool {
+	return s != nil && (sc.tests || !strings.HasSuffix(s.Path, "_test.go"))
+}
+
+// in reports whether s is a counted declaration in the view's package.
+func (sc symbolScope) in(s *ast.Symbol) bool { return sc.counts(s) && path.Dir(s.Path) == sc.dir }
+
+// symbolCand is a symbol that was in the package at some point.
+type symbolCand struct {
+	sym   *lineage.Symbol
+	first *ast.Symbol // first declaration in dir
+	rev   int         // of that declaration
+	peak  int
+}
+
+// symbolCands returns every symbol that was ever in the package, in history
+// order.
+func symbolCands(h *lineage.History, sc symbolScope) []symbolCand {
+	var cands []symbolCand
+	for sym := range h.All() {
+		if c, ok := newSymbolCand(h, sc, sym); ok {
+			cands = append(cands, c)
+		}
+	}
+	return cands
+}
+
+// newSymbolCand finds sym's first declaration in the package and the most
+// statements it had there; ok is false if it was never there.
+func newSymbolCand(h *lineage.History, sc symbolScope, sym *lineage.Symbol) (c symbolCand, ok bool) {
+	c = symbolCand{sym: sym, rev: -1}
+	for _, e := range sym.Events {
+		if !sc.in(e.New) {
+			continue
+		}
+		if c.first == nil {
+			c.first = e.New
+			c.rev, _ = h.Position(e.SHA)
+		}
+		c.peak = max(c.peak, e.New.Stmts)
+	}
+	return c, c.first != nil
+}
+
+// keepBiggest cuts cands to limit, keeping keep and then the ones with the
+// most statements; truncated says whether it cut any. A limit of 0 keeps
+// them all.
+func keepBiggest(cands []symbolCand, limit int, keep lineage.ID) (_ []symbolCand, truncated bool) {
+	if limit <= 0 || len(cands) <= limit {
+		return cands, false
+	}
+	slices.SortStableFunc(cands, func(a, b symbolCand) int {
+		ka, kb := a.sym.ID == keep, b.sym.ID == keep
+		if ka != kb {
+			if ka {
+				return -1
+			}
+			return 1
+		}
+		return cmp.Or(cmp.Compare(b.peak, a.peak), cmp.Compare(a.sym.ID, b.sym.ID))
+	})
+	return cands[:limit], true
+}
+
+// symChange is an event of a shown symbol, by the symbol's index in the
+// view.
+type symChange struct {
+	sym int
+	e   *lineage.Event
+}
+
+// symbolChanges groups the events of the shown symbols that touch the
+// package by revision.
+func symbolChanges(h *lineage.History, sc symbolScope, cands []symbolCand, idx map[lineage.ID]int) map[int][]symChange {
+	byRev := map[int][]symChange{}
 	for _, c := range cands {
 		for i := range c.sym.Events {
 			e := &c.sym.Events[i]
-			if !in(e.Old) && !in(e.New) {
+			if !sc.in(e.Old) && !sc.in(e.New) {
 				continue
 			}
 			if rev, ok := h.Position(e.SHA); ok {
-				byRev[rev] = append(byRev[rev], change{idx[c.sym.ID], e})
+				byRev[rev] = append(byRev[rev], symChange{idx[c.sym.ID], e})
 			}
 		}
 	}
+	return byRev
+}
 
-	live := map[int]int{} // symbol → statements
-	v.Frames = make([]SymbolFrame, len(j.Frames))
-	for fi, f := range j.Frames {
-		start := make(map[int]int, len(live))
-		for k, n := range live {
-			start[k] = n
-		}
-		var evs []SymbolEvent
-		for rev := f.Total - f.Commits; rev < f.Total; rev++ {
-			cs := byRev[rev]
-			slices.SortFunc(cs, func(a, b change) int { return cmp.Compare(a.sym, b.sym) })
-			for _, c := range cs {
-				_, was := live[c.sym]
-				now := in(c.e.New)
-				ev := SymbolEvent{Symbol: c.sym, Rev: rev}
-				switch {
-				case !was && now:
-					ev.Kind, ev.Name = Born, c.e.New.QualifiedName()
-					if counts(c.e.Old) && !in(c.e.Old) {
-						ev.Kind, ev.From = MovedIn, path.Dir(c.e.Old.Path)
-					}
-					evs = append(evs, ev)
-				case was && !now:
-					ev.Kind, ev.Name = Died, c.e.Old.QualifiedName()
-					if counts(c.e.New) {
-						ev.Kind, ev.Name, ev.To = MovedOut, c.e.New.QualifiedName(), path.Dir(c.e.New.Path)
-					}
-					evs = append(evs, ev)
-				case was && now:
-					ev.Name = c.e.New.QualifiedName()
-					if c.e.Flags.Has(ast.Renamed) && c.e.Old != nil {
-						r := ev
-						r.Kind, r.From = Renamed, c.e.Old.QualifiedName()
-						evs = append(evs, r)
-					}
-					if c.e.Flags.Has(ast.SignatureChanged) && c.e.Old != nil {
-						s := ev
-						s.Kind, s.Sig, s.OldSig = Signature, c.e.New.Signature, c.e.Old.Signature
-						evs = append(evs, s)
-					}
-				}
-				if now {
-					live[c.sym] = c.e.New.Stmts
-				} else {
-					delete(live, c.sym)
-				}
-			}
-		}
-		sf := SymbolFrame{Events: evs}
-		for k, n := range live {
-			if m, ok := start[k]; !ok || m != n {
-				sf.Set = append(sf.Set, SymbolSize{k, n})
-			}
-		}
-		for k := range start {
-			if _, ok := live[k]; !ok {
-				sf.Gone = append(sf.Gone, k)
-			}
-		}
-		slices.SortFunc(sf.Set, func(a, b SymbolSize) int { return cmp.Compare(a.Symbol, b.Symbol) })
-		slices.Sort(sf.Gone)
-		v.Frames[fi] = sf
+// symbolReplay keeps the package's live symbols while its frames are
+// replayed in order.
+type symbolReplay struct {
+	sc    symbolScope
+	byRev map[int][]symChange
+	live  map[int]int // symbol → statements
+}
+
+// frame replays the revisions of f and returns how they changed the
+// package.
+func (r *symbolReplay) frame(f Frame) SymbolFrame {
+	start := make(map[int]int, len(r.live))
+	for k, n := range r.live {
+		start[k] = n
 	}
-	return v
+	var evs []SymbolEvent
+	for rev := f.Total - f.Commits; rev < f.Total; rev++ {
+		evs = r.revision(evs, rev)
+	}
+	return symbolFrame(start, r.live, evs)
+}
+
+// revision applies the changes of revision rev, by symbol, and appends
+// their events to evs.
+func (r *symbolReplay) revision(evs []SymbolEvent, rev int) []SymbolEvent {
+	cs := r.byRev[rev]
+	slices.SortFunc(cs, func(a, b symChange) int { return cmp.Compare(a.sym, b.sym) })
+	for _, c := range cs {
+		_, was := r.live[c.sym]
+		evs = r.sc.appendEvents(evs, c.sym, rev, c.e, was)
+		if r.sc.in(c.e.New) {
+			r.live[c.sym] = c.e.New.Stmts
+		} else {
+			delete(r.live, c.sym)
+		}
+	}
+	return evs
+}
+
+// appendEvents appends what e did to the package at rev to evs, given
+// whether symbol sym was live before it.
+func (sc symbolScope) appendEvents(evs []SymbolEvent, sym, rev int, e *lineage.Event, was bool) []SymbolEvent {
+	now := sc.in(e.New)
+	ev := SymbolEvent{Symbol: sym, Rev: rev}
+	switch {
+	case !was && now:
+		return append(evs, sc.arrived(ev, e))
+	case was && !now:
+		return append(evs, sc.left(ev, e))
+	case was && now:
+		return appendEdits(evs, ev, e)
+	}
+	return evs
+}
+
+// arrived fills in ev for a symbol that became live: born here, or moved in
+// from another package.
+func (sc symbolScope) arrived(ev SymbolEvent, e *lineage.Event) SymbolEvent {
+	ev.Kind, ev.Name = Born, e.New.QualifiedName()
+	if sc.counts(e.Old) && !sc.in(e.Old) {
+		ev.Kind, ev.From = MovedIn, path.Dir(e.Old.Path)
+	}
+	return ev
+}
+
+// left fills in ev for a live symbol that went away: deleted, or moved out
+// to another package.
+func (sc symbolScope) left(ev SymbolEvent, e *lineage.Event) SymbolEvent {
+	ev.Kind, ev.Name = Died, e.Old.QualifiedName()
+	if sc.counts(e.New) {
+		ev.Kind, ev.Name, ev.To = MovedOut, e.New.QualifiedName(), path.Dir(e.New.Path)
+	}
+	return ev
+}
+
+// appendEdits appends the rename and the signature change, if any, of a
+// symbol that stayed live.
+func appendEdits(evs []SymbolEvent, ev SymbolEvent, e *lineage.Event) []SymbolEvent {
+	ev.Name = e.New.QualifiedName()
+	if e.Old == nil {
+		return evs
+	}
+	if e.Flags.Has(ast.Renamed) {
+		r := ev
+		r.Kind, r.From = Renamed, e.Old.QualifiedName()
+		evs = append(evs, r)
+	}
+	if e.Flags.Has(ast.SignatureChanged) {
+		s := ev
+		s.Kind, s.Sig, s.OldSig = Signature, e.New.Signature, e.Old.Signature
+		evs = append(evs, s)
+	}
+	return evs
+}
+
+// symbolFrame is the frame that takes the live symbols from start to end.
+func symbolFrame(start, end map[int]int, evs []SymbolEvent) SymbolFrame {
+	sf := SymbolFrame{Events: evs}
+	for k, n := range end {
+		if m, ok := start[k]; !ok || m != n {
+			sf.Set = append(sf.Set, SymbolSize{k, n})
+		}
+	}
+	for k := range start {
+		if _, ok := end[k]; !ok {
+			sf.Gone = append(sf.Gone, k)
+		}
+	}
+	slices.SortFunc(sf.Set, func(a, b SymbolSize) int { return cmp.Compare(a.Symbol, b.Symbol) })
+	slices.Sort(sf.Gone)
+	return sf
 }
 
 // placeSymbols spreads the symbols over the disc on a sunflower spiral, then
