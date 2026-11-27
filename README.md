@@ -727,18 +727,21 @@ Side effects stay in place the same way: only `internal/git` runs programs
 `cmd/huginn` and tests, code doesn't exit, print to stdout or make a root
 context; it takes a `context.Context` and an `io.Writer` from its caller.
 
-Functions and packages have size budgets. golangci-lint holds each function
-to a cognitive complexity of 20 (`gocognit`) and a cyclomatic complexity of
-15 (`gocyclo`), and a test in `internal/limits` holds each package to 80
-functions and methods, exported or not, test files aside. The packages that
-were already bigger when the budget came in are frozen at that size: they
-may shrink, and the test asks for the number to come down when they do, but
-not grow. The two kinds of budget close each other's way out: splitting a
-function into helpers grows its package, and folding helpers back grows the
-function, so code that keeps growing has to move into a package of its own.
+Functions have a complexity budget, and packages a direction. golangci-lint
+holds each function to a cognitive complexity of 20 (`gocognit`) and a
+cyclomatic complexity of 15 (`gocyclo`); one over either is split into steps,
+which can stay in the same package as unexported helpers. Package size is
+not a limit. In Go the package is what hides an implementation, so splitting
+one along a count rather than a seam exports what was private and adds import
+edges, and the standard library has packages of several hundred functions.
+Instead, when a package past 80 functions and methods grows, the question is
+whether the new code is still that package's job.
+
 When Claude Code works in this repository, a hook (`.claude/hooks/limits.sh`)
-runs these checks after each edit to a Go file and sends Claude back to
-rework a change that breaks one.
+runs after each edit to a Go file. It sends Claude back to split a function
+over the complexity budget, which CI would fail, and asks the package
+question when a package past 80 grows beyond its size at `HEAD`, without
+undoing the edit.
 
 ### Index cache
 
