@@ -5,6 +5,7 @@ import (
 	"io"
 	"strings"
 
+	"huginn/internal/review"
 	"huginn/internal/semdiff"
 )
 
@@ -23,14 +24,14 @@ func (m *markdown) printf(format string, args ...any) {
 	}
 }
 
-func (m *markdown) review(rv *reviewed) {
+func (m *markdown) review(rv *review.Review) {
 	r := rv.Report
 	where := "the whole repository"
 	if len(rv.Scope) > 0 {
 		where = code(rv.Scope...)
 	}
 	m.printf("### huginn review of %s\n\n", where)
-	m.printf("%s into %s, from merge base %.7s · %s\n\n", code(rv.headName()), code(rv.Target),
+	m.printf("%s into %s, from merge base %.7s · %s\n\n", code(rv.HeadName()), code(rv.Target),
 		rv.MergeBase, plural(len(rv.Commits), "commit"))
 	m.printf("**%s**", r.Headline())
 	var counts []string

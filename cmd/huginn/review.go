@@ -3,7 +3,6 @@ package main
 import (
 	"context"
 	"encoding/json"
-	"errors"
 	"flag"
 	"fmt"
 	"io"
@@ -12,13 +11,14 @@ import (
 	"strings"
 
 	"huginn/internal/git"
+	"huginn/internal/review"
 	"huginn/internal/semdiff"
 )
 
-// review prints what a merge request changes, the code that depends on it
+// reviewMergeRequest prints what a merge request changes, the code that depends on it
 // and the relations it starts and stops between packages, limited to the
 // folders given.
-func review(ctx context.Context, stdout, stderr io.Writer, args []string) error {
+func reviewMergeRequest(ctx context.Context, stdout, stderr io.Writer, args []string) error {
 	fs := flag.NewFlagSet("review", flag.ContinueOnError)
 	fs.SetOutput(stderr)
 	dir := fs.String("C", "", "repository directory (default: the first folder's repository, or the current directory)")
@@ -38,46 +38,14 @@ func review(ctx context.Context, stdout, stderr io.Writer, args []string) error 
 	if err != nil {
 		return err
 	}
-	target, err := targetBranch(ctx, repo, *base, os.Getenv)
+	rv, err := review.Build(ctx, repo, review.Options{
+		Base: *base, Head: *head, Scope: scope, IncludeGenerated: *includeGenerated, Getenv: os.Getenv,
+	})
 	if err != nil {
 		return err
 	}
-	mergeBase, err := repo.MergeBase(ctx, target, *head)
-	if err != nil {
-		return err
-	}
-	rg, err := repo.DiffRange(ctx, mergeBase, *head)
-	if err != nil {
-		return err
-	}
-	tree, err := repo.Tree(ctx, rg.Head)
-	if err != nil {
-		return err
-	}
-	commits, err := repo.Commits(ctx, git.Options{Branch: rg.Base + ".." + rg.Head})
-	if err != nil {
-		return err
-	}
-
-	in := semdiff.Input{Tree: tree.Files, GoMod: tree.GoMod, IncludeGenerated: *includeGenerated, Scope: scope}
-	for _, fd := range rg.Files {
-		in.Files = append(in.Files, semdiff.FileDiff{Old: fd.Old, New: fd.New, Added: fd.Added, Removed: fd.Removed})
-	}
-	for _, err := range rg.ParseErrors {
-		fmt.Fprintln(stderr, "warning:", err)
-	}
-	if n := len(tree.ParseErrors); n > 0 {
-		fmt.Fprintf(stderr, "warning: %d files in the tree have syntax errors; callers may be missing\n", n)
-	}
-
-	rv := &reviewed{
-		Head:      *head,
-		HeadHash:  rg.Head,
-		Target:    target,
-		MergeBase: rg.Base,
-		Commits:   commits,
-		Scope:     scope,
-		Report:    semdiff.Build(in),
+	for _, w := range rv.Warnings {
+		fmt.Fprintln(stderr, "warning:", w)
 	}
 	switch *format {
 	case "json":
@@ -92,25 +60,6 @@ func review(ctx context.Context, stdout, stderr io.Writer, args []string) error 
 	p := &printer{w: stdout, maxCallers: *maxCallers, scoped: len(scope) > 0}
 	p.review(rv)
 	return p.err
-}
-
-// reviewed is a merge request's report, with what it was compared against.
-type reviewed struct {
-	Head      string // as given: "HEAD", a branch or a commit
-	HeadHash  string
-	Target    string   // the branch or commit it goes into
-	MergeBase string   // where it was compared from
-	Commits   []string // between the merge base and the head, oldest first
-	Scope     []string // slash-separated repository paths; empty for the whole repository
-	Report    *semdiff.Report
-}
-
-// headName names the head as given, with its short hash unless it is one.
-func (rv *reviewed) headName() string {
-	if strings.HasPrefix(rv.HeadHash, rv.Head) {
-		return fmt.Sprintf("%.7s", rv.HeadHash)
-	}
-	return fmt.Sprintf("%s (%.7s)", rv.Head, rv.HeadHash)
 }
 
 // openScoped opens the repository and turns the folders, relative to dir
@@ -177,32 +126,10 @@ func existing(p string) string {
 	}
 }
 
-// targetBranch returns what a merge request goes into: base if given, else
-// the target that GitLab's merge request pipelines or GitHub's pull request
-// workflows name in the environment, else the remote's default branch.
-func targetBranch(ctx context.Context, repo *git.Repo, base string, getenv func(string) string) (string, error) {
-	if base != "" {
-		return base, nil
-	}
-	if sha := getenv("CI_MERGE_REQUEST_DIFF_BASE_SHA"); sha != "" {
-		return sha, nil
-	}
-	for _, v := range []string{"CI_MERGE_REQUEST_TARGET_BRANCH_NAME", "GITHUB_BASE_REF"} {
-		if b := getenv(v); b != "" {
-			return "origin/" + b, nil
-		}
-	}
-	b, err := repo.DefaultBranch(ctx)
-	if err != nil {
-		return "", errors.Join(err, errors.New("name the branch the merge request goes into with -base"))
-	}
-	return b, nil
-}
-
 // review prints a merge request's report: what it reaches and the relations
 // it changes first, then the files and changes they come from.
-func (p *printer) review(rv *reviewed) {
-	p.printf("review %s into %s\n", rv.headName(), rv.Target)
+func (p *printer) review(rv *review.Review) {
+	p.printf("review %s into %s\n", rv.HeadName(), rv.Target)
 	p.printf("from merge base %.7s · %s\n", rv.MergeBase, plural(len(rv.Commits), "commit"))
 	if len(rv.Scope) > 0 {
 		p.printf("scope: %s\n", strings.Join(rv.Scope, ", "))

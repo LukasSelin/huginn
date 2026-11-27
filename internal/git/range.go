@@ -5,8 +5,10 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"path"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"strings"
 	"sync"
 
@@ -179,6 +181,77 @@ func (r *Repo) DefaultBranch(ctx context.Context) (string, error) {
 		}
 	}
 	return "", errors.New("no default branch: none of origin/HEAD, origin/main, origin/master, main and master exists")
+}
+
+// CurrentBranch returns the name of the branch checked out, or "" when the
+// head is detached.
+func (r *Repo) CurrentBranch(ctx context.Context) (string, error) {
+	cmd := r.command(ctx, "symbolic-ref", "--quiet", "--short", "HEAD")
+	var stderr bytes.Buffer
+	cmd.Stderr = &stderr
+	out, err := cmd.Output()
+	if err != nil {
+		if stderr.Len() == 0 {
+			return "", nil // exits 1 without a word when detached
+		}
+		return "", gitError(cmd, err, &stderr)
+	}
+	return strings.TrimSpace(string(out)), nil
+}
+
+// Branches returns the names of the local and remote-tracking branches,
+// those committed to most recently first, without the remotes' HEADs.
+func (r *Repo) Branches(ctx context.Context) ([]string, error) {
+	cmd := r.command(ctx, "for-each-ref", "--sort=-committerdate", "--format=%(refname)", "refs/heads", "refs/remotes")
+	var stderr bytes.Buffer
+	cmd.Stderr = &stderr
+	out, err := cmd.Output()
+	if err != nil {
+		return nil, gitError(cmd, err, &stderr)
+	}
+	var names []string
+	for _, ref := range strings.Fields(string(out)) {
+		if strings.HasSuffix(ref, "/HEAD") {
+			continue
+		}
+		name, ok := strings.CutPrefix(ref, "refs/heads/")
+		if !ok {
+			name = strings.TrimPrefix(ref, "refs/remotes/")
+		}
+		names = append(names, name)
+	}
+	return names, nil
+}
+
+// GoDirs returns the slash-separated directories that hold regular .go
+// files at rev, sorted, with "." for the root.
+func (r *Repo) GoDirs(ctx context.Context, rev string) ([]string, error) {
+	tree, err := r.resolve(ctx, rev, "tree")
+	if err != nil {
+		return nil, err
+	}
+	cmd := r.command(ctx, "ls-tree", "-r", "-z", "--full-tree", tree)
+	var stderr bytes.Buffer
+	cmd.Stderr = &stderr
+	out, err := cmd.Output()
+	if err != nil {
+		return nil, gitError(cmd, err, &stderr)
+	}
+	seen := map[string]bool{}
+	var dirs []string
+	for entry := range strings.SplitSeq(strings.TrimSuffix(string(out), "\x00"), "\x00") {
+		// "<mode> <type> <object>\t<path>"
+		meta, p, ok := strings.Cut(entry, "\t")
+		if f := strings.Fields(meta); !ok || len(f) != 3 || !isGoFile(p, f[0]) {
+			continue
+		}
+		if d := path.Dir(p); !seen[d] {
+			seen[d] = true
+			dirs = append(dirs, d)
+		}
+	}
+	slices.Sort(dirs)
+	return dirs, nil
 }
 
 // Toplevel returns the absolute path of the root of the working tree.
