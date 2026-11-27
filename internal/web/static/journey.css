@@ -232,7 +232,8 @@
 .card .sig.new { color: var(--added); }
 .card .sig.new::before { content: '+ '; }
 .ov-br { right: 20px; bottom: 18px; display: flex; align-items: center; gap: 6px; }
-.ov-zoom { right: 20px; top: 50%; transform: translateY(-50%); display: flex; flex-direction: column; gap: 6px; pointer-events: auto; cursor: auto; }
+.ov-zoom { right: 20px; top: 50%; transform: translateY(-50%); display: flex; flex-direction: column; gap: 14px; pointer-events: auto; cursor: auto; }
+.zgroup { display: flex; flex-direction: column; gap: 6px; }
 .icon.zb { width: 30px; height: 30px; border-radius: 8px; }
 
 /* The architecture view: the history building the packages' layers in 3D,

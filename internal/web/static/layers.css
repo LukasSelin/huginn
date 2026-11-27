@@ -32,6 +32,14 @@
 .icon.play { width: 42px; height: 42px; background: var(--accent); border-color: var(--accent); color: #1A1408; }
 .icon.play:hover { background: #FFC27A; }
 .icon.zb { width: 30px; height: 30px; border-radius: 8px; }
+.icon.zb:disabled { opacity: .35; cursor: default; }
+.zgroup { display: flex; gap: 8px; margin-left: 8px; }
+/* Narrow, the spread buttons go on a line of their own above the rest,
+   clear of the legend. */
+@media (max-width: 700px) {
+  .ov-views { flex-wrap: wrap; justify-content: flex-end; }
+  .ov-views .zgroup { order: -1; flex-basis: 100%; justify-content: flex-end; margin-left: 0; }
+}
 .seg { display: flex; gap: 2px; padding: 3px; background: var(--raised); border-radius: 8px; }
 .seg button { border: 0; background: none; padding: 4px 10px; border-radius: 5px; color: var(--muted); cursor: pointer; font-size: 12px; }
 .seg button[aria-pressed="true"] { background: var(--line-strong); color: var(--text); }
