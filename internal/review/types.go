@@ -54,34 +54,7 @@ type touchedType struct {
 
 // types reviews the seams of the struct types the report's changes touch.
 func types(r *semdiff.Report, in semdiff.Input, h *lineage.History) []TypeReview {
-	var touched []*touchedType
-	at := map[[2]string]*touchedType{}
-	for _, ch := range r.Changes {
-		if strings.HasSuffix(ch.Path, "_test.go") {
-			continue
-		}
-		_, qn, _ := strings.Cut(ch.Name, ".") // drop the package name
-		var recv, member string
-		switch ch.Symbol {
-		case "method":
-			i := strings.LastIndex(qn, ".")
-			recv, member = strings.TrimSuffix(strings.TrimPrefix(qn[:i], "(*"), ")"), qn[i+1:]
-		case "type":
-			recv, member = qn, "type"
-		default:
-			continue
-		}
-		k := [2]string{path.Dir(ch.Path), recv}
-		t := at[k]
-		if t == nil {
-			t = &touchedType{dir: k[0], name: recv}
-			at[k] = t
-			touched = append(touched, t)
-		}
-		if !slices.Contains(t.changed, member) {
-			t.changed = append(t.changed, member)
-		}
-	}
+	touched := touchedTypes(r)
 	if len(touched) == 0 {
 		return nil
 	}
@@ -118,21 +91,68 @@ func types(r *semdiff.Report, in semdiff.Input, h *lineage.History) []TypeReview
 		out = append(out, tr)
 	}
 	slices.SortStableFunc(out, func(a, b TypeReview) int {
-		size := func(t TypeReview) int {
-			n := 0
-			for _, r := range []*cohesion.Report{t.Before, t.After} {
-				if r != nil {
-					n = max(n, len(r.Methods))
-				}
-			}
-			return n
-		}
-		return cmp.Compare(size(b), size(a))
+		return cmp.Compare(typeSize(b), typeSize(a))
 	})
 	if len(out) > maxTypes {
 		out = out[:maxTypes]
 	}
 	return out
+}
+
+// touchedTypes returns the struct types the report's changes touch outside
+// test files, in the order of their first change, each with the members
+// changed.
+func touchedTypes(r *semdiff.Report) []*touchedType {
+	var touched []*touchedType
+	at := map[[2]string]*touchedType{}
+	for _, ch := range r.Changes {
+		recv, member, ok := touchedMember(ch)
+		if !ok {
+			continue
+		}
+		k := [2]string{path.Dir(ch.Path), recv}
+		t := at[k]
+		if t == nil {
+			t = &touchedType{dir: k[0], name: recv}
+			at[k] = t
+			touched = append(touched, t)
+		}
+		if !slices.Contains(t.changed, member) {
+			t.changed = append(t.changed, member)
+		}
+	}
+	return touched
+}
+
+// touchedMember returns the type a change touches and the member it
+// changed: a method by name, or "type" for the type's own definition. It
+// reports false for a change in a test file or to anything else.
+func touchedMember(ch semdiff.Change) (recv, member string, ok bool) {
+	if strings.HasSuffix(ch.Path, "_test.go") {
+		return "", "", false
+	}
+	_, qn, _ := strings.Cut(ch.Name, ".") // drop the package name
+	switch ch.Symbol {
+	case "method":
+		i := strings.LastIndex(qn, ".")
+		return strings.TrimSuffix(strings.TrimPrefix(qn[:i], "(*"), ")"), qn[i+1:], true
+	case "type":
+		return qn, "type", true
+	default:
+		return "", "", false
+	}
+}
+
+// typeSize is the larger number of methods of a type on either side of
+// the change.
+func typeSize(t TypeReview) int {
+	n := 0
+	for _, r := range []*cohesion.Report{t.Before, t.After} {
+		if r != nil {
+			n = max(n, len(r.Methods))
+		}
+	}
+	return n
 }
 
 // tree finds struct types and their methods in one revision's files, by
