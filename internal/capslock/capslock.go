@@ -113,18 +113,21 @@ type Result map[Func][]Capability
 
 // report is the part of capslock's JSON output that Parse reads.
 type report struct {
-	CapabilityInfo []struct {
-		CapabilityName string `json:"capabilityName"`
-		Capability     string `json:"capability"` // older versions: "CAPABILITY_NETWORK"
-		Path           []struct {
-			Name    string `json:"name"`
-			Package string `json:"package"`
-			Site    *struct {
-				Filename string  `json:"filename"`
-				Line     jsonInt `json:"line"`
-			} `json:"site"`
-		} `json:"path"`
-	} `json:"capabilityInfo"`
+	CapabilityInfo []capabilityInfo `json:"capabilityInfo"`
+}
+
+// capabilityInfo is one capability capslock found, with the path to it.
+type capabilityInfo struct {
+	CapabilityName string `json:"capabilityName"`
+	Capability     string `json:"capability"` // older versions: "CAPABILITY_NETWORK"
+	Path           []struct {
+		Name    string `json:"name"`
+		Package string `json:"package"`
+		Site    *struct {
+			Filename string  `json:"filename"`
+			Line     jsonInt `json:"line"`
+		} `json:"site"`
+	} `json:"path"`
 }
 
 // jsonInt reads an integer written as a number or, as protojson writes
@@ -157,35 +160,50 @@ func Parse(data []byte, root string) (Result, error) {
 		if len(info.Path) == 0 {
 			continue
 		}
-		path := make([]Call, len(info.Path))
-		std := make([]bool, len(info.Path)) // called from the standard library
-		for i, p := range info.Path {
-			pkg, name := split(p.Name, p.Package)
-			path[i] = Call{Package: pkg, Name: name}
-			if s := p.Site; s != nil && i > 0 {
-				if rel, ok := under(root, s.Filename); ok {
-					path[i].Path, path[i].Line = rel, int(s.Line)
-				} else {
-					std[i] = root != "" && s.Filename != "" && !inModuleCache(s.Filename)
-				}
-			}
-		}
+		path, std := callPath(info, root)
 		fn, ok := declared(path[0])
 		if !ok || !plausible(path, std) {
 			continue
 		}
-		c := Capability{Name: cmp.Or(info.CapabilityName, strings.TrimPrefix(info.Capability, "CAPABILITY_")), Path: displayed(path)}
-		caps := out[fn]
-		if i := slices.IndexFunc(caps, func(x Capability) bool { return x.Name == c.Name }); i < 0 {
-			out[fn] = append(caps, c)
-		} else if len(c.Path) < len(caps[i].Path) {
-			caps[i] = c
-		}
+		out.keep(fn, Capability{Name: cmp.Or(info.CapabilityName, strings.TrimPrefix(info.Capability, "CAPABILITY_")), Path: displayed(path)})
 	}
 	for _, caps := range out {
 		slices.SortFunc(caps, func(a, b Capability) int { return strings.Compare(a.Name, b.Name) })
 	}
 	return out, nil
+}
+
+// callPath reads the path to a capability capslock found, with the call
+// sites in files under root relative to it, and which of its calls the
+// standard library makes.
+func callPath(info capabilityInfo, root string) (path []Call, std []bool) {
+	path = make([]Call, len(info.Path))
+	std = make([]bool, len(info.Path)) // called from the standard library
+	for i, p := range info.Path {
+		pkg, name := split(p.Name, p.Package)
+		path[i] = Call{Package: pkg, Name: name}
+		s := p.Site
+		if s == nil || i == 0 {
+			continue
+		}
+		if rel, ok := under(root, s.Filename); ok {
+			path[i].Path, path[i].Line = rel, int(s.Line)
+		} else {
+			std[i] = root != "" && s.Filename != "" && !inModuleCache(s.Filename)
+		}
+	}
+	return path, std
+}
+
+// keep adds the capability c of fn, keeping the shorter path of two to the
+// same capability.
+func (r Result) keep(fn Func, c Capability) {
+	caps := r[fn]
+	if i := slices.IndexFunc(caps, func(x Capability) bool { return x.Name == c.Name }); i < 0 {
+		r[fn] = append(caps, c)
+	} else if len(c.Path) < len(caps[i].Path) {
+		caps[i] = c
+	}
 }
 
 // inModuleCache reports whether a file is in Go's module cache, whose
