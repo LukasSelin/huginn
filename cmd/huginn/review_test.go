@@ -189,6 +189,80 @@ func TestReviewCapabilities(t *testing.T) {
 	}
 }
 
+// TestReviewCapabilitiesGrouped lists the changes reaching outside the
+// process through the same call under it, their paths there stopping at
+// the call, and the change leaving elsewhere on its own.
+func TestReviewCapabilitiesGrouped(t *testing.T) {
+	network := func(steps ...review.Step) review.Capability {
+		return review.Capability{Name: "NETWORK", New: true, Elided: 1, Path: append(steps,
+			review.Step{Name: "http.Get", Path: "payments/payments.go", Line: 6},
+			review.Step{Name: "net.(*Dialer).DialContext"})}
+	}
+	rv := &review.Review{
+		Report: &semdiff.Report{Changes: []semdiff.Change{
+			{Name: "payments.Authorize", Symbol: "func"}, {Name: "billing.Charge", Symbol: "func"}, {Name: "store.Load", Symbol: "func"},
+		}},
+		Traced: true,
+		Focus: []review.Focus{{
+			Kind: review.FocusExternal, Name: "payments.Authorize", Path: "payments/payments.go", Line: 5, What: "+1 stmt", Change: 0,
+			Reaches:      []semdiff.Caller{{Name: "billing.Charge", Calls: 1}},
+			Capabilities: []review.Capability{network(review.Step{Name: "payments.Authorize"})},
+		}, {
+			Kind: review.FocusExternal, Name: "billing.Charge", Path: "billing/billing.go", Line: 5, What: "+2 stmts", Change: 1,
+			Capabilities: []review.Capability{
+				network(review.Step{Name: "billing.Charge"}, review.Step{Name: "payments.Authorize", Path: "billing/billing.go", Line: 6}),
+				{Name: "FILES", Path: []review.Step{{Name: "billing.Charge"}, {Name: "os.ReadFile", Path: "billing/billing.go", Line: 8}}},
+			},
+		}, {
+			Kind: review.FocusExternal, Name: "store.Load", Path: "store/store.go", Line: 4, What: "body edited, same size", Change: 2,
+			Capabilities: []review.Capability{{Name: "FILES", Path: []review.Step{{Name: "store.Load"}, {Name: "os.ReadFile", Path: "store/store.go", Line: 5}}}},
+		}},
+	}
+	var text, md bytes.Buffer
+	(&printer{w: &text}).focus(rv)
+	want := "  [external] http.Get → … → net.(*Dialer).DialContext  payments/payments.go:6\n" +
+		"      2 changes reach outside through this call\n" +
+		"      payments.Authorize  payments/payments.go:5\n" +
+		"          +1 stmt · called by billing.Charge\n" +
+		"          network (new): http.Get\n" +
+		"      billing.Charge  billing/billing.go:5\n" +
+		"          +2 stmts · nothing calls it\n" +
+		"          network (new): payments.Authorize → http.Get\n" +
+		"          files: os.ReadFile  billing/billing.go:8\n" +
+		"  [external] store.Load  store/store.go:4\n" +
+		"      body edited, same size · nothing calls it\n" +
+		"      files: os.ReadFile  store/store.go:5\n"
+	if !strings.Contains(text.String(), want) {
+		t.Errorf("text:\n%s\nwant\n%s", text.String(), want)
+	}
+	(&markdown{w: &md}).focus(rv)
+	wantMD := "- **external** `http.Get` → … → `net.(*Dialer).DialContext` at `payments/payments.go:6`: 2 changes reach outside through this call\n" +
+		"  - `payments.Authorize` at `payments/payments.go:5`: +1 stmt · called by `billing.Charge`\n" +
+		"    - network (new): `http.Get`\n" +
+		"  - `billing.Charge` at `billing/billing.go:5`: +2 stmts · nothing calls it\n" +
+		"    - network (new): `payments.Authorize` → `http.Get`\n" +
+		"    - files: `os.ReadFile` at `billing/billing.go:8`\n" +
+		"- **external** `store.Load` at `store/store.go:4`: body edited, same size · nothing calls it\n"
+	if !strings.Contains(md.String(), wantMD) {
+		t.Errorf("markdown:\n%s\nwant\n%s", md.String(), wantMD)
+	}
+
+	// Past focusEdits items, a group shows those that fit and keeps its
+	// total, and the rest are counted.
+	authorize := rv.Focus[0]
+	rv.Focus = nil
+	for range focusEdits + 2 {
+		rv.Focus = append(rv.Focus, authorize)
+	}
+	shown, moreOutside, _ := shownFocus(rv.Focus)
+	if len(shown) != 1 {
+		t.Fatalf("shown %d runs, want 1", len(shown))
+	}
+	if len(shown[0].items) != focusEdits || shown[0].total != focusEdits+2 || moreOutside != 2 {
+		t.Errorf("shown %d runs, the first %d items of %d, %d more", len(shown), len(shown[0].items), shown[0].total, moreOutside)
+	}
+}
+
 func TestReviewWholeRepository(t *testing.T) {
 	r := shop(t)
 	out := runReview(t, "-C", r.Dir)

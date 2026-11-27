@@ -175,17 +175,48 @@ const noFocus = "nothing beyond new code: no existing code is edited and no impo
 // found nothing reaching outside the process.
 const noneOutside = "traced with capslock: nothing the change adds or edits reaches the network, files or other programs"
 
-// shownFocus returns the focus items to list and how many changes reaching
-// outside the process and edits of existing code it leaves out.
-func shownFocus(fs []review.Focus) (shown []review.Focus, moreOutside, moreEdits int) {
-	outside, edits := 0, 0
+// focusRun is a focus item alone, or the FocusExternal items leaving the
+// repository's code by the same call, which the focus lists together:
+// items are those shown, of total.
+type focusRun struct {
+	items []review.Focus
+	total int
+}
+
+// grouped reports whether the run lists items under the call they leave
+// the repository's code by.
+func (r focusRun) grouped() bool { return r.total > 1 }
+
+// focusRuns cuts the focus into runs: each FocusExternal item with those
+// right after it sharing its exit, and every other item alone.
+func focusRuns(fs []review.Focus) []focusRun {
+	var out []focusRun
 	for _, f := range fs {
-		switch f.Kind {
+		if n := len(out); n > 0 && out[n-1].items[0].SameExit(f) {
+			out[n-1].items = append(out[n-1].items, f)
+			out[n-1].total++
+			continue
+		}
+		out = append(out, focusRun{items: []review.Focus{f}, total: 1})
+	}
+	return out
+}
+
+// shownFocus returns the focus runs to list and how many changes reaching
+// outside the process and edits of existing code it leaves out. A run of
+// changes reaching outside keeps its total when only some of its items fit.
+func shownFocus(fs []review.Focus) (shown []focusRun, moreOutside, moreEdits int) {
+	outside, edits := 0, 0
+	for _, r := range focusRuns(fs) {
+		switch r.items[0].Kind {
 		case review.FocusExternal:
-			if outside++; outside > focusEdits {
-				moreOutside++
+			n := min(len(r.items), max(0, focusEdits-outside))
+			outside += n
+			moreOutside += len(r.items) - n
+			if n == 0 {
 				continue
 			}
+			r.items = r.items[:n]
 		case review.FocusBehavior:
 			if edits++; edits > focusEdits {
 				moreEdits++
@@ -193,7 +224,7 @@ func shownFocus(fs []review.Focus) (shown []review.Focus, moreOutside, moreEdits
 			}
 		default:
 		}
-		shown = append(shown, f)
+		shown = append(shown, r)
 	}
 	return shown, moreOutside, moreEdits
 }
@@ -220,19 +251,54 @@ func tracedNothing(rv *review.Review) bool {
 // capabilityText says how a focus item reaches outside the process,
 // "network (new): payments.Authorize → http.Get → … → net.(*Dialer).Dial",
 // names formatted by name, and where the call leaving the repository's code
-// is made: "payments/payments.go:6", or "".
-func capabilityText(f review.Focus, c review.Capability, name func(string) string) (text, where string) {
+// is made: "payments/payments.go:6", or "". Listed under the call it leaves
+// the repository's code by (grouped), a path leaving by that call stops
+// there, and where it is made is left to the group to say.
+func capabilityText(f review.Focus, c review.Capability, name func(string) string, grouped bool) (text, where string) {
 	text = c.Label()
 	if c.New {
 		text += " (new)"
 	}
-	steps := c.Path
+	steps, elided := c.Path, c.Elided
+	exit, leaves := c.Exit()
+	if shared, ok := f.Exit(); grouped && ok && leaves && exit == shared {
+		steps, elided, leaves = c.Path[:c.Leaves()+1], 0, false
+	}
 	if len(steps) > 0 && steps[0].Name == f.Name {
 		steps = steps[1:] // the item itself, unless the path starts in a function literal of it
 	}
+	if len(steps) > 0 {
+		text += ": " + pathText(steps, elided, name)
+	}
+	if leaves {
+		where = fmt.Sprintf("%s:%d", exit.Path, exit.Line)
+	}
+	return text, where
+}
+
+// exitText says how the items of a run leave the repository's code: by
+// the call they share and what it leads to, "http.Get → … →
+// net.(*Dialer).DialContext", names formatted by name, made at
+// "payments/payments.go:6".
+func exitText(r focusRun, name func(string) string) (text, where string) {
+	c := r.items[0].Capabilities[0]
+	i := c.Leaves()
+	return pathText(c.Path[i:], c.Elided, name), fmt.Sprintf("%s:%d", c.Path[i].Path, c.Path[i].Line)
+}
+
+// exitDetail says how many changes leave the repository's code by a run's
+// call.
+func exitDetail(r focusRun) string {
+	return plural(r.total, "change") + " reach outside through this call"
+}
+
+// pathText joins the names of a path's steps with arrows, names formatted
+// by name, "…" standing for the elided calls before the last and for the
+// middle of a path with more than pathNames.
+func pathText(steps []review.Step, elided int, name func(string) string) string {
 	var names []string
 	for i, s := range steps {
-		if c.Elided > 0 && i == len(steps)-1 {
+		if elided > 0 && i == len(steps)-1 {
 			names = append(names, "…")
 		}
 		names = append(names, name(s.Name))
@@ -240,13 +306,7 @@ func capabilityText(f review.Focus, c review.Capability, name func(string) strin
 	if len(names) > pathNames {
 		names = slices.Concat(names[:2], []string{"…"}, names[len(names)-3:])
 	}
-	if len(names) > 0 {
-		text += ": " + strings.Join(names, " → ")
-	}
-	if i := c.Leaves(); i >= 0 {
-		where = fmt.Sprintf("%s:%d", c.Path[i].Path, c.Path[i].Line)
-	}
-	return text, where
+	return strings.Join(names, " → ")
 }
 
 // focusLabel names a focus item's kind as the reports print it.
@@ -335,19 +395,16 @@ func (p *printer) focus(rv *review.Review) {
 	if len(shown) == 0 {
 		p.printf("  %s\n", noFocus)
 	}
-	plain := func(s string) string { return s }
-	for _, f := range shown {
-		p.printf("  [%s] %s  %s\n", focusLabel(f.Kind), f.Name, at(f))
-		if ps := rv.PathsOf(f.Change); ps != nil {
-			p.printf("      %s\n", clipText(ps.Verdict))
+	for _, r := range shown {
+		if !r.grouped() {
+			p.focusItem(rv, r.items[0], "  ", false)
+			continue
 		}
-		p.printf("      %s\n", focusDetail(f, rv.Report, plain))
-		for _, c := range f.Capabilities {
-			text, where := capabilityText(f, c, plain)
-			if where != "" {
-				text += "  " + where
-			}
-			p.printf("      %s\n", text)
+		text, where := exitText(r, plainName)
+		p.printf("  [%s] %s  %s\n", focusLabel(review.FocusExternal), text, where)
+		p.printf("      %s\n", exitDetail(r))
+		for _, f := range r.items {
+			p.focusItem(rv, f, "      ", true)
 		}
 	}
 	if more := focusMore(moreOutside, moreEdits); more != "" {
@@ -357,6 +414,32 @@ func (p *printer) focus(rv *review.Review) {
 		p.printf("  %s\n", noneOutside)
 	}
 }
+
+// focusItem prints a focus item indented by in: its kind, unless it is
+// grouped under the call it leaves the repository's code by, then what it
+// does to its paths, what changed and what it reaches, and how it reaches
+// outside the process.
+func (p *printer) focusItem(rv *review.Review, f review.Focus, in string, grouped bool) {
+	if grouped {
+		p.printf("%s%s  %s\n", in, f.Name, at(f))
+	} else {
+		p.printf("%s[%s] %s  %s\n", in, focusLabel(f.Kind), f.Name, at(f))
+	}
+	if ps := rv.PathsOf(f.Change); ps != nil {
+		p.printf("%s    %s\n", in, clipText(ps.Verdict))
+	}
+	p.printf("%s    %s\n", in, focusDetail(f, rv.Report, plainName))
+	for _, c := range f.Capabilities {
+		text, where := capabilityText(f, c, plainName, grouped)
+		if where != "" {
+			text += "  " + where
+		}
+		p.printf("%s    %s\n", in, text)
+	}
+}
+
+// plainName formats a name as it is, for text.
+func plainName(s string) string { return s }
 
 // types prints, for each struct type the change touches, what it does to
 // the type's affinity matrix: its blocks before and after, warnings first,
