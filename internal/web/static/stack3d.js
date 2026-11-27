@@ -16,8 +16,12 @@
 //               and flash when they move up or down
 //   views       a group of buttons with data-v of side, angle, top (and
 //               auto, when building) that turn the camera
-//   onHover(p, x, y), onPick(p)   the pointer over or a click on package
-//               p, -1 for none, in pixels from the canvas's top left
+//   onHover(p, x, y, d), onPick(p)   the pointer over or a click on
+//               package p, -1 for none, in pixels from the canvas's top
+//               left; with onPickDep given, d is the dependency line under
+//               the pointer when no disc is, or null
+//   onPickDep(d)  a click on the line of dependency d, { from, to, refs,
+//               cyc }; without it the lines can't be picked
 //
 // Dragging turns the camera round the point it looks at; dragging with the
 // right or middle button, or with Shift held, moves that point across, the
@@ -79,8 +83,10 @@ function Stack3D(canvas, opts = {}) {
     view: opts.build ? 'auto' : 'angle', // the views button pressed, '' once dragged
     lit: -1, // the package whose references are drawn
     strong: false, // whether the rest fade almost away, as for a package picked
+    chosen: null, // { from, to }: the dependency drawn out over the rest, or null
     playing: false, // Auto turns round the stack while the history plays
     screen: [], // where each drawn disc landed, for hit tests
+    lines: [], // where each drawn dependency landed: { d, x1, y1, x2, y2, w }
     dirty: true,
     running: false,
   };
@@ -268,7 +274,10 @@ function Stack3D(canvas, opts = {}) {
   // screen it also keeps where each disc landed, for hit tests.
   function paint(g, w, hgt, onScreen) {
     const cur = state.cur;
-    if (onScreen) state.screen = [];
+    if (onScreen) {
+      state.screen = [];
+      state.lines = [];
+    }
     if (!cur) return;
     const c = camera(w, hgt);
     const flat = Math.max(0.12, Math.abs(Math.sin(state.el))); // how round a disc looks from here
@@ -306,8 +315,12 @@ function Stack3D(canvas, opts = {}) {
       spots.set(p, { p, x, y, dz, rx: s.r * sc, ry: s.r * sc * flat, a: s.a * (st.alpha ?? 1), st });
     });
 
-    // Dependencies: a lit package's own, or the strongest; cycles always.
+    // Dependencies: a lit package's own, or the strongest; cycles always;
+    // the chosen one drawn out over the rest, last.
     const L = state.lit;
+    const ch = state.chosen;
+    const isChosen = (d) => !!ch && d.from === ch.from && d.to === ch.to;
+    const end = (p) => !!ch && (p === ch.from || p === ch.to);
     const near = new Map(); // package → 'out' | 'in', next to the lit one
     let deps = cur.strongest;
     if (L >= 0) {
@@ -317,21 +330,35 @@ function Stack3D(canvas, opts = {}) {
         else if (!near.has(d.from)) near.set(d.from, 'in');
       }
     }
-    deps = deps.concat(cur.deps.filter((d) => d.cyc && !deps.includes(d)));
-    const dim = (p) => (L >= 0 && p !== L && !near.has(p) ? (state.strong ? 0.1 : 0.35) : 1);
+    deps = deps.concat(cur.deps.filter((d) => (d.cyc || isChosen(d)) && !deps.includes(d)));
+    if (ch) deps.sort((p, q) => isChosen(p) - isChosen(q));
+    const dim = (p) => {
+      if (end(p)) return 1;
+      const k = L >= 0 && p !== L && !near.has(p) ? (state.strong ? 0.1 : 0.35) : 1;
+      return ch ? Math.min(k, 0.35) : k;
+    };
     for (const d of deps) {
       const a = spots.get(d.from), b = spots.get(d.to);
       if (!a || !b) continue;
       const weight = Math.sqrt(d.refs / cur.maxRefs);
-      let col = rgba(C.text2, 0.12 + 0.4 * weight), width = 0.8 + 1.4 * weight;
+      let hue = C.text2, alpha = 0.12 + 0.4 * weight, width = 0.8 + 1.4 * weight;
       if (d.cyc) {
-        col = rgba(C.deleted, 0.85 * Math.min(dim(d.from), dim(d.to)));
+        hue = C.deleted;
+        alpha = 0.85 * Math.min(dim(d.from), dim(d.to));
         width = 1.6;
       } else if (L >= 0) {
-        col = d.from === L ? rgba(C.accent, 0.9) : rgba(C.moved, 0.85);
+        hue = d.from === L ? C.accent : C.moved;
+        alpha = d.from === L ? 0.9 : 0.85;
         width = 1.2 + 1.6 * weight;
       }
-      arrow(g, a, b, col, width * Math.min(a.a, b.a));
+      if (isChosen(d)) {
+        if (!d.cyc && L < 0) hue = C.accent;
+        alpha = 1;
+        width += 1.8;
+      } else if (ch) alpha *= 0.25;
+      width *= Math.min(a.a, b.a);
+      const tip = arrow(g, a, b, rgba(hue, alpha), width);
+      if (onScreen && tip) state.lines.push({ d, x1: a.x, y1: a.y, x2: tip[0], y2: tip[1], w: width });
     }
 
     // Discs, far to near.
@@ -410,7 +437,7 @@ function Stack3D(canvas, opts = {}) {
     const boxes = [];
     const rank = (s) => (s.p === L ? 4e6 : near.has(s.p) ? 3e6 + s.rx : s.st.mark ? 2e6 + s.rx : s.rx);
     for (const s of order.slice().sort((p, q) => rank(q) - rank(p))) {
-      const forced = s.p === L || near.has(s.p) || (L < 0 && s.st.mark);
+      const forced = s.p === L || end(s.p) || (!ch && near.has(s.p)) || (L < 0 && !ch && s.st.mark);
       if (!forced && (s.rx < NAMED || L >= 0)) continue;
       const text = label(s.p);
       const tw = g.measureText(text).width;
@@ -426,10 +453,11 @@ function Stack3D(canvas, opts = {}) {
   }
 
   // arrow draws a line from the middle of disc a to the rim of disc b, with
-  // a head there.
+  // a head there, and returns where the head's point landed; null when the
+  // discs overlap on screen and nothing is drawn.
   function arrow(g, a, b, col, width) {
     const dx = b.x - a.x, dy = b.y - a.y, len = Math.hypot(dx, dy);
-    if (len < 1) return;
+    if (len < 1) return null;
     const ux = dx / len, uy = dy / len;
     const rim = 1 / Math.sqrt((ux / Math.max(b.rx, 0.5)) ** 2 + (uy / Math.max(b.ry, 0.5)) ** 2);
     const end = Math.max(0, len - rim - 1);
@@ -448,6 +476,7 @@ function Stack3D(canvas, opts = {}) {
     g.lineTo(ex - ux * hs + uy * hs * 0.55, ey - uy * hs - ux * hs * 0.55);
     g.closePath();
     g.fill();
+    return [ex, ey];
   }
 
   function draw() {
@@ -483,6 +512,28 @@ function Stack3D(canvas, opts = {}) {
   }
   // hit returns the package whose disc is under the point, -1 for none.
   const hit = (x, y) => under(x, y)?.p ?? -1;
+  // lineAt returns the dependency whose line is drawn nearest the point,
+  // within a few pixels of it, or null; of two as near, the one drawn
+  // later, on top.
+  function lineAt(x, y) {
+    let best = null, bd = Infinity;
+    for (const l of state.lines) {
+      const dx = l.x2 - l.x1, dy = l.y2 - l.y1, len2 = dx * dx + dy * dy;
+      const t = len2 ? Math.max(0, Math.min(1, ((x - l.x1) * dx + (y - l.y1) * dy) / len2)) : 0;
+      const d = Math.hypot(x - (l.x1 + t * dx), y - (l.y1 + t * dy));
+      if (d <= Math.max(5, l.w / 2 + 3) && d <= bd) {
+        best = l.d;
+        bd = d;
+      }
+    }
+    return best;
+  }
+  // pointAt is what the point is over: a disc, or failing that, when lines
+  // can be picked, a dependency's line.
+  function pointAt(x, y) {
+    const p = hit(x, y);
+    return { p, d: p < 0 && opts.onPickDep ? lineAt(x, y) : null };
+  }
   // depthAt is how far in front of camera c the point is: the depth of the
   // disc under it, or of the point the camera looks at. The wheel can turn
   // twice between drawings, so the depth is taken afresh.
@@ -591,13 +642,17 @@ function Stack3D(canvas, opts = {}) {
       return;
     }
     const [x, y] = at(e);
-    const p = hit(x, y);
-    canvas.classList.toggle('over', p >= 0);
-    opts.onHover?.(p, x, y);
+    const { p, d } = pointAt(x, y);
+    canvas.classList.toggle('over', p >= 0 || !!d);
+    opts.onHover?.(p, x, y, d);
   });
   const endDrag = (e) => {
     if (!drag) return;
-    if (!drag.moved && drag.pick && e.type === 'pointerup') opts.onPick?.(hit(...at(e)));
+    if (!drag.moved && drag.pick && e.type === 'pointerup') {
+      const { p, d } = pointAt(...at(e));
+      if (d) opts.onPickDep(d);
+      else opts.onPick?.(p);
+    }
     drag = null;
     canvas.classList.remove('dragging');
   };
@@ -641,6 +696,14 @@ function Stack3D(canvas, opts = {}) {
       if (state.lit === p && state.strong === strong) return;
       state.lit = p;
       state.strong = strong;
+      state.dirty = true;
+    },
+    // setChosen draws dependency d, { from, to }, out over the others, and
+    // its two packages over theirs; null for none.
+    setChosen(d) {
+      const ch = state.chosen;
+      if (ch === d || (ch && d && ch.from === d.from && ch.to === d.to)) return;
+      state.chosen = d ? { from: d.from, to: d.to } : null;
       state.dirty = true;
     },
     setPlaying(on) { state.playing = on; state.dirty = true; },

@@ -93,7 +93,11 @@ from the side is the architecture's layering. Packages that refer to each
 other in a cycle, which Go allows only through tests or build variants,
 share a layer and the references between them are drawn red. Drag to turn
 the view, scroll to zoom, and point at or pick a package to light up what
-it refers to and what refers to it.
+it refers to and what refers to it. Choose one of those references, in
+the list or by clicking its line, to see what makes it up: the symbols
+on the one side that refer to the other, the names they use there, and
+how strong it is against the package's other references; each symbol
+links to the journey, following it.
 
 The affinity page shows what `huginn affinity` prints for one type, picked
 from the types that look like they do too much: the methods against the

@@ -47,7 +47,7 @@
   outline: 2px solid var(--text); outline-offset: 2px;
 }
 
-/* The hover card on a package */
+/* The hover card on a package or a reference */
 .tip {
   z-index: 7; width: max-content; max-width: min(300px, calc(100% - 16px)); padding: 10px 12px; border-radius: 8px;
   background: rgba(18, 22, 28, .97); border: 1px solid var(--line-strong); box-shadow: 0 8px 24px rgba(0, 0, 0, .45);
@@ -58,6 +58,7 @@
 .tip-rows dt { color: var(--muted); }
 .tip-rows dd { margin: 0; }
 .tip-hint { color: var(--muted); font-size: 11px; font-style: italic; }
+.tip-arrow { color: var(--accent); }
 
 /* Playback */
 .playbar { padding: 12px 16px; }
@@ -97,3 +98,37 @@
 .layer ul { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 1px; }
 .layers button[aria-pressed="true"] { background: var(--accent-bg); color: var(--accent); }
 .layers button.cyc span:first-child::after { content: " ●"; color: var(--deleted); }
+
+/* A reference chosen: the symbols behind it */
+.pick .back {
+  flex: 1; border: 0; background: none; padding: 0; color: var(--muted); text-align: left; cursor: pointer;
+  font: 12px/1.4 'JetBrains Mono', monospace; overflow-wrap: anywhere;
+}
+.pick .back:hover { color: var(--text); }
+.conn { display: flex; flex-wrap: wrap; align-items: baseline; gap: 2px 8px; font: 600 13px/1.4 'JetBrains Mono', monospace; }
+.conn .end { border: 0; background: none; padding: 0; color: var(--text); font: inherit; text-align: left; cursor: pointer; overflow-wrap: anywhere; }
+.conn .end:hover { color: var(--accent); }
+.conn-arrow { color: var(--accent); }
+.facts { display: grid; grid-template-columns: auto 1fr; gap: 3px 12px; margin: 0; font-size: 12px; color: var(--text-2); }
+.facts dt { color: var(--muted); }
+.facts dd { margin: 0; }
+.pick .link { border: 0; background: none; padding: 0; color: var(--accent); font: inherit; cursor: pointer; }
+.pick .link:hover { text-decoration: underline; }
+.conn-body { display: flex; flex-direction: column; gap: 8px; }
+.conn-body p { margin: 0; }
+.conn-list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 1px; }
+.conn-list li {
+  display: grid; grid-template-columns: 1fr auto; gap: 0 10px; padding: 3px 8px; border-radius: 5px;
+  color: var(--text-2); font: 12px/1.4 'JetBrains Mono', monospace;
+}
+.conn-list li:hover, .conn-list li.hl { background: var(--raised); color: var(--text); }
+.conn-list li > span:first-child { overflow-wrap: anywhere; }
+.conn-list a { color: inherit; text-decoration: none; }
+.conn-list a:hover { color: var(--text); text-decoration: underline; }
+.conn-list a:focus-visible { outline: 2px solid var(--text); outline-offset: 2px; border-radius: 2px; }
+.conn-list .k { display: inline-block; margin-left: 6px; font-size: 11px; white-space: nowrap; }
+.conn-list .n { color: var(--muted); }
+.conn-list .uses { grid-column: 1 / -1; color: var(--muted); font-size: 11px; overflow-wrap: anywhere; }
+.conn-list .missing { color: var(--muted); font-style: italic; }
+.names li { cursor: default; }
+.pick .more { align-self: flex-start; padding: 2px 8px; font-size: 12px; }
