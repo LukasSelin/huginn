@@ -25,6 +25,10 @@ function Stack3D(canvas, opts = {}) {
   const STACK = 0.6; // the tallest stack's height against the layers' side
   const DIST = 3.6; // the camera's distance from the stack at zoom 1, in half widths of the layers
   const DISC_MIN = 0.07; // smallest disc radius, in world units
+  // A disc's radius against its package's bubble on the layout, which packs
+  // the bubbles all but touching: at spread 1 the closest discs keep
+  // SPREAD_ROOM between them, as on the journey map.
+  const DISC = 1 / (1 + SPREAD_ROOM);
   const NAMED = 9; // narrowest disc radius on screen, in pixels, that is named unasked
   const MAX_LINES = 160; // dependencies drawn when no package is lit, strongest first
   const VIEWS = { side: [0.55, 0.04], angle: [0.55, 0.5], top: [0, 1.55] }; // [azimuth, elevation]
@@ -58,6 +62,9 @@ function Stack3D(canvas, opts = {}) {
     planes: [], // per layer: how far it is shown, eased
     box: { cx: 0, cz: 0, half: W / 2 }, // the packages' footprint: its centre and half its side
     gap: 1, // world units between layers
+    // How far the packages are from the footprint's centre against the
+    // layout, for the spread, and as shown, eased toward it.
+    apart: 1, shownApart: 1,
     ty: 0, // the height the camera looks at, eased
     az: VIEWS.angle[0], el: VIEWS.angle[1], zoom: 1,
     aim: null, // the [azimuth, elevation] the camera is turning to
@@ -124,10 +131,21 @@ function Stack3D(canvas, opts = {}) {
   function radius(p, live) {
     const pkg = state.packages[p];
     if (!live || !pkg.peak) return 0;
-    return Math.max(DISC_MIN, pkg.r * W * 0.85 * Math.sqrt(live / pkg.peak));
+    return Math.max(DISC_MIN, pkg.r * W * DISC * Math.sqrt(live / pkg.peak));
   }
-  const worldX = (p) => (state.packages[p].x - 0.5) * W;
-  const worldZ = (p) => (state.packages[p].y - 0.5) * W;
+  // A package's place within its layer, moved out from the footprint's
+  // centre by the spread, the discs keeping their size.
+  const worldX = (p) => state.box.cx + state.shownApart * ((state.packages[p].x - 0.5) * W - state.box.cx);
+  const worldZ = (p) => state.box.cz + state.shownApart * ((state.packages[p].y - 0.5) * W - state.box.cz);
+
+  // setSpread sets the room between the packages, against SPREAD_ROOM. As
+  // the discs on the layout all but touch at DISC, moving them out by
+  // DISC + (1 − DISC)·spread leaves room in proportion: none at 0, and
+  // SPREAD_ROOM at 1.
+  function setSpread(s) {
+    state.apart = DISC + (1 - DISC) * s;
+    state.dirty = true;
+  }
 
   // autoAim is where Auto points the camera: straight down on the map while
   // there is one layer, coming down to the side as the stack grows.
@@ -168,6 +186,7 @@ function Stack3D(canvas, opts = {}) {
       step(s, 'r', at ? radius(p, at.live) : s.r);
       step(s, 'a', at ? 1 : 0);
     });
+    step(state, 'shownApart', state.apart);
     const layers = cur ? cur.layers : 0;
     for (let l = 0; l < Math.max(layers, state.planes.length); l++) {
       const o = { v: state.planes[l] || 0 };
@@ -221,8 +240,10 @@ function Stack3D(canvas, opts = {}) {
     const c = camera(w, hgt);
     const flat = Math.max(0.12, Math.abs(Math.sin(state.el))); // how round a disc looks from here
 
-    // Layers, bottom up, each a faint square named at its leftmost corner.
-    const { cx: bx, cz: bz, half } = state.box;
+    // Layers, bottom up, each a faint square named at its leftmost corner,
+    // as wide as the spread packages.
+    const { cx: bx, cz: bz } = state.box;
+    const half = state.box.half * state.shownApart;
     g.font = "11px 'JetBrains Mono', monospace";
     state.planes.forEach((v, l) => {
       if (v < 0.01) return;
@@ -532,6 +553,7 @@ function Stack3D(canvas, opts = {}) {
     get view() { return state.view; },
     zoomBy,
     resetZoom() { state.zoom = 1; state.dirty = true; },
+    setSpread, // the room between the packages, against SPREAD_ROOM
     get zoom() { return state.zoom; },
     // setLit draws package p's references, -1 for the strongest of all;
     // strong fades the rest almost away.
