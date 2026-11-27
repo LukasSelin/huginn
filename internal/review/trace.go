@@ -205,25 +205,7 @@ type target struct {
 func (t *Tracer) trace(ctx context.Context, repo *git.Repo, rv *Review, in semdiff.Input) (map[int][]Capability, []string, error) {
 	pkgOf := semdiff.PackagePaths(in.GoMod)
 	mods := moduleDirs(in.GoMod)
-	headPkgs, basePkgs := map[string][]string{}, map[string][]string{}
-	var targets []target
-	for i, c := range rv.Report.Changes {
-		if !traceable(c) {
-			continue
-		}
-		tg := target{change: i, head: capslock.Func{Package: c.Package, Name: local(c.Name)}}
-		var ok bool
-		if tg.headModule, ok = mods.add(headPkgs, path.Dir(c.Path)); !ok {
-			continue // outside any module, capslock cannot load it
-		}
-		if !c.Flags.Has(ast.Added) {
-			oldName, oldPath := cmp.Or(c.OldName, c.Name), cmp.Or(c.OldPath, c.Path)
-			pkgName, _, _ := strings.Cut(oldName, ".")
-			tg.base = capslock.Func{Package: pkgOf(oldPath, pkgName), Name: local(oldName)}
-			tg.baseModule, _ = mods.add(basePkgs, path.Dir(oldPath))
-		}
-		targets = append(targets, tg)
-	}
+	targets, headPkgs, basePkgs := traceTargets(rv.Report, pkgOf, mods)
 	if len(targets) == 0 {
 		return nil, nil, nil
 	}
@@ -249,36 +231,71 @@ func (t *Tracer) trace(ctx context.Context, repo *git.Repo, rv *Review, in semdi
 	name := packageNames(in.Tree, pkgOf)
 	out := map[int][]Capability{}
 	for _, tg := range targets {
-		var had map[string]bool // at the merge base; nil when unknown
-		if tg.base.Name != "" && baseErr == nil {
-			had = map[string]bool{}
-			for _, c := range base[tg.baseModule][tg.base] {
-				had[c.Name] = true
-			}
-		}
-		var caps []Capability
-		for _, c := range head[tg.headModule][tg.head] {
-			if outsideRank(c.Name) < 0 {
-				continue
-			}
-			cp := shorten(c, mods.contains, name)
-			cp.New = tg.base.Name == "" || (had != nil && !had[c.Name])
-			caps = append(caps, cp)
-		}
-		slices.SortStableFunc(caps, func(a, b Capability) int {
-			if a.New != b.New {
-				if a.New {
-					return -1
-				}
-				return 1
-			}
-			return cmp.Compare(outsideRank(a.Name), outsideRank(b.Name))
-		})
-		if len(caps) > 0 {
+		if caps := tg.capabilities(head, base, baseErr == nil, mods, name); len(caps) > 0 {
 			out[tg.change] = caps
 		}
 	}
 	return out, warnings, nil
+}
+
+// traceTargets lists the report's changes to trace, with the packages to
+// trace at the head and at the merge base, by module directory.
+func traceTargets(r *semdiff.Report, pkgOf func(path, pkg string) string, mods modules) (targets []target, headPkgs, basePkgs map[string][]string) {
+	headPkgs, basePkgs = map[string][]string{}, map[string][]string{}
+	for i, c := range r.Changes {
+		if !traceable(c) {
+			continue
+		}
+		tg := target{change: i, head: capslock.Func{Package: c.Package, Name: local(c.Name)}}
+		var ok bool
+		if tg.headModule, ok = mods.add(headPkgs, path.Dir(c.Path)); !ok {
+			continue // outside any module, capslock cannot load it
+		}
+		if !c.Flags.Has(ast.Added) {
+			oldName, oldPath := cmp.Or(c.OldName, c.Name), cmp.Or(c.OldPath, c.Path)
+			pkgName, _, _ := strings.Cut(oldName, ".")
+			tg.base = capslock.Func{Package: pkgOf(oldPath, pkgName), Name: local(oldName)}
+			tg.baseModule, _ = mods.add(basePkgs, path.Dir(oldPath))
+		}
+		targets = append(targets, tg)
+	}
+	return targets, headPkgs, basePkgs
+}
+
+// capabilities returns what tg reaches outside the process at the head,
+// new ones first, then by how far outside they reach. known says the merge
+// base was traced, so that what is new can be told.
+func (tg target) capabilities(head, base map[string]capslock.Result, known bool, mods modules, name func(string) string) []Capability {
+	var had map[string]bool // at the merge base; nil when unknown
+	if tg.base.Name != "" && known {
+		had = map[string]bool{}
+		for _, c := range base[tg.baseModule][tg.base] {
+			had[c.Name] = true
+		}
+	}
+	var caps []Capability
+	for _, c := range head[tg.headModule][tg.head] {
+		if outsideRank(c.Name) < 0 {
+			continue
+		}
+		cp := shorten(c, mods.contains, name)
+		cp.New = tg.base.Name == "" || (had != nil && !had[c.Name])
+		caps = append(caps, cp)
+	}
+	slices.SortStableFunc(caps, newFirst)
+	return caps
+}
+
+// newFirst orders capabilities new ones first, then by how far outside the
+// process they reach.
+func newFirst(a, b Capability) int {
+	if a.New != b.New {
+		if a.New {
+			return -1
+		}
+		return 1
+	}
+	return cmp.Compare(outsideRank(a.Name), outsideRank(b.Name))
 }
 
 // traceable reports whether c adds or edits production code capslock can

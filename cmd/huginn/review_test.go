@@ -60,7 +60,15 @@ func TestReview(t *testing.T) {
 		"→ 1 semantic change across 1 symbol\n",
 		"Look here first\n" +
 			"  [edit] billing.Charge  billing/billing.go:5\n" +
+			"      1 new path: if !payments.Authorize(n) → return 0 · 1 way out changed\n" +
 			"      +2 stmts · cyclomatic 1 → 2 · called by web.Serve\n",
+		"    +2 stmts · cyclomatic 1 → 2\n" +
+			"    paths: 1 new path: if !payments.Authorize(n) → return 0 · 1 way out changed\n" +
+			"      + if !payments.Authorize(n) → return 0\n" +
+			"        return n\n" +
+			"    ways out\n" +
+			"      + return 0  ⇐ !payments.Authorize(n)\n" +
+			"        return n\n",
 		"  [import] example.com/shop/billing → example.com/shop/payments  billing/billing.go:6\n" +
 			"      new import · 1 reference · out of the scope\n",
 		"Impact\n  1 call site in 1 declaration, 1 package\n  outside the scope: 1 call site in 1 declaration, 1 package\n    example.com/shop/web\n",
@@ -87,7 +95,9 @@ func TestReviewFormats(t *testing.T) {
 	md := runReview(t, "-C", r.Dir, "-format", "markdown", "billing")
 	for _, want := range []string{
 		"### huginn review of `billing`\n",
-		"#### Look here first\n\n- **edit** `billing.Charge` at `billing/billing.go:5`: +2 stmts · cyclomatic 1 → 2 · called by `web.Serve`\n",
+		"#### Look here first\n\n- **edit** `billing.Charge` at `billing/billing.go:5`: 1 new path: if !payments.Authorize(n) → return 0 · 1 way out changed — +2 stmts · cyclomatic 1 → 2 · called by `web.Serve`\n",
+		"  \n  Paths: 1 new path: if !payments.Authorize(n) → return 0 · 1 way out changed\n" +
+			"  ```diff\n  + if !payments.Authorize(n) → return 0\n    return n\n  ```\n",
 		"**Outside the scope: 1 call site in 1 declaration, 1 package** (`example.com/shop/web`).",
 		"| `web.Serve` | `web/web.go:5` | ×1 **outside** |",
 		"- **+** `example.com/shop/billing` → `example.com/shop/payments` (new import, **out of the scope**)\n",
@@ -102,7 +112,12 @@ func TestReviewFormats(t *testing.T) {
 		Target  string
 		Commits []string
 		Scope   []string
-		Report  struct {
+		Paths   []struct {
+			Change int
+			Kind   string
+			Steps  []struct{ Mark, Kind, Text, Then string }
+		}
+		Report struct {
 			Counts    map[string]int
 			Relations struct {
 				AddedDeps []struct{ From, To, Crossing string }
@@ -114,6 +129,10 @@ func TestReviewFormats(t *testing.T) {
 	}
 	if rv.Target != "master" || len(rv.Commits) != 1 || !slices.Equal(rv.Scope, []string{"billing"}) {
 		t.Errorf("json: target %q, %d commits, scope %q", rv.Target, len(rv.Commits), rv.Scope)
+	}
+	if p := rv.Paths; len(p) != 1 || p[0].Kind != "changed" || len(p[0].Steps) != 2 ||
+		p[0].Steps[0].Mark != "added" || p[0].Steps[0].Kind != "decision" || p[0].Steps[0].Then != "return 0" {
+		t.Errorf("json paths = %+v", p)
 	}
 	if rv.Report.Counts["body edit"] != 1 {
 		t.Errorf("json counts = %v", rv.Report.Counts)

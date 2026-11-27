@@ -46,6 +46,9 @@ func TestBuild(t *testing.T) {
 	if rv.Report.Symbols != 1 || len(rv.Report.Relations.AddedDeps) != 1 {
 		t.Errorf("report: %d symbols, deps %+v", rv.Report.Symbols, rv.Report.Relations.AddedDeps)
 	}
+	if len(rv.Paths) != 1 || rv.PathsOf(0) == nil || rv.Paths[0].Verdict != "1 new path: if !payments.Authorize(n) → return 0 · 1 way out changed" {
+		t.Errorf("paths: %+v", rv.Paths)
+	}
 	if got := rv.HeadName(); got != "HEAD ("+rv.HeadHash[:7]+")" {
 		t.Errorf("HeadName = %q", got)
 	}

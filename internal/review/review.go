@@ -65,6 +65,11 @@ type Review struct {
 	// change does that its diff does not show.
 	Focus []Focus
 
+	// Paths are what the change does to the paths through each production
+	// function it adds or whose body it edits, in the order of the
+	// report's changes.
+	Paths []Paths
+
 	// Traced says capslock traced the functions the change adds or edits,
 	// so those missing from the focus's FocusExternal items reach nothing
 	// outside the process that capslock can see.
@@ -137,6 +142,7 @@ func Build(ctx context.Context, repo *git.Repo, opts Options) (*Review, error) {
 		rv.Warnings = append(rv.Warnings, warnings...)
 	}
 	rv.Focus = focus(rv.Report, rv.Types, caps)
+	rv.Paths = paths(rv.Report, rg.Files)
 	for _, err := range rg.ParseErrors {
 		rv.Warnings = append(rv.Warnings, err.Error())
 	}

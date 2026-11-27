@@ -348,12 +348,14 @@ then what it reaches, then what it is made of:
   symbol and its callers, or an interface's new methods and the
   implementers that lack them), then the existing production code it
   edits, the largest edits reaching the most call sites first, each with
-  the production code calling it and how many tests do, then the imports
-  between packages it starts, and the warnings about the blocks of the
-  types it touches. New code, pure renames and moves, and tests are left
-  out, the diff shows them whole, unless the new code reaches outside the
-  process. Six edits, and six changes reaching outside, are listed; the
-  rest are counted.
+  what it does to the function's paths (see
+  [Paths through a function](#paths-through-a-function)), the production
+  code calling it and how many tests do, then the imports between
+  packages it starts, and the warnings about the blocks of the types it
+  touches. New code, pure renames and moves, and tests are left out, the
+  diff shows them whole, unless the new code reaches outside the process.
+  Six edits, and six changes reaching outside, are listed; the rest are
+  counted.
 - **Impact** is the blast radius: the existing declarations anywhere in the
   repository that use what changed. Production code is counted first and
   listed first, and the call sites in tests are counted apart, since they
@@ -372,7 +374,10 @@ then what it reaches, then what it is made of:
   so are packages from outside the repository. References come from
   function bodies, so a package used only in signatures or type
   definitions shows the files that import it instead.
-- **Files**, **Changes** and **Noise** are as in `huginn semdiff`.
+- **Files**, **Changes** and **Noise** are as in `huginn semdiff`, and each
+  function the merge request edits or adds says what it does to the
+  function's paths: an edit with its changed steps and ways out, a new
+  function with how much it decides.
 
 ```
 $ huginn review -base dbe0403 -head 371dfd2 -callers 1 internal/web
@@ -385,6 +390,7 @@ added 18 · body edit 8
 
 Look here first
   [edit] web.(*Server).indexRoutes  internal/web/server.go:131
+      paths unchanged
       +2 stmts · called by web.(*Server).prebuild, web.(*Server).Handler · 1 in tests
   [edit] web.index  internal/web/server.go:54
       +1 field · used by web.prebuilt, web.(*Server).prebuild, web.(*Server).Index, 1 more · 2 in tests
@@ -512,8 +518,44 @@ at a package to trace its lines, and pick it to narrow the callers,
 relations and changes listed below to the ones that involve it. The
 callers list production code unless asked for the tests too. The changes
 show the edits of existing code in full, a changed type by its members and
-whose code each breaks; the new code, by file, and the changes to tests
-are folded away. The types it touches and the files come last.
+whose code each breaks, a changed function by what it does to its paths;
+the new code, by file, and the changes to tests are folded away, each new
+function opening on its flow. The types it touches and the files come
+last.
+
+#### Paths through a function
+
+So that an edit can be read without reading the body, the review reduces
+each production function the merge request edits or adds to its *flow*:
+its decisions (`if`, `else`, `switch`, `case`, `select`), loops, ways out
+(`return`, `panic`, `os.Exit`, `log.Fatal`), jumps, closures, and the
+straight-line code that crosses a boundary (a call into an I/O package, a
+write to a field of the receiver, `go`, `defer`, a channel send, an error
+taken from a call, a result dropped with `_`). Everything else is left
+out. A decision whose body is a single way out or jump is one step:
+`if err != nil → return err`. The flows on either side of an edit are
+compared, and the edit gets a verdict, the first of these that holds:
+
+- *paths unchanged*, with the calls it starts and stops making: what
+  changed is straight-line code;
+- *extracted into* the functions it now calls, when most of the steps it
+  drops are found in functions the merge request adds, with how many moved
+  as they were, moved edited, or do not reappear;
+- *same paths*, when every step is still there, some edited or moved under
+  another decision;
+- the new and removed paths, ways out changed, steps edited, effects and
+  closures, otherwise.
+
+Steps are compared by key, not as written: the receiver is the same
+whatever its name, and `switch t.kind { case a: }` is the same as
+`switch { case t.kind == a: }`. A removed step next to an added one that
+shares half its words is one edited step. Under the verdict come the
+changed steps, a flow of more than 12 cut into hunks with a step around
+each change and the decisions enclosing it, and, when one changed, the
+ways out with the decisions each is reached under. A new function says how
+many conditions it tests and how many ways out it has, and its flow is
+its outline. Like the rest of huginn, flows are syntactic: closures' ways
+out leave the closure, not the function, and calls are matched by name.
 
 #### Affinity matrix of the types it touches
 
@@ -601,12 +643,15 @@ git log / cat-file ──► internal/git ──► internal/ast ──► inter
   history most files are read and parsed once. `Repo.Diff` and `Repo.Tree`
   give a single commit's file pairs and a whole tree for `semdiff`;
   `Repo.DiffRange` gives the file pairs between any two commits, such as a
-  merge request's merge base and head, for `review`.
+  merge request's merge base and head, for `review`, with their contents.
 - **internal/ast** turns a Go file into symbols with `ParseSource`: kind,
   qualified name, canonical signature, line span, statement count, cyclomatic
   complexity, a body hash that ignores formatting and comments, and the
   symbols each body refers to. `Diff` matches the symbols of two revisions by
-  name first, then by body similarity, to find renames and moves.
+  name first, then by body similarity, to find renames and moves. `Flows`
+  reduces each function of a file to its decisions, loops, ways out and
+  boundary crossings, for the review; symbols do not carry them, so the
+  index cache is unchanged.
 - **internal/lineage** applies those per-commit changes oldest first and hands
   each declaration a stable ID when it first appears, carrying it across
   renames, moves and edits. `Build` walks first-parent history; with a
