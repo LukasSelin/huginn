@@ -58,8 +58,8 @@ type index struct {
 	silos  *silos.Report
 	took   time.Duration
 
-	journeys journeys // built with the prebuilt responses, or on first request
-	pre      sync.Map // request key → *encoded, see prebuilt.go
+	journeys journeys  // built with the prebuilt responses, or on first request
+	pre      responses // see prebuilt.go
 }
 
 // New returns a server for repo. name labels it in the UI.

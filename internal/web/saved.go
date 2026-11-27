@@ -107,15 +107,13 @@ func (s *Server) save(key string, ix *index) (err error) {
 		return nil
 	}
 	var rs []savedResponse
-	ix.pre.Range(func(k, v any) bool {
-		e := v.(*encoded)
-		sr := savedResponse{Key: k.(string), Gz: e.gz, Ctype: e.ctype, ETag: e.etag}
+	for k, e := range ix.pre.All() {
+		sr := savedResponse{Key: k, Gz: e.gz, Ctype: e.ctype, ETag: e.etag}
 		if e.body != nil && len(e.gz) >= len(e.body) {
 			sr.Body, sr.Gz = e.body, nil
 		}
 		rs = append(rs, sr)
-		return true
-	})
+	}
 
 	dir := filepath.Dir(name)
 	if err = os.MkdirAll(dir, 0o750); err != nil {
