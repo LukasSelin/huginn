@@ -299,7 +299,7 @@ func Build(in Input) *Report {
 
 	changes := ast.Diff(olds, news)
 	for _, c := range changes {
-		if !(c.New != nil && inScope(c.New.Path) || c.Old != nil && inScope(c.Old.Path)) {
+		if (c.New == nil || !inScope(c.New.Path)) && (c.Old == nil || !inScope(c.Old.Path)) { // neither side in scope
 			continue
 		}
 		rc := newChange(c, pkgOf)
@@ -520,7 +520,7 @@ func (r *Report) summarizeFiles(in Input, inScope func(string) bool) {
 	}
 
 	for _, fd := range in.Files {
-		if !(fd.New != nil && inScope(fd.New.Path) || fd.Old != nil && inScope(fd.Old.Path)) {
+		if (fd.New == nil || !inScope(fd.New.Path)) && (fd.Old == nil || !inScope(fd.Old.Path)) { // neither side in scope
 			continue
 		}
 		r.Added += fd.Added

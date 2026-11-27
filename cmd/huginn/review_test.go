@@ -156,7 +156,7 @@ func TestOpenScoped(t *testing.T) {
 
 func TestTargetBranch(t *testing.T) {
 	r := shop(t)
-	repo, err := git.Open(r.Dir)
+	repo, err := git.Open(context.Background(), r.Dir)
 	if err != nil {
 		t.Fatal(err)
 	}
