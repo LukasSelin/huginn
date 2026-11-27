@@ -176,7 +176,7 @@ func words(name string) []string {
 		case i > 0 && unicode.IsUpper(c) && unicode.IsLower(rs[i-1]):
 			cut(i)
 		case i > 0 && unicode.IsUpper(c) && unicode.IsUpper(rs[i-1]) && i+1 < len(rs) && unicode.IsLower(rs[i+1]) &&
-			!(rs[i+1] == 's' && (i+2 == len(rs) || !unicode.IsLower(rs[i+2]))):
+			(rs[i+1] != 's' || i+2 < len(rs) && unicode.IsLower(rs[i+2])):
 			cut(i) // the end of an acronym: HTTP|Server, but URLs stays whole
 		}
 	}

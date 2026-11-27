@@ -31,10 +31,10 @@ linters:
     depguard:
       # The packages are stacked in layers, bottom to top:
       #
-      #   foundation  internal/ast, internal/git, internal/modpath
+      #   foundation  internal/ast, internal/git, internal/modpath, internal/cochange
       #   history     internal/lineage, internal/knowledge, internal/codemap
       #   analyses    internal/journey, internal/health, internal/semdiff
-      #   reports     internal/story, internal/silos, internal/review
+      #   reports     internal/story, internal/silos, internal/review, internal/affinity
       #   ui          internal/web
       #   cmd         cmd/huginn (may use anything)
       #
@@ -54,12 +54,14 @@ linters:
             - "**/internal/ast/*.go"
             - "**/internal/git/*.go"
             - "**/internal/modpath/*.go"
+            - "**/internal/cochange/*.go"
             - "!$test"
           allow:
             - $gostd
             - huginn/internal/ast$
             - huginn/internal/git$
             - huginn/internal/modpath$
+            - huginn/internal/cochange$
         history:
           list-mode: strict
           files:
@@ -72,6 +74,7 @@ linters:
             - huginn/internal/ast$
             - huginn/internal/git$
             - huginn/internal/modpath$
+            - huginn/internal/cochange$
             - huginn/internal/lineage$
             - huginn/internal/knowledge$
             - huginn/internal/codemap$
@@ -87,6 +90,7 @@ linters:
             - huginn/internal/ast$
             - huginn/internal/git$
             - huginn/internal/modpath$
+            - huginn/internal/cochange$
             - huginn/internal/lineage$
             - huginn/internal/knowledge$
             - huginn/internal/codemap$
@@ -96,12 +100,14 @@ linters:
             - "**/internal/story/*.go"
             - "**/internal/silos/*.go"
             - "**/internal/review/*.go"
+            - "**/internal/affinity/*.go"
             - "!$test"
           allow:
             - $gostd
             - huginn/internal/ast$
             - huginn/internal/git$
             - huginn/internal/modpath$
+            - huginn/internal/cochange$
             - huginn/internal/lineage$
             - huginn/internal/knowledge$
             - huginn/internal/codemap$
@@ -118,6 +124,7 @@ linters:
             - huginn/internal/ast$
             - huginn/internal/git$
             - huginn/internal/modpath$
+            - huginn/internal/cochange$
             - huginn/internal/lineage$
             - huginn/internal/knowledge$
             - huginn/internal/codemap$
@@ -127,6 +134,7 @@ linters:
             - huginn/internal/story$
             - huginn/internal/silos$
             - huginn/internal/review$
+            - huginn/internal/affinity$
         # internal/gittest builds throwaway repositories for tests; nothing
         # else may depend on it.
         test-helpers-only-in-tests:

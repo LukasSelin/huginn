@@ -53,8 +53,9 @@ func typeShape(t reflect.Type, seen map[reflect.Type]bool) string {
 			}
 		}
 		return t.String() + "{" + strings.Join(fields, "; ") + "}"
+	default:
+		return t.String()
 	}
-	return t.String()
 }
 
 // Cache keeps walked revisions on disk, keyed by commit hash, so that a later

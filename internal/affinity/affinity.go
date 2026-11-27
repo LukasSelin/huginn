@@ -160,6 +160,8 @@ func New(h *lineage.History, tests bool) *Analyzer {
 		case ast.KindMethod:
 			k := recvKey{dir, s.Package, s.Recv}
 			a.methods[k] = append(a.methods[k], s)
+		case ast.KindFunc, ast.KindVar, ast.KindConst:
+			// Only their struct literals matter, below.
 		}
 		a.noteCtor(s)
 	}

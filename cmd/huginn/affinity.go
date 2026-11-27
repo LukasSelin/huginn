@@ -171,15 +171,8 @@ func printMatrix(w *printer, r *affinity.Report) {
 		w.printf("%s\n", strings.TrimRight(line.String(), " "))
 	}
 	for _, row := range r.Rows {
-		prefix := "fn"
-		switch {
-		case row.Kind == affinity.Bridge:
-			prefix = "br"
-		case row.Block >= 0:
-			prefix = r.Blocks[row.Block].Letter
-		}
 		var line strings.Builder
-		fmt.Fprintf(&line, "%-2s %s  ", prefix, pad(row.Method, nameWidth))
+		fmt.Fprintf(&line, "%-2s %s  ", rowTag(r, row), pad(row.Method, nameWidth))
 		cells := make([]string, len(r.Columns))
 		for j := range cells {
 			cells[j] = "· "
@@ -252,14 +245,17 @@ func printBlocks(w *printer, r *affinity.Report) {
 	}
 }
 
+// rowTag names where a row was placed: its block's letter, br for a bridge
+// or fn for a free method.
 func rowTag(r *affinity.Report, row affinity.Row) string {
-	switch {
-	case row.Kind == affinity.Bridge:
+	switch row.Kind {
+	case affinity.Bridge:
 		return "br"
-	case row.Kind == affinity.Free:
+	case affinity.Free:
 		return "fn"
+	default:
+		return r.Blocks[row.Block].Letter
 	}
-	return r.Blocks[row.Block].Letter
 }
 
 func printFindings(w *printer, r *affinity.Report) {

@@ -557,6 +557,8 @@ func (b *build) cluster() {
 					if !slices.Contains(groups, b.rowBlock[k]) {
 						groups = append(groups, b.rowBlock[k])
 					}
+				case Free:
+					// A free callee belongs to no block.
 				}
 			}
 			if !ready {
@@ -829,6 +831,7 @@ func (b *build) order() {
 			return cmp.Or(cmp.Compare(size(y), size(x)), cmp.Compare(first(bx.cols), first(by.cols)))
 		case Service:
 			return cmp.Compare(first(bx.cols), first(by.cols))
+		case Core, Shared:
 		}
 		return cmp.Compare(first(bx.rows), first(by.rows))
 	})
@@ -934,6 +937,7 @@ func (b *build) order() {
 			b.bridges = append(b.bridges, i)
 		case Free:
 			b.free = append(b.free, i)
+		case Member:
 		}
 	}
 	for n, bl := range b.blocks {
