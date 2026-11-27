@@ -268,7 +268,7 @@ func (a *analysis) depend() {
 			}
 			cu := a.syms[c]
 			cross := cu.pkg != u.pkg
-			u.dep.add(use.Calls, use.Approximate, cross)
+			u.dep = u.dep.withCaller(use.Calls, use.Approximate, cross)
 			addLink(a.symLinks, i, c, use)
 			if !cross {
 				continue
@@ -284,7 +284,8 @@ func (a *analysis) depend() {
 		u.dep.Packages = len(dirs)
 	}
 	for f, approx := range pkgCallers {
-		a.pkgs[f.pkg].dep.add(0, approx, true)
+		p := a.pkgs[f.pkg]
+		p.dep = p.dep.withCaller(0, approx, true)
 	}
 	for k := range pkgDirs {
 		a.pkgs[k[0]].dep.Packages++
@@ -307,8 +308,8 @@ func (a *analysis) knowers() []Knower {
 	return out
 }
 
-// add counts one caller with calls references.
-func (d *Dependence) add(calls int, approx, cross bool) {
+// withCaller returns d counting one more caller, with calls references.
+func (d Dependence) withCaller(calls int, approx, cross bool) Dependence {
 	d.Callers++
 	d.CallSites += calls
 	w := 1.0
@@ -320,6 +321,7 @@ func (d *Dependence) add(calls int, approx, cross bool) {
 		d.Approximate++
 	}
 	d.FanIn += w
+	return d
 }
 
 // departed reports whether author i is not around at the last revision.

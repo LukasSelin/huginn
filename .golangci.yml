@@ -22,11 +22,12 @@ linters:
     - govet
     - ineffassign
     - nolintlint
+    - recvcheck
     - staticcheck
     - unused
-    # Tried and left off: forcetypeassert and recvcheck. Every finding was a
-    # deliberate idiom (container/heap, sync.Map and list.List holding one
-    # type; a value type with one pointer-receiver mutator).
+    # Tried and left off: forcetypeassert. Every finding was a container
+    # holding one type (container/heap, sync.Map, list.List), where the
+    # checked form only adds dead branches.
   settings:
     depguard:
       # The packages are stacked in layers, bottom to top:

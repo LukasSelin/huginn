@@ -724,10 +724,10 @@ type item struct {
 // queue is a min-heap of items by distance.
 type queue []item
 
-func (q queue) Len() int           { return len(q) }
-func (q queue) Less(i, k int) bool { return q[i].d < q[k].d }
-func (q queue) Swap(i, k int)      { q[i], q[k] = q[k], q[i] }
-func (q *queue) Push(x any)        { *q = append(*q, x.(item)) }
+func (q *queue) Len() int           { return len(*q) }
+func (q *queue) Less(i, k int) bool { return (*q)[i].d < (*q)[k].d }
+func (q *queue) Swap(i, k int)      { (*q)[i], (*q)[k] = (*q)[k], (*q)[i] }
+func (q *queue) Push(x any)         { *q = append(*q, x.(item)) }
 func (q *queue) Pop() any {
 	old := *q
 	it := old[len(old)-1]
