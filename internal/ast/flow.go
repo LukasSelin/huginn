@@ -125,12 +125,7 @@ func Flows(path string, src []byte) map[string][]Step {
 	if f == nil {
 		return nil
 	}
-	imports := map[string]string{}
-	for _, im := range fileImports(f) {
-		if name := im.LocalName(); name != "_" && name != "." {
-			imports[name] = im.Path
-		}
-	}
+	imports := importNames(f)
 	out := map[string][]Step{}
 	seen := map[string]int{}
 	for _, decl := range f.Decls {
@@ -138,37 +133,60 @@ func Flows(path string, src []byte) map[string][]Step {
 		if !ok {
 			continue
 		}
-		// Keyed as ParseSource keys symbols. Only functions can share a
-		// key with a function, so counting functions alone agrees with it.
-		key := d.Name.Name
-		recv := ""
-		if d.Recv != nil && len(d.Recv.List) > 0 {
-			base, _ := recvBase(d.Recv.List[0].Type)
-			key = base + "." + key
-			if names := d.Recv.List[0].Names; len(names) > 0 && names[0].Name != "_" {
-				recv = names[0].Name
-			}
-		}
-		seen[key]++
-		if n := seen[key]; n > 1 {
-			key = fmt.Sprintf("%s#%d", key, n)
-		}
+		key, recv := funcKey(d, seen)
 		if d.Body == nil {
 			continue
 		}
-		w := &flowWalker{fset: fset, imports: imports, recv: recv}
 		if recv != "" {
-			goast.Inspect(d.Body, func(n goast.Node) bool {
-				if id, ok := n.(*goast.Ident); ok && id.Name == recv {
-					id.Name = recvMark
-				}
-				return true
-			})
+			markReceiver(d.Body, recv)
 		}
+		w := &flowWalker{fset: fset, imports: imports, recv: recv}
 		w.block(0, d.Body.List)
 		out[key] = w.out
 	}
 	return out
+}
+
+// importNames maps the local names of a file's imports to their paths,
+// leaving out blank and dot imports.
+func importNames(f *goast.File) map[string]string {
+	out := map[string]string{}
+	for _, im := range fileImports(f) {
+		if name := im.LocalName(); name != "_" && name != "." {
+			out[name] = im.Path
+		}
+	}
+	return out
+}
+
+// funcKey returns the key ParseSource gives a function, counting in seen
+// the keys given so far, and the name of its receiver, if it has one. Only
+// functions can share a key with a function, so counting functions alone
+// agrees with ParseSource.
+func funcKey(d *goast.FuncDecl, seen map[string]int) (key, recv string) {
+	key = d.Name.Name
+	if d.Recv != nil && len(d.Recv.List) > 0 {
+		base, _ := recvBase(d.Recv.List[0].Type)
+		key = base + "." + key
+		if names := d.Recv.List[0].Names; len(names) > 0 && names[0].Name != "_" {
+			recv = names[0].Name
+		}
+	}
+	seen[key]++
+	if n := seen[key]; n > 1 {
+		key = fmt.Sprintf("%s#%d", key, n)
+	}
+	return key, recv
+}
+
+// markReceiver writes recvMark for each use of the receiver recv in body.
+func markReceiver(body *goast.BlockStmt, recv string) {
+	goast.Inspect(body, func(n goast.Node) bool {
+		if id, ok := n.(*goast.Ident); ok && id.Name == recv {
+			id.Name = recvMark
+		}
+		return true
+	})
 }
 
 // flowWalker collects the steps of one function body.
@@ -279,129 +297,19 @@ func (w *flowWalker) stmt(depth int, s goast.Stmt) {
 		w.ifStmt(depth, s, "if ")
 
 	case *goast.ForStmt:
-		var parts, keys []string
-		for _, n := range []goast.Node{s.Init, s.Cond, s.Post} {
-			if n == nil {
-				parts, keys = append(parts, ""), append(keys, "")
-				continue
-			}
-			t, k := w.str(n)
-			parts, keys = append(parts, t), append(keys, k)
-		}
-		text, key := "for", "for"
-		switch {
-		case parts[0] != "" || parts[2] != "":
-			text, key = "for "+strings.Join(parts, "; "), "for "+strings.Join(keys, "; ")
-		case parts[1] != "":
-			text, key = "for "+parts[1], "for "+keys[1]
-		}
-		w.emit(s, depth, StepLoop, text, key, "", "", "")
-		w.block(depth+1, s.Body.List)
+		w.forStmt(depth, s)
 
 	case *goast.RangeStmt:
-		x, xk := w.str(s.X)
-		text, key := "for range "+x, "for range "+xk
-		if s.Key != nil {
-			vars, varsKey := w.str(s.Key)
-			if s.Value != nil {
-				v, vk := w.str(s.Value)
-				vars, varsKey = vars+", "+v, varsKey+", "+vk
-			}
-			text = "for " + vars + " " + s.Tok.String() + " range " + x
-			key = "for " + varsKey + " " + s.Tok.String() + " range " + xk
-		}
-		w.emit(s, depth, StepLoop, text, key, "", "", "")
-		w.block(depth+1, s.Body.List)
+		w.rangeStmt(depth, s)
 
 	case *goast.SwitchStmt:
-		w.closuresIn(depth, s.Init)
-		text, key := "switch", "switch"
-		var tag, tagKey string
-		if s.Init != nil {
-			init, initKey := w.str(s.Init)
-			text, key = text+" "+init+";", key+" "+initKey+";"
-		}
-		if s.Tag != nil {
-			tag, tagKey = w.str(s.Tag)
-			text += " " + tag // the key leaves the tag to the cases
-		}
-		w.emit(s, depth, StepDecision, text, key, "", "", "")
-		for _, c := range s.Body.List {
-			cc, ok := c.(*goast.CaseClause)
-			if !ok {
-				continue
-			}
-			if cc.List == nil {
-				w.decision(cc, depth+1, "default", "default", "", cc.Body)
-				continue
-			}
-			var shown, conds, condKeys []string
-			for _, e := range cc.List {
-				t, k := w.str(e)
-				shown = append(shown, t)
-				if s.Tag != nil {
-					t, k = tag+" == "+t, tagKey+" == "+k
-				}
-				conds, condKeys = append(conds, t), append(condKeys, k)
-			}
-			cond, condKey := strings.Join(conds, " || "), strings.Join(condKeys, " || ")
-			w.decision(cc, depth+1, "case "+strings.Join(shown, ", "), "case "+condKey, cond, cc.Body)
-		}
+		w.switchStmt(depth, s)
 
 	case *goast.TypeSwitchStmt:
-		w.closuresIn(depth, s.Init)
-		assign, assignKey := w.str(s.Assign)
-		var subject goast.Expr
-		switch a := s.Assign.(type) {
-		case *goast.AssignStmt:
-			if len(a.Rhs) == 1 {
-				if ta, ok := a.Rhs[0].(*goast.TypeAssertExpr); ok {
-					subject = ta.X
-				}
-			}
-		case *goast.ExprStmt:
-			if ta, ok := a.X.(*goast.TypeAssertExpr); ok {
-				subject = ta.X
-			}
-		}
-		x := assign
-		if subject != nil {
-			x, _ = w.str(subject)
-		}
-		w.emit(s, depth, StepDecision, "switch "+assign, "switch "+assignKey, "", "", "")
-		for _, c := range s.Body.List {
-			cc, ok := c.(*goast.CaseClause)
-			if !ok {
-				continue
-			}
-			if cc.List == nil {
-				w.decision(cc, depth+1, "default", "default", "", cc.Body)
-				continue
-			}
-			var ts, tks []string
-			for _, e := range cc.List {
-				t, k := w.str(e)
-				ts, tks = append(ts, t), append(tks, k)
-			}
-			list, listKey := strings.Join(ts, ", "), strings.Join(tks, ", ")
-			cond := x + " is " + strings.Join(ts, " or ")
-			w.decision(cc, depth+1, "case "+list, "case "+listKey, cond, cc.Body)
-		}
+		w.typeSwitchStmt(depth, s)
 
 	case *goast.SelectStmt:
-		w.emit(s, depth, StepDecision, "select", "select", "", "", "")
-		for _, c := range s.Body.List {
-			cc, ok := c.(*goast.CommClause)
-			if !ok {
-				continue
-			}
-			if cc.Comm == nil {
-				w.decision(cc, depth+1, "default", "default", "", cc.Body)
-				continue
-			}
-			comm, commKey := w.str(cc.Comm)
-			w.decision(cc, depth+1, "case "+comm, "case "+commKey, comm, cc.Body)
-		}
+		w.selectStmt(depth, s)
 
 	case *goast.ReturnStmt:
 		text, key := w.str(s)
@@ -442,6 +350,150 @@ func (w *flowWalker) stmt(depth int, s goast.Stmt) {
 	}
 }
 
+// forStmt adds a for loop, written as its header, and walks its body.
+func (w *flowWalker) forStmt(depth int, s *goast.ForStmt) {
+	var parts, keys []string
+	for _, n := range []goast.Node{s.Init, s.Cond, s.Post} {
+		t, k := "", ""
+		if n != nil {
+			t, k = w.str(n)
+		}
+		parts, keys = append(parts, t), append(keys, k)
+	}
+	text, key := "for", "for"
+	switch {
+	case parts[0] != "" || parts[2] != "":
+		text, key = "for "+strings.Join(parts, "; "), "for "+strings.Join(keys, "; ")
+	case parts[1] != "":
+		text, key = "for "+parts[1], "for "+keys[1]
+	}
+	w.emit(s, depth, StepLoop, text, key, "", "", "")
+	w.block(depth+1, s.Body.List)
+}
+
+// rangeStmt adds a for range loop and walks its body.
+func (w *flowWalker) rangeStmt(depth int, s *goast.RangeStmt) {
+	x, xk := w.str(s.X)
+	text, key := "for range "+x, "for range "+xk
+	if s.Key != nil {
+		vars, varsKey := w.str(s.Key)
+		if s.Value != nil {
+			v, vk := w.str(s.Value)
+			vars, varsKey = vars+", "+v, varsKey+", "+vk
+		}
+		text = "for " + vars + " " + s.Tok.String() + " range " + x
+		key = "for " + varsKey + " " + s.Tok.String() + " range " + xk
+	}
+	w.emit(s, depth, StepLoop, text, key, "", "", "")
+	w.block(depth+1, s.Body.List)
+}
+
+// switchStmt adds a switch and its cases. A case of a switch on a tag is
+// keyed, and conditioned, as the comparison it makes, so that it agrees
+// with the same switch written without a tag.
+func (w *flowWalker) switchStmt(depth int, s *goast.SwitchStmt) {
+	w.closuresIn(depth, s.Init)
+	text, key := "switch", "switch"
+	var tag, tagKey string
+	if s.Init != nil {
+		init, initKey := w.str(s.Init)
+		text, key = text+" "+init+";", key+" "+initKey+";"
+	}
+	if s.Tag != nil {
+		tag, tagKey = w.str(s.Tag)
+		text += " " + tag // the key leaves the tag to the cases
+	}
+	w.emit(s, depth, StepDecision, text, key, "", "", "")
+	for _, cc := range caseClauses(s.Body) {
+		if cc.List == nil {
+			w.decision(cc, depth+1, "default", "default", "", cc.Body)
+			continue
+		}
+		var shown, conds, condKeys []string
+		for _, e := range cc.List {
+			t, k := w.str(e)
+			shown = append(shown, t)
+			if s.Tag != nil {
+				t, k = tag+" == "+t, tagKey+" == "+k
+			}
+			conds, condKeys = append(conds, t), append(condKeys, k)
+		}
+		cond, condKey := strings.Join(conds, " || "), strings.Join(condKeys, " || ")
+		w.decision(cc, depth+1, "case "+strings.Join(shown, ", "), "case "+condKey, cond, cc.Body)
+	}
+}
+
+// typeSwitchStmt adds a type switch and its cases, each conditioned as
+// "x is T1 or T2".
+func (w *flowWalker) typeSwitchStmt(depth int, s *goast.TypeSwitchStmt) {
+	w.closuresIn(depth, s.Init)
+	assign, assignKey := w.str(s.Assign)
+	x := assign
+	if subject := typeSwitchSubject(s.Assign); subject != nil {
+		x, _ = w.str(subject)
+	}
+	w.emit(s, depth, StepDecision, "switch "+assign, "switch "+assignKey, "", "", "")
+	for _, cc := range caseClauses(s.Body) {
+		if cc.List == nil {
+			w.decision(cc, depth+1, "default", "default", "", cc.Body)
+			continue
+		}
+		var ts, tks []string
+		for _, e := range cc.List {
+			t, k := w.str(e)
+			ts, tks = append(ts, t), append(tks, k)
+		}
+		list, listKey := strings.Join(ts, ", "), strings.Join(tks, ", ")
+		cond := x + " is " + strings.Join(ts, " or ")
+		w.decision(cc, depth+1, "case "+list, "case "+listKey, cond, cc.Body)
+	}
+}
+
+// typeSwitchSubject returns the x of a type switch's x.(type), or nil.
+func typeSwitchSubject(assign goast.Stmt) goast.Expr {
+	var e goast.Expr
+	switch a := assign.(type) {
+	case *goast.AssignStmt:
+		if len(a.Rhs) == 1 {
+			e = a.Rhs[0]
+		}
+	case *goast.ExprStmt:
+		e = a.X
+	}
+	if ta, ok := e.(*goast.TypeAssertExpr); ok {
+		return ta.X
+	}
+	return nil
+}
+
+// caseClauses returns the case clauses of a switch's body.
+func caseClauses(body *goast.BlockStmt) []*goast.CaseClause {
+	var out []*goast.CaseClause
+	for _, c := range body.List {
+		if cc, ok := c.(*goast.CaseClause); ok {
+			out = append(out, cc)
+		}
+	}
+	return out
+}
+
+// selectStmt adds a select and its cases.
+func (w *flowWalker) selectStmt(depth int, s *goast.SelectStmt) {
+	w.emit(s, depth, StepDecision, "select", "select", "", "", "")
+	for _, c := range s.Body.List {
+		cc, ok := c.(*goast.CommClause)
+		if !ok {
+			continue
+		}
+		if cc.Comm == nil {
+			w.decision(cc, depth+1, "default", "default", "", cc.Body)
+			continue
+		}
+		comm, commKey := w.str(cc.Comm)
+		w.decision(cc, depth+1, "case "+comm, "case "+commKey, comm, cc.Body)
+	}
+}
+
 // deferred adds a go or defer statement: an effect naming the call, or for
 // a function literal, a closure with the literal's flow under it.
 func (w *flowWalker) deferred(depth int, s goast.Stmt, word string, call *goast.CallExpr) {
@@ -459,33 +511,49 @@ func (w *flowWalker) deferred(depth int, s goast.Stmt, word string, call *goast.
 // to the receiver's fields, errors taken from calls, results dropped, and
 // calls into I/O packages; then the closures it holds.
 func (w *flowWalker) effects(depth int, s goast.Stmt) {
-	if x, ok := s.(*goast.IncDecStmt); ok && w.recv != "" && rootIdent(x.X) == recvMark {
-		t, k := w.str(x.X)
+	switch s := s.(type) {
+	case *goast.IncDecStmt:
+		w.write(depth, s, s.X)
+	case *goast.AssignStmt:
+		w.assignment(depth, s)
+	}
+	w.ioCalls(depth, s)
+	w.closuresIn(depth, s)
+}
+
+// write adds a write to the receiver when target belongs to it.
+func (w *flowWalker) write(depth int, s goast.Stmt, target goast.Expr) {
+	if w.recv != "" && rootIdent(target) == recvMark {
+		t, k := w.str(target)
 		w.emit(s, depth, StepEffect, "writes "+t, "writes "+k, "", "", "")
 	}
-	if a, ok := s.(*goast.AssignStmt); ok {
-		var call *goast.CallExpr
-		if len(a.Rhs) == 1 {
-			call, _ = goast.Unparen(a.Rhs[0]).(*goast.CallExpr)
+}
+
+// assignment adds the effects of an assignment: writes to the receiver, an
+// error taken from a call, and a call's last result dropped with _.
+func (w *flowWalker) assignment(depth int, a *goast.AssignStmt) {
+	var call *goast.CallExpr
+	if len(a.Rhs) == 1 {
+		call, _ = goast.Unparen(a.Rhs[0]).(*goast.CallExpr)
+	}
+	for i, l := range a.Lhs {
+		w.write(depth, a, l)
+		id, ok := l.(*goast.Ident)
+		if !ok || call == nil {
+			continue
 		}
-		for i, l := range a.Lhs {
-			if w.recv != "" && rootIdent(l) == recvMark {
-				t, k := w.str(l)
-				w.emit(s, depth, StepEffect, "writes "+t, "writes "+k, "", "", "")
-			}
-			id, ok := l.(*goast.Ident)
-			if !ok || call == nil {
-				continue
-			}
-			fn, fnKey := w.str(call.Fun)
-			switch {
-			case id.Name == "err":
-				w.emit(s, depth, StepEffect, "err ← "+fn+"(…)", "err ← "+fnKey+"(…)", "", "", "")
-			case id.Name == "_" && i == len(a.Lhs)-1:
-				w.emit(s, depth, StepEffect, "drops a result of "+fn+"(…)", "drops a result of "+fnKey+"(…)", "", "", "")
-			}
+		fn, fnKey := w.str(call.Fun)
+		switch {
+		case id.Name == "err":
+			w.emit(a, depth, StepEffect, "err ← "+fn+"(…)", "err ← "+fnKey+"(…)", "", "", "")
+		case id.Name == "_" && i == len(a.Lhs)-1:
+			w.emit(a, depth, StepEffect, "drops a result of "+fn+"(…)", "drops a result of "+fnKey+"(…)", "", "", "")
 		}
 	}
+}
+
+// ioCalls adds the calls into I/O packages in s, outside function literals.
+func (w *flowWalker) ioCalls(depth int, s goast.Stmt) {
 	goast.Inspect(s, func(n goast.Node) bool {
 		switch n := n.(type) {
 		case *goast.FuncLit:
@@ -502,8 +570,11 @@ func (w *flowWalker) effects(depth int, s goast.Stmt) {
 		}
 		return true
 	})
-	w.closuresIn(depth, s)
 }
+
+// closureName is a function literal's name by where it goes: its text,
+// and its key with the receiver written ʳ.
+type closureName struct{ text, key string }
 
 // closuresIn adds the function literals directly in n, outside other
 // literals, as closures named by where they go, each with its flow.
@@ -511,37 +582,50 @@ func (w *flowWalker) closuresIn(depth int, n goast.Node) {
 	if n == nil {
 		return
 	}
-	type name struct{ text, key string }
-	names := map[*goast.FuncLit]name{}
+	names := w.closureNames(n)
+	goast.Inspect(n, func(x goast.Node) bool {
+		lit, ok := x.(*goast.FuncLit)
+		if !ok {
+			return true
+		}
+		nm, ok := names[lit]
+		if !ok {
+			nm = closureName{"func literal", "func literal"}
+		}
+		w.out = append(w.out, Step{Kind: StepClosure, Depth: depth, Line: w.fset.Position(lit.Pos()).Line, Text: clip(nm.text), Key: nm.key})
+		w.block(depth+1, lit.Body.List)
+		return false
+	})
+}
+
+// closureNames names the function literals directly in n that are assigned
+// ("func literal → name") or passed to a call ("func literal in f").
+func (w *flowWalker) closureNames(n goast.Node) map[*goast.FuncLit]closureName {
+	names := map[*goast.FuncLit]closureName{}
+	name := func(e goast.Expr, prefix string, to goast.Node) {
+		if lit, ok := goast.Unparen(e).(*goast.FuncLit); ok {
+			t, k := w.str(to)
+			names[lit] = closureName{prefix + t, prefix + k}
+		}
+	}
 	goast.Inspect(n, func(x goast.Node) bool {
 		switch x := x.(type) {
 		case *goast.AssignStmt:
-			if len(x.Lhs) == len(x.Rhs) {
-				for i, r := range x.Rhs {
-					if lit, ok := goast.Unparen(r).(*goast.FuncLit); ok {
-						t, k := w.str(x.Lhs[i])
-						names[lit] = name{"func literal → " + t, "func literal → " + k}
-					}
+			for i, r := range x.Rhs {
+				if len(x.Lhs) == len(x.Rhs) {
+					name(r, "func literal → ", x.Lhs[i])
 				}
 			}
 		case *goast.CallExpr:
 			for _, a := range x.Args {
-				if lit, ok := goast.Unparen(a).(*goast.FuncLit); ok {
-					t, k := w.str(x.Fun)
-					names[lit] = name{"func literal in " + t, "func literal in " + k}
-				}
+				name(a, "func literal in ", x.Fun)
 			}
 		case *goast.FuncLit:
-			nm, ok := names[x]
-			if !ok {
-				nm = name{"func literal", "func literal"}
-			}
-			w.out = append(w.out, Step{Kind: StepClosure, Depth: depth, Line: w.fset.Position(x.Pos()).Line, Text: clip(nm.text), Key: nm.key})
-			w.block(depth+1, x.Body.List)
 			return false
 		}
 		return true
 	})
+	return names
 }
 
 // hasFuncLit reports whether n holds a function literal.

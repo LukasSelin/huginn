@@ -1,6 +1,7 @@
 package review
 
 import (
+	"cmp"
 	"fmt"
 	gotypes "go/types"
 	"maps"
@@ -238,6 +239,13 @@ func (p *Paths) Hunks() []Hunk {
 	if len(shown) <= wholeFlow {
 		return []Hunk{{Steps: shown}}
 	}
+	return cut(shown, changed)
+}
+
+// cut cuts a flow into hunks of the steps at the indexes in changed, with
+// hunkContext steps around each, merging hunks that touch, and a last hunk
+// counting the steps after them.
+func cut(shown []PathStep, changed []int) []Hunk {
 	var out []Hunk
 	end := -1 // the last step shown so far
 	for k := 0; k < len(changed); {
@@ -246,19 +254,24 @@ func (p *Paths) Hunks() []Hunk {
 		for k++; k < len(changed) && changed[k]-hunkContext <= hi+1; k++ {
 			hi = min(changed[k]+hunkContext, len(shown)-1)
 		}
-		h := Hunk{Skipped: lo - end - 1, Steps: shown[lo : hi+1]}
-		depth := shown[lo].Depth
-		for j := lo - 1; j >= 0 && depth > 0; j-- {
-			if shown[j].Depth < depth {
-				depth = shown[j].Depth
-				h.Breadcrumb = append([]string{shown[j].Text}, h.Breadcrumb...)
-			}
-		}
-		out = append(out, h)
+		out = append(out, Hunk{Skipped: lo - end - 1, Breadcrumb: breadcrumb(shown, lo), Steps: shown[lo : hi+1]})
 		end = hi
 	}
 	if rest := len(shown) - 1 - end; rest > 0 {
 		out = append(out, Hunk{Skipped: rest})
+	}
+	return out
+}
+
+// breadcrumb returns the steps enclosing shown[at], outermost first.
+func breadcrumb(shown []PathStep, at int) []string {
+	var out []string
+	depth := shown[at].Depth
+	for j := at - 1; j >= 0 && depth > 0; j-- {
+		if shown[j].Depth < depth {
+			depth = shown[j].Depth
+			out = append([]string{shown[j].Text}, out...)
+		}
 	}
 	return out
 }
@@ -284,47 +297,11 @@ type fn struct {
 // paths compares the flows of the production functions the change adds or
 // whose bodies it edits, in the order of the report's changes.
 func paths(r *semdiff.Report, files []git.FileDiff) []Paths {
-	olds, news := map[string]git.FileDiff{}, map[string]git.FileDiff{}
-	for _, fd := range files {
-		if fd.Old != nil {
-			olds[fd.OldPath] = fd
-		}
-		if fd.New != nil {
-			news[fd.NewPath] = fd
-		}
-	}
-	flows := map[string]map[string][]ast.Step{}
-	find := func(old bool, p, name string) *fn {
-		fd, ok := news[p]
-		f, src, side := fd.New, fd.NewSource, "new:"
-		if old {
-			fd, ok = olds[p]
-			f, src, side = fd.Old, fd.OldSource, "old:"
-		}
-		if !ok || f == nil {
-			return nil
-		}
-		for _, s := range f.Symbols {
-			if (s.Kind == ast.KindFunc || s.Kind == ast.KindMethod) && s.Package+"."+s.QualifiedName() == name {
-				fl, ok := flows[side+p]
-				if !ok {
-					fl = ast.Flows(p, src)
-					flows[side+p] = fl
-				}
-				return &fn{sym: s, flow: fl[s.Key], dir: path.Dir(p)}
-			}
-		}
-		return nil
-	}
-	isFunc := func(c semdiff.Change) bool {
-		return (c.Symbol == "func" || c.Symbol == "method") &&
-			!strings.HasSuffix(c.Path, "_test.go") && !strings.HasSuffix(c.OldPath, "_test.go")
-	}
-
+	sd := newSides(files)
 	added := map[string]*fn{} // by the report's name
 	for _, c := range r.Changes {
-		if c.Kind == semdiff.KindAdded && isFunc(c) {
-			if f := find(false, c.Path, c.Name); f != nil {
+		if c.Kind == semdiff.KindAdded && isProductionFunc(c) {
+			if f := sd.find(false, c.Path, c.Name); f != nil {
 				added[c.Name] = f
 			}
 		}
@@ -332,39 +309,90 @@ func paths(r *semdiff.Report, files []git.FileDiff) []Paths {
 
 	var out []Paths
 	for i, c := range r.Changes {
-		if !isFunc(c) {
-			continue
-		}
-		if c.Kind == semdiff.KindAdded {
+		switch {
+		case !isProductionFunc(c):
+		case c.Kind == semdiff.KindAdded:
 			if f := added[c.Name]; f != nil {
 				out = append(out, outline(i, f.flow))
 			}
-			continue
+		case c.Flags.Has(ast.BodyChanged) && !c.Flags.Has(ast.Deleted):
+			if p, ok := sd.edit(i, c, added); ok {
+				out = append(out, p)
+			}
 		}
-		if !c.Flags.Has(ast.BodyChanged) || c.Flags.Has(ast.Deleted) {
-			continue
-		}
-		before := find(true, c.OldPath, cmpOr(c.OldName, c.Name))
-		after := find(false, c.Path, c.Name)
-		if before == nil || after == nil {
-			continue
-		}
-		p := compare(before.flow, after.flow, callees(after, added))
-		p.Change = i
-		if p.Kind == PathsUnchanged {
-			p.Starts, p.Stops = calls(before.sym, after.sym)
-			p.Verdict = unchangedVerdict(p.Starts, p.Stops)
-		}
-		out = append(out, p)
 	}
 	return out
 }
 
-func cmpOr(a, b string) string {
-	if a != "" {
-		return a
+// isProductionFunc reports whether a change is of a function or method
+// outside test files.
+func isProductionFunc(c semdiff.Change) bool {
+	return (c.Symbol == "func" || c.Symbol == "method") &&
+		!strings.HasSuffix(c.Path, "_test.go") && !strings.HasSuffix(c.OldPath, "_test.go")
+}
+
+// sides finds functions in the files a change touches, on either side,
+// with their flows, reading each side of a file's flows once.
+type sides struct {
+	olds, news map[string]git.FileDiff
+	flows      map[string]map[string][]ast.Step // by "old:" or "new:" and path
+}
+
+func newSides(files []git.FileDiff) *sides {
+	sd := &sides{olds: map[string]git.FileDiff{}, news: map[string]git.FileDiff{}, flows: map[string]map[string][]ast.Step{}}
+	for _, fd := range files {
+		if fd.Old != nil {
+			sd.olds[fd.OldPath] = fd
+		}
+		if fd.New != nil {
+			sd.news[fd.NewPath] = fd
+		}
 	}
-	return b
+	return sd
+}
+
+// find returns the function or method named name, qualified with its
+// package's name, in the file at path p before the change or after it, or
+// nil when there is none.
+func (sd *sides) find(old bool, p, name string) *fn {
+	fd, ok := sd.news[p]
+	f, src, side := fd.New, fd.NewSource, "new:"
+	if old {
+		fd, ok = sd.olds[p]
+		f, src, side = fd.Old, fd.OldSource, "old:"
+	}
+	if !ok || f == nil {
+		return nil
+	}
+	for _, s := range f.Symbols {
+		if (s.Kind == ast.KindFunc || s.Kind == ast.KindMethod) && s.Package+"."+s.QualifiedName() == name {
+			fl, ok := sd.flows[side+p]
+			if !ok {
+				fl = ast.Flows(p, src)
+				sd.flows[side+p] = fl
+			}
+			return &fn{sym: s, flow: fl[s.Key], dir: path.Dir(p)}
+		}
+	}
+	return nil
+}
+
+// edit compares the flows of the function the change at index i edits,
+// following the steps it drops into the functions in added that it calls.
+// It reports false when either side cannot be found.
+func (sd *sides) edit(i int, c semdiff.Change, added map[string]*fn) (Paths, bool) {
+	before := sd.find(true, c.OldPath, cmp.Or(c.OldName, c.Name))
+	after := sd.find(false, c.Path, c.Name)
+	if before == nil || after == nil {
+		return Paths{}, false
+	}
+	p := compare(before.flow, after.flow, callees(after, added))
+	p.Change = i
+	if p.Kind == PathsUnchanged {
+		p.Starts, p.Stops = calls(before.sym, after.sym)
+		p.Verdict = unchangedVerdict(p.Starts, p.Stops)
+	}
+	return p, true
 }
 
 // callee is a function the change adds that an edited function calls, by
@@ -382,30 +410,32 @@ func callees(f *fn, added map[string]*fn) []callee {
 	var out []callee
 	for _, name := range slices.Sorted(maps.Keys(added)) {
 		a := added[name]
-		for _, r := range f.sym.Refs {
-			if r.Calls == 0 || r.Name != a.sym.Name {
-				continue
-			}
-			ok := false
-			switch r.Kind {
-			case ast.RefLocal:
-				ok = a.sym.Kind == ast.KindFunc && a.dir == f.dir
-			case ast.RefMethod:
-				ok = a.sym.Kind == ast.KindMethod && (r.Recv == "" || r.Recv == a.sym.Recv)
-			case ast.RefImport:
-				ok = a.sym.Kind == ast.KindFunc
-			}
-			if ok {
-				shown := name
-				if a.dir == f.dir && a.sym.Package == f.sym.Package {
-					shown = a.sym.QualifiedName()
-				}
-				out = append(out, callee{name: shown, flow: a.flow})
-				break
-			}
+		if !slices.ContainsFunc(f.sym.Refs, func(r ast.Ref) bool { return callsTo(r, f, a) }) {
+			continue
 		}
+		shown := name
+		if a.dir == f.dir && a.sym.Package == f.sym.Package {
+			shown = a.sym.QualifiedName()
+		}
+		out = append(out, callee{name: shown, flow: a.flow})
 	}
 	return out
+}
+
+// callsTo reports whether the reference r in f is a call to a, by name.
+func callsTo(r ast.Ref, f, a *fn) bool {
+	if r.Calls == 0 || r.Name != a.sym.Name {
+		return false
+	}
+	switch r.Kind {
+	case ast.RefLocal:
+		return a.sym.Kind == ast.KindFunc && a.dir == f.dir
+	case ast.RefMethod:
+		return a.sym.Kind == ast.KindMethod && (r.Recv == "" || r.Recv == a.sym.Recv)
+	case ast.RefImport:
+		return a.sym.Kind == ast.KindFunc
+	}
+	return false
 }
 
 // outline is the paths of a function the change adds.
@@ -445,16 +475,53 @@ func waysOut(n int) string {
 	return fmt.Sprintf("%d ways out", n)
 }
 
+// op is one step of the alignment of two flows: a step on both sides
+// (StepSame or StepRenested), only before (StepRemoved) or only after
+// (StepAdded), by its index on each side, -1 on a side it is not on.
+type op struct {
+	mark StepMark
+	i, j int
+}
+
 // compare compares the flows of a function before and after an edit, with
 // the functions the change adds that it calls after it, where steps it
 // drops may have gone.
 func compare(old, new []ast.Step, into []callee) Paths {
+	ops := align(old, new)
+	paired, pairedOld := pairEdits(ops, old, new)
+	moved := follow(ops, old, pairedOld, into)
+
 	var p Paths
-	type op struct {
-		mark StepMark
-		i, j int // into old, new; -1 for none
+	t := p.lay(ops, old, new, paired, pairedOld, moved)
+	for _, c := range into {
+		if t.into[c.name] {
+			p.Into = append(p.Into, c.name)
+		}
 	}
-	// Align by key, longest common subsequence first.
+	p.Decisions, p.WaysOut = counts(new)
+
+	// The ways out, leaving out those of steps that moved to another
+	// function: the steps say where they went.
+	gone := map[int]bool{}
+	for k := range moved {
+		gone[k] = true
+	}
+	p.Exits = compareExits(exitsOf(old, gone), exitsOf(new, nil))
+	for _, e := range p.Exits {
+		if e.Mark != ExitSame {
+			t.exits++
+		}
+	}
+	if t.exits == 0 {
+		p.Exits = nil
+	}
+	p.Kind, p.Verdict = t.verdict(p.Into)
+	return p
+}
+
+// align aligns two flows by their steps' keys, longest common subsequence
+// first. A step on both sides at different depths is re-nested.
+func align(old, new []ast.Step) []op {
 	n, m := len(old), len(new)
 	lcs := make([][]int, n+1)
 	for i := range lcs {
@@ -489,11 +556,15 @@ func compare(old, new []ast.Step, into []callee) Paths {
 			j++
 		}
 	}
+	return ops
+}
 
-	// Pair a removed step with an added step of the same run when they
-	// share most of their words: one edited step, where the added one is.
-	paired := map[int]int{} // new index to old index
-	pairedOld := map[int]bool{}
+// pairEdits pairs a removed step with an added step of the same run of
+// changes when they share most of their words: one edited step, shown
+// where the added one is. It returns the pairs by the added step's index,
+// and the removed steps paired.
+func pairEdits(ops []op, old, new []ast.Step) (paired map[int]int, pairedOld map[int]bool) {
+	paired, pairedOld = map[int]int{}, map[int]bool{}
 	for start := 0; start < len(ops); {
 		end := start
 		for end < len(ops) && (ops[end].mark == StepRemoved || ops[end].mark == StepAdded) {
@@ -503,202 +574,250 @@ func compare(old, new []ast.Step, into []callee) Paths {
 			if d.mark != StepRemoved {
 				continue
 			}
-			for _, a := range ops[start:end] {
-				if a.mark == StepAdded && !hasKey(paired, a.j) && old[d.i].Kind == new[a.j].Kind && similar(old[d.i].Key, new[a.j].Key) {
-					paired[a.j], pairedOld[d.i] = d.i, true
-					break
-				}
+			if a, ok := editOf(ops[start:end], old[d.i], new, paired); ok {
+				paired[a], pairedOld[d.i] = d.i, true
 			}
 		}
 		start = max(end, start+1)
 	}
+	return paired, pairedOld
+}
 
-	// Follow the removed steps into the functions the change adds that the
-	// function calls: as they were first, then edited.
-	used := make([]map[int]bool, len(into))
-	for k := range used {
-		used[k] = map[int]bool{}
-	}
-	moved := map[int]PathStep{} // by old index
-	look := func(s ast.Step, exact bool) (PathStep, bool) {
-		for k, c := range into {
-			for x, t := range c.flow {
-				if used[k][x] || t.Kind != s.Kind || exact && t.Key != s.Key || !exact && !similar(t.Key, s.Key) {
-					continue
-				}
-				used[k][x] = true
-				if exact {
-					return PathStep{Step: s, Mark: StepMoved, To: c.name}, true
-				}
-				t.Depth = s.Depth
-				return edit(PathStep{Step: t, Mark: StepMovedEdited, To: c.name}, s), true
-			}
+// editOf returns the index of the first added step of run, not yet
+// paired, that is an edit of the removed step s.
+func editOf(run []op, s ast.Step, new []ast.Step, paired map[int]int) (int, bool) {
+	for _, a := range run {
+		if a.mark == StepAdded && !hasKey(paired, a.j) && s.Kind == new[a.j].Kind && similar(s.Key, new[a.j].Key) {
+			return a.j, true
 		}
-		return PathStep{}, false
+	}
+	return 0, false
+}
+
+// follow looks for the removed steps that are not edits in the functions
+// the change adds and the function calls: as they were first, then
+// edited. It returns where each went, by its index before the change.
+func follow(ops []op, old []ast.Step, pairedOld map[int]bool, into []callee) map[int]PathStep {
+	moved := map[int]PathStep{}
+	f := finder{into: into, used: make([]map[int]bool, len(into))}
+	for k := range f.used {
+		f.used[k] = map[int]bool{}
 	}
 	for _, exact := range []bool{true, false} {
 		for _, o := range ops {
-			if o.mark != StepRemoved || pairedOld[o.i] {
+			if _, done := moved[o.i]; done || o.mark != StepRemoved || pairedOld[o.i] {
 				continue
 			}
-			if _, done := moved[o.i]; done {
-				continue
-			}
-			if ps, ok := look(old[o.i], exact); ok {
+			if ps, ok := f.look(old[o.i], exact); ok {
 				moved[o.i] = ps
 			}
 		}
 	}
+	return moved
+}
 
-	var added, removed, edited, renested, movedEdited int
-	var newPaths, gonePaths, newEffects, goneEffects, newClosures, goneClosures int
-	var onlyNew string
-	into2 := map[string]bool{}
+// finder looks for steps in the functions an edited function calls, each
+// of their steps found once.
+type finder struct {
+	into []callee
+	used []map[int]bool // by function, the indexes of the steps found
+}
+
+// look finds the step s in the functions, as it was or edited.
+func (f *finder) look(s ast.Step, exact bool) (PathStep, bool) {
+	for k, c := range f.into {
+		for x, t := range c.flow {
+			if f.used[k][x] || !matches(s, t, exact) {
+				continue
+			}
+			f.used[k][x] = true
+			if exact {
+				return PathStep{Step: s, Mark: StepMoved, To: c.name}, true
+			}
+			t.Depth = s.Depth
+			return edit(PathStep{Step: t, Mark: StepMovedEdited, To: c.name}, s), true
+		}
+	}
+	return PathStep{}, false
+}
+
+// matches reports whether t is the step s, as it was or, when not exact,
+// edited.
+func matches(s, t ast.Step, exact bool) bool {
+	switch {
+	case t.Kind != s.Kind:
+		return false
+	case exact:
+		return t.Key == s.Key
+	}
+	return similar(t.Key, s.Key)
+}
+
+// tally counts how two flows differ, for the verdict.
+type tally struct {
+	added, removed, edited, renested, moved, movedEdited int
+
+	newPaths, gonePaths, newEffects, goneEffects, newClosures, goneClosures int
+
+	exits   int             // ways out that differ
+	onlyNew string          // the last new path, named when it is the only change
+	into    map[string]bool // the functions steps moved to
+}
+
+// lay lays the compared flow out in p.Steps, in order, and tallies how it
+// differs.
+func (p *Paths) lay(ops []op, old, new []ast.Step, paired map[int]int, pairedOld map[int]bool, moved map[int]PathStep) *tally {
+	t := &tally{into: map[string]bool{}}
 	for _, o := range ops {
 		switch o.mark {
 		case StepSame:
 			p.Steps = append(p.Steps, PathStep{Step: new[o.j], Mark: StepSame})
 		case StepRenested:
-			renested++
+			t.renested++
 			p.Steps = append(p.Steps, PathStep{Step: new[o.j], Mark: StepRenested})
 		case StepAdded:
-			if d, ok := paired[o.j]; ok {
-				edited++
-				p.Steps = append(p.Steps, edit(PathStep{Step: new[o.j], Mark: StepEdited}, old[d]))
-				continue
-			}
-			added++
-			switch new[o.j].Kind {
-			case ast.StepDecision, ast.StepLoop:
-				newPaths++
-				onlyNew = new[o.j].String()
-			case ast.StepClosure:
-				newClosures++
-			case ast.StepEffect:
-				newEffects++
-			case ast.StepExit, ast.StepJump:
-			}
-			p.Steps = append(p.Steps, PathStep{Step: new[o.j], Mark: StepAdded})
+			p.Steps = append(p.Steps, t.addedStep(o, old, new, paired))
 		case StepRemoved:
-			if pairedOld[o.i] {
-				continue
-			}
-			if ps, ok := moved[o.i]; ok {
-				into2[ps.To] = true
-				if ps.Mark == StepMoved {
-					p.Moved++
-				} else {
-					movedEdited++
-				}
+			if ps, ok := t.removedStep(o, old, pairedOld, moved); ok {
 				p.Steps = append(p.Steps, ps)
-				continue
 			}
-			removed++
-			switch old[o.i].Kind {
-			case ast.StepDecision, ast.StepLoop:
-				gonePaths++
-			case ast.StepClosure:
-				goneClosures++
-			case ast.StepEffect:
-				goneEffects++
-			case ast.StepExit, ast.StepJump:
-			}
-			p.Steps = append(p.Steps, PathStep{Step: old[o.i], Mark: StepRemoved})
 		case StepEdited, StepMoved, StepMovedEdited:
 		}
 	}
-	for _, c := range into {
-		if into2[c.name] {
-			p.Into = append(p.Into, c.name)
-		}
-	}
-	p.Decisions, p.WaysOut = counts(new)
+	p.Moved = t.moved
+	return t
+}
 
-	// The ways out, leaving out those of steps that moved to another
-	// function: the steps say where they went.
-	gone := map[int]bool{}
-	for k := range moved {
-		gone[k] = true
+// addedStep is the step added after the change, or the edit of the removed
+// step paired with it.
+func (t *tally) addedStep(o op, old, new []ast.Step, paired map[int]int) PathStep {
+	s := new[o.j]
+	if d, ok := paired[o.j]; ok {
+		t.edited++
+		return edit(PathStep{Step: s, Mark: StepEdited}, old[d])
 	}
-	p.Exits = compareExits(exitsOf(old, gone), exitsOf(new, nil))
-	exitsChanged := 0
-	for _, e := range p.Exits {
-		if e.Mark != ExitSame {
-			exitsChanged++
-		}
+	t.added++
+	switch s.Kind {
+	case ast.StepDecision, ast.StepLoop:
+		t.newPaths++
+		t.onlyNew = s.String()
+	case ast.StepClosure:
+		t.newClosures++
+	case ast.StepEffect:
+		t.newEffects++
+	case ast.StepExit, ast.StepJump:
 	}
-	if exitsChanged == 0 {
-		p.Exits = nil
-	}
+	return PathStep{Step: s, Mark: StepAdded}
+}
 
-	outMoved := p.Moved + movedEdited
+// removedStep is the step removed by the change, or where it moved to. It
+// reports false for one paired with an added step, which shows it.
+func (t *tally) removedStep(o op, old []ast.Step, pairedOld map[int]bool, moved map[int]PathStep) (PathStep, bool) {
+	if pairedOld[o.i] {
+		return PathStep{}, false
+	}
+	if ps, ok := moved[o.i]; ok {
+		t.into[ps.To] = true
+		if ps.Mark == StepMoved {
+			t.moved++
+		} else {
+			t.movedEdited++
+		}
+		return ps, true
+	}
+	t.removed++
+	s := old[o.i]
+	switch s.Kind {
+	case ast.StepDecision, ast.StepLoop:
+		t.gonePaths++
+	case ast.StepClosure:
+		t.goneClosures++
+	case ast.StepEffect:
+		t.goneEffects++
+	case ast.StepExit, ast.StepJump:
+	}
+	return PathStep{Step: s, Mark: StepRemoved}, true
+}
+
+// verdict returns the kind of change the tally adds up to and the line
+// saying what it is; the line of PathsUnchanged is left to the caller,
+// which knows the calls.
+func (t *tally) verdict(into []string) (PathsKind, string) {
+	out := t.moved + t.movedEdited
 	switch {
-	case added+removed+edited+renested+outMoved == 0:
-		p.Kind = PathsUnchanged
-	case outMoved > 0 && 2*outMoved >= outMoved+removed:
-		p.Kind = PathsExtracted
-		v := "extracted into " + strings.Join(p.Into, ", ")
-		switch {
-		case movedEdited == 0 && removed == 0:
-			v += " · all " + plural(p.Moved, "step") + " reappear"
-		default:
-			if movedEdited > 0 {
-				v += " · " + plural(movedEdited, "step") + " moved and edited"
-			}
-			if removed > 0 {
-				v += " · " + plural(removed, "step") + " don't reappear"
-			}
-		}
-		p.Verdict = v
-	case added+removed == 0:
-		p.Kind = PathsReshaped
-		parts := []string{"same paths"}
-		if edited > 0 {
-			parts = append(parts, plural(edited, "step")+" edited")
-		}
-		if renested > 0 {
-			parts = append(parts, fmt.Sprintf("%d re-nested", renested))
-		}
-		p.Verdict = strings.Join(parts, " · ")
-	default:
-		p.Kind = PathsChanged
-		var parts []string
-		switch {
-		case newPaths == 1 && added == 1:
-			parts = append(parts, "1 new path: "+onlyNew)
-		case newPaths > 0:
-			parts = append(parts, plural(newPaths, "new path"))
-		}
-		if gonePaths > 0 {
-			parts = append(parts, fmt.Sprintf("%d removed", gonePaths))
-		}
-		if exitsChanged > 0 {
-			parts = append(parts, fmt.Sprintf("%s changed", waysOut(exitsChanged)))
-		}
-		if edited > 0 {
-			parts = append(parts, plural(edited, "step")+" edited")
-		}
-		if renested > 0 {
-			parts = append(parts, fmt.Sprintf("%d re-nested", renested))
-		}
-		if newEffects > 0 {
-			parts = append(parts, plural(newEffects, "new effect"))
-		}
-		if goneEffects > 0 {
-			parts = append(parts, plural(goneEffects, "effect")+" gone")
-		}
-		if newClosures > 0 {
-			parts = append(parts, plural(newClosures, "new closure"))
-		}
-		if goneClosures > 0 {
-			parts = append(parts, plural(goneClosures, "closure")+" gone")
-		}
-		if len(parts) == 0 {
-			parts = append(parts, plural(added+removed, "step")+" changed")
-		}
-		p.Verdict = strings.Join(parts, " · ")
+	case t.added+t.removed+t.edited+t.renested+out == 0:
+		return PathsUnchanged, ""
+	case out > 0 && 2*out >= out+t.removed:
+		return PathsExtracted, t.extracted(into)
+	case t.added+t.removed == 0:
+		return PathsReshaped, strings.Join(append([]string{"same paths"}, t.edits()...), " · ")
 	}
-	return p
+	return PathsChanged, t.changed()
+}
+
+// extracted says where an extraction moved the steps, and how many were
+// edited on the way or do not reappear.
+func (t *tally) extracted(into []string) string {
+	v := "extracted into " + strings.Join(into, ", ")
+	if t.movedEdited == 0 && t.removed == 0 {
+		return v + " · all " + plural(t.moved, "step") + " reappear"
+	}
+	if t.movedEdited > 0 {
+		v += " · " + plural(t.movedEdited, "step") + " moved and edited"
+	}
+	if t.removed > 0 {
+		v += " · " + plural(t.removed, "step") + " don't reappear"
+	}
+	return v
+}
+
+// edits counts the steps edited and re-nested: "2 steps edited",
+// "1 re-nested".
+func (t *tally) edits() []string {
+	var parts []string
+	if t.edited > 0 {
+		parts = append(parts, plural(t.edited, "step")+" edited")
+	}
+	if t.renested > 0 {
+		parts = append(parts, fmt.Sprintf("%d re-nested", t.renested))
+	}
+	return parts
+}
+
+// changed counts what an edit adds and removes: new and removed paths,
+// ways out changed, steps edited and re-nested, effects and closures.
+func (t *tally) changed() string {
+	var parts []string
+	switch {
+	case t.newPaths == 1 && t.added == 1:
+		parts = append(parts, "1 new path: "+t.onlyNew)
+	case t.newPaths > 0:
+		parts = append(parts, plural(t.newPaths, "new path"))
+	}
+	if t.gonePaths > 0 {
+		parts = append(parts, fmt.Sprintf("%d removed", t.gonePaths))
+	}
+	if t.exits > 0 {
+		parts = append(parts, waysOut(t.exits)+" changed")
+	}
+	parts = append(parts, t.edits()...)
+	for _, c := range []struct {
+		n    int
+		text string
+	}{
+		{t.newEffects, plural(t.newEffects, "new effect")},
+		{t.goneEffects, plural(t.goneEffects, "effect") + " gone"},
+		{t.newClosures, plural(t.newClosures, "new closure")},
+		{t.goneClosures, plural(t.goneClosures, "closure") + " gone"},
+	} {
+		if c.n > 0 {
+			parts = append(parts, c.text)
+		}
+	}
+	if len(parts) == 0 {
+		parts = append(parts, plural(t.added+t.removed, "step")+" changed")
+	}
+	return strings.Join(parts, " · ")
 }
 
 // edit gives an edited step its text before the change, both written from
@@ -772,75 +891,104 @@ type exitAt struct {
 	what, when string
 }
 
+// exitFrame is a step enclosing others while a flow's ways out are listed,
+// with the condition it stands for, as shown and as keyed.
+type exitFrame struct {
+	step      ast.Step
+	when, key string
+}
+
 // exitsOf lists the ways out of a flow with the decisions enclosing each,
 // leaving out those inside closures and the steps whose index is in skip.
 // An else or default is named after the conditions before it.
 func exitsOf(flow []ast.Step, skip map[int]bool) []exitAt {
 	var out []exitAt
-	type frame struct {
-		step      ast.Step
-		when, key string
-	}
-	var stack []frame
+	var stack []exitFrame
 	chains := map[int][]string{} // the conditions of the if or switch chain open at each depth
 	for i, s := range flow {
 		for len(stack) > 0 && stack[len(stack)-1].step.Depth >= s.Depth {
 			stack = stack[:len(stack)-1]
 		}
-		inClosure := false
-		for _, f := range stack {
-			if f.step.Kind == ast.StepClosure {
-				inClosure = true
-			}
+		whenKey, then, thenKey := splitThen(s)
+		self := exitFrame{s, condition(s, chains), whenKey}
+		if e, ok := exitOf(self, stack, then, thenKey); ok && !skip[i] && !inClosure(stack) {
+			out = append(out, e)
 		}
-		when := s.Cond
-		switch {
-		case s.Kind != ast.StepDecision:
-			delete(chains, s.Depth)
-		case strings.HasPrefix(s.Text, "if "):
-			chains[s.Depth] = []string{s.Cond}
-		case strings.HasPrefix(s.Text, "else if ") || strings.HasPrefix(s.Text, "case "):
-			chains[s.Depth] = append(chains[s.Depth], s.Cond)
-		case s.Text == "else" || s.Text == "default":
-			switch c := chains[s.Depth]; len(c) {
-			case 0:
-				when = s.Text
-			case 1:
-				when = "not " + c[0]
-			default:
-				when = "none of " + strings.Join(c, "; ")
-			}
-		default: // switch, select
-			delete(chains, s.Depth+1)
-			when = s.Text
-		}
-		if s.Kind == ast.StepLoop {
-			when = s.Text
-		}
-		whenKey := s.Key
-		then, thenKey := s.Then, ""
-		if then != "" {
-			cut := strings.LastIndex(s.Key, " → ")
-			whenKey, thenKey = s.Key[:cut], s.Key[cut+len(" → "):]
-			if isJump(then) {
-				then = ""
-			}
-		}
-		if !inClosure && !skip[i] {
-			var ws, ks []string
-			for _, f := range stack {
-				ws, ks = append(ws, f.when), append(ks, f.key)
-			}
-			switch {
-			case s.Kind == ast.StepExit:
-				out = append(out, exitAt{Exit{What: s.Text, When: ws, Line: s.Line}, s.Key, strings.Join(ks, " ∧ ")})
-			case then != "":
-				out = append(out, exitAt{Exit{What: then, When: append(ws, when), Line: s.Line}, thenKey, strings.Join(append(ks, whenKey), " ∧ ")})
-			}
-		}
-		stack = append(stack, frame{s, when, whenKey})
+		stack = append(stack, self)
 	}
 	return out
+}
+
+// condition returns what a step stands for when it encloses a way out: a
+// decision's condition, an else or default named after the conditions
+// before it, a loop, switch or select as written. It keeps in chains the
+// conditions of the if or switch chain open at each depth.
+func condition(s ast.Step, chains map[int][]string) string {
+	switch {
+	case s.Kind == ast.StepLoop:
+		delete(chains, s.Depth)
+		return s.Text
+	case s.Kind != ast.StepDecision:
+		delete(chains, s.Depth)
+	case strings.HasPrefix(s.Text, "if "):
+		chains[s.Depth] = []string{s.Cond}
+	case strings.HasPrefix(s.Text, "else if ") || strings.HasPrefix(s.Text, "case "):
+		chains[s.Depth] = append(chains[s.Depth], s.Cond)
+	case s.Text == "else" || s.Text == "default":
+		return otherwise(s.Text, chains[s.Depth])
+	default: // switch, select
+		delete(chains, s.Depth+1)
+		return s.Text
+	}
+	return s.Cond
+}
+
+// otherwise names an else or default after the conditions before it.
+func otherwise(text string, conds []string) string {
+	switch len(conds) {
+	case 0:
+		return text
+	case 1:
+		return "not " + conds[0]
+	}
+	return "none of " + strings.Join(conds, "; ")
+}
+
+// splitThen splits the key of a decision holding a way out or jump into
+// the decision's and the way out's, and returns the way out it holds,
+// empty for a jump or none.
+func splitThen(s ast.Step) (whenKey, then, thenKey string) {
+	cut := strings.LastIndex(s.Key, " → ")
+	if s.Then == "" || cut < 0 {
+		return s.Key, "", ""
+	}
+	whenKey, thenKey = s.Key[:cut], s.Key[cut+len(" → "):]
+	if isJump(s.Then) {
+		return whenKey, "", thenKey
+	}
+	return whenKey, s.Then, thenKey
+}
+
+// exitOf returns the way out self's step is, if it is one, under the
+// decisions on the stack: an exit, or a decision holding one.
+func exitOf(self exitFrame, stack []exitFrame, then, thenKey string) (exitAt, bool) {
+	var ws, ks []string
+	for _, f := range stack {
+		ws, ks = append(ws, f.when), append(ks, f.key)
+	}
+	s := self.step
+	switch {
+	case s.Kind == ast.StepExit:
+		return exitAt{Exit{What: s.Text, When: ws, Line: s.Line}, s.Key, strings.Join(ks, " ∧ ")}, true
+	case then != "":
+		return exitAt{Exit{What: then, When: append(ws, self.when), Line: s.Line}, thenKey, strings.Join(append(ks, self.key), " ∧ ")}, true
+	}
+	return exitAt{}, false
+}
+
+// inClosure reports whether a closure encloses the steps under the stack.
+func inClosure(stack []exitFrame) bool {
+	return slices.ContainsFunc(stack, func(f exitFrame) bool { return f.step.Kind == ast.StepClosure })
 }
 
 func isJump(s string) bool {
@@ -858,41 +1006,15 @@ func isJump(s string) bool {
 func compareExits(old, new []exitAt) []Exit {
 	matched := make([]bool, len(old))
 	marks := make([]ExitMark, len(new))
-	for j, e := range new {
-		for i, o := range old {
-			if !matched[i] && o.what == e.what && o.when == e.when {
-				matched[i], marks[j] = true, ExitSame
-				break
-			}
-		}
-	}
-	// Then the same way out under other decisions, then one returning
-	// something else under the same decisions.
-	for _, same := range []func(o, e exitAt) bool{
-		func(o, e exitAt) bool { return o.what == e.what },
-		func(o, e exitAt) bool { return o.when == e.when && similar(o.what, e.what) },
-	} {
-		for j, e := range new {
-			if marks[j] != 0 {
-				continue
-			}
-			for i, o := range old {
-				if !matched[i] && same(o, e) {
-					matched[i], marks[j] = true, ExitChanged
-					break
-				}
-			}
-		}
-	}
-	for j := range marks {
-		if marks[j] == 0 {
-			marks[j] = ExitNew
-		}
-	}
+	// The same way out under the same decisions first, then under other
+	// decisions, then one returning something else under the same ones.
+	matchExits(old, new, matched, marks, ExitSame, func(o, e exitAt) bool { return o.what == e.what && o.when == e.when })
+	matchExits(old, new, matched, marks, ExitChanged, func(o, e exitAt) bool { return o.what == e.what })
+	matchExits(old, new, matched, marks, ExitChanged, func(o, e exitAt) bool { return o.when == e.when && similar(o.what, e.what) })
 	var out []Exit
 	for j, e := range new {
 		x := e.Exit
-		x.Mark = marks[j]
+		x.Mark = cmp.Or(marks[j], ExitNew)
 		out = append(out, x)
 	}
 	for i, o := range old {
@@ -903,6 +1025,22 @@ func compareExits(old, new []exitAt) []Exit {
 		}
 	}
 	return out
+}
+
+// matchExits marks as mark each way out in new not marked yet that is the
+// same as one in old not matched yet.
+func matchExits(old, new []exitAt, matched []bool, marks []ExitMark, mark ExitMark, same func(o, e exitAt) bool) {
+	for j, e := range new {
+		if marks[j] != 0 {
+			continue
+		}
+		for i, o := range old {
+			if !matched[i] && same(o, e) {
+				matched[i], marks[j] = true, mark
+				break
+			}
+		}
+	}
 }
 
 // calls returns the functions after calls and before does not, and the
