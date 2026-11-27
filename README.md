@@ -69,9 +69,10 @@ step, the health report and knowledge silos, the map's preset windows)
 before it reports ready, then the per-directory views in the background, so
 the pages draw from memory.
 
-The journey can also be watched as an architecture being built: switch its
-view from *Map* to *Architecture* (or press `A`, and `M` to go back) and
-playback stacks the packages in 3D instead, as the layers page draws them.
+The journey opens on the architecture being built: playback stacks the
+packages in 3D, as the layers page draws them. Switch its view to *Map* (or
+press `M`, and `A` to come back) to watch the packages as bubbles on the
+journey map instead.
 It starts above, where the stack is the journey map, and comes down to the
 side as layers appear, turning slowly while it plays; each package drops
 onto its layer as it is born and flashes when it moves to another. Story

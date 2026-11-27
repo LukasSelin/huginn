@@ -94,7 +94,7 @@
     links: null, // the package in the breakout: { dir, rev, v, nodes, adj, wires, lit }
     tip: null, // the node the hover card describes: { node } on the map or { sym } in a package
     exporting: null, // the export under way: { cancel, video }
-    view: 'map', // or 'arch': the history building the architecture in 3D
+    mode: 'map', // the view: 'map', or 'arch', the history building the architecture in 3D, which a link opens on unless it says view=map
     layered: {}, // /api/layers responses by step
     lay: null, // the one for the current step, frame by frame as the journey's
     arch: null, // the architecture view's frame: packages, layers and references
@@ -242,7 +242,7 @@
     buildRows();
     buildChapterList();
     buildStage();
-    if (state.view === 'arch') await layered();
+    if (state.mode === 'arch') await layered();
     if (dir) await drill(dir);
     seek(state.frame, true);
   }
@@ -304,15 +304,15 @@
   }
 
   async function setView(v, first) {
-    v = v === 'arch' ? 'arch' : 'map';
-    if (v === state.view && !first) return;
+    v = v === 'map' ? 'map' : 'arch'; // the architecture unless the map is asked for
+    if (v === state.mode && !first) return;
     if (v === 'arch') {
       if (state.drill) undrill();
       await layered();
       stack.fromAbove();
       stack.start();
     } else stack.stop();
-    state.view = v;
+    state.mode = v;
     const arch = v === 'arch';
     hideTip();
     state.hover = state.focused = null;
@@ -356,7 +356,7 @@
   // litArch draws the references of the package picked, else of the one
   // under the pointer, else of the card's.
   function litArch() {
-    if (state.view !== 'arch') return;
+    if (state.mode !== 'arch') return;
     const lit = litPkg() ?? (state.archMarks.focus >= 0 ? state.archMarks.focus : null);
     stack.setLit(lit ?? -1, lit != null && lit === state.picked);
   }
@@ -1053,7 +1053,7 @@
       ? h('span', { class: 'tip-kinds' }, kinds.map(([k, l]) => h('span', { class: 'cnt', title: l }, mark(k), String(s.kinds[k]))))
       : h('span', { class: 'muted' }, 'none')));
     let uses = 0, by = 0;
-    if (state.view === 'arch') {
+    if (state.mode === 'arch') {
       const { out: o, into } = stack.neighbours(pi);
       uses = o.length;
       by = into.length;
@@ -1080,7 +1080,7 @@
         s.orphaned > 0 ? h('div', { class: 'muted small' }, `${pct(s.orphaned)} orphaned`) : null));
     }
     out.push(h('div', { class: 'tip-hint' }, state.picked === pi ? 'Click to break out the functions crossing it'
-      : state.view === 'arch' ? 'Click to keep its references lit' : 'Click to show only it and its neighbours'));
+      : state.mode === 'arch' ? 'Click to keep its references lit' : 'Click to show only it and its neighbours'));
     return out;
   }
 
@@ -1271,7 +1271,7 @@
     state.zoom = d3.zoom()
       .scaleExtent([1, state.maxZoom])
       .filter((e) => {
-        if (state.view === 'arch' || (e.target.closest && e.target.closest('.ov'))) return false;
+        if (state.mode === 'arch' || (e.target.closest && e.target.closest('.ov'))) return false;
         if (e.type === 'wheel') return true;
         if (e.touches) return e.touches.length > 1 || state.zt.k > 1;
         return !e.button;
@@ -1322,7 +1322,7 @@
 
   // zoom zooms the view shown by f, or back to the whole of it for 0.
   function zoom(f) {
-    if (state.view === 'arch') {
+    if (state.mode === 'arch') {
       if (f) stack.zoomBy(f);
       else stack.resetZoom();
     } else if (f) zoomBy(f);
@@ -1387,7 +1387,7 @@
     count('cCommits', f.total);
     count('cLive', f.live);
     count('cPkgs', f.pkgs.filter((p) => p.live > 0).length);
-    if (state.view === 'arch' && state.arch) count('cLayers', state.arch.layers);
+    if (state.mode === 'arch' && state.arch) count('cLayers', state.arch.layers);
     renderKnowLegend(f);
     $('caption').textContent = caption(f);
     $('caption').hidden = !!state.card;
@@ -1415,7 +1415,7 @@
   // The frame's key moment, or else what happened in it.
   function caption(f) {
     const lit = litPkg();
-    if (lit != null) return state.view === 'arch' ? archCaption(lit) : litCaption(lit);
+    if (lit != null) return state.mode === 'arch' ? archCaption(lit) : litCaption(lit);
     let best = null;
     for (const m of state.moments) {
       if (inFrame(m, state.frame) && (!best || m.weight > best.weight)) best = m;
@@ -1531,7 +1531,7 @@
     const pi = state.pathIdx.get(dir);
     if (pi === undefined) return;
     // Symbols are looked at on the map.
-    if (state.view === 'arch') await setView('map');
+    if (state.mode === 'arch') await setView('map');
     const keep = state.follow ? state.follow.id : 0;
     const key = `${state.step} ${dir} ${keep}`;
     let v = state.views.get(key);
@@ -2346,7 +2346,7 @@
   function render(story = true, animate = false) {
     const f = state.data.frames[state.frame];
     if (!f) return;
-    if (state.view === 'arch') renderArch(f);
+    if (state.mode === 'arch') renderArch(f);
     else renderStage(f);
     if (state.drill) renderDrill(animate);
     if (state.links) {
@@ -2848,7 +2848,7 @@
       // long history.
       const tweens = video ? Math.max(1, Math.round((tweenTime * VIDEO_FPS) / 1000)) : fs.length > GIF_LONG ? 1 : GIF_TWEENS;
       state.instant = true;
-      const arch = state.view === 'arch';
+      const arch = state.mode === 'arch';
       if (arch) {
         // The stack is drawn here instead, and builds from nothing; it
         // turns as it would while playing.
@@ -2898,7 +2898,7 @@
       if (job.cancel && job.video) job.video.cancel();
       state.instant = false;
       state.exporting = null;
-      if (state.view === 'arch') {
+      if (state.mode === 'arch') {
         stack.setPlaying(false);
         stack.start();
       }
@@ -2926,7 +2926,7 @@
     if (state.colorBy !== 'edits') p.set('color', state.colorBy);
     if (state.lines !== 'key') p.set('lines', state.lines);
     if (state.who) p.set('who', state.who);
-    if (state.view !== 'map') p.set('view', state.view);
+    if (state.mode !== 'arch') p.set('view', state.mode);
     const s = `#${p.toString().replaceAll('%2F', '/')}`;
     if (s !== location.hash) {
       try { history.replaceState(null, '', s); } catch { /* ignore */ }
