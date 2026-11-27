@@ -90,7 +90,7 @@ func symbols(ctx context.Context, stdout, stderr io.Writer, args []string) error
 		return fmt.Errorf("want one symbol name, got %d", fs.NArg())
 	}
 
-	repo, err := git.Open(*dir)
+	repo, err := git.Open(ctx, *dir)
 	if err != nil {
 		return err
 	}
@@ -166,7 +166,7 @@ func serve(ctx context.Context, stdout, stderr io.Writer, args []string) error {
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
-	repo, err := git.Open(*dir)
+	repo, err := git.Open(ctx, *dir)
 	if err != nil {
 		return err
 	}
@@ -194,10 +194,12 @@ func serve(ctx context.Context, stdout, stderr io.Writer, args []string) error {
 		fmt.Fprintf(stderr, "huginn: indexed in %v%s\n", time.Since(start).Round(time.Millisecond), cacheNote(opts.Cache))
 	}()
 
-	hs := &http.Server{Handler: srv.Handler()}
+	// Without a header timeout, a client that opens connections and never
+	// finishes its request headers holds them open indefinitely.
+	hs := &http.Server{Handler: srv.Handler(), ReadHeaderTimeout: 10 * time.Second}
 	go func() {
 		<-ctx.Done()
-		hs.Close()
+		_ = hs.Close() // Serve returns ErrServerClosed either way
 	}()
 	if err := hs.Serve(ln); err != http.ErrServerClosed {
 		return err

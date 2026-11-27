@@ -27,13 +27,13 @@ type Repo struct {
 }
 
 // Open returns the repository containing dir.
-func Open(dir string) (*Repo, error) {
+func Open(ctx context.Context, dir string) (*Repo, error) {
 	exe, err := exec.LookPath("git")
 	if err != nil {
 		return nil, err
 	}
 	r := &Repo{dir: dir, git: exe}
-	cmd := r.command(context.Background(), "rev-parse", "--git-dir")
+	cmd := r.command(ctx, "rev-parse", "--git-dir")
 	var stderr bytes.Buffer
 	cmd.Stderr = &stderr
 	if err := cmd.Run(); err != nil {
@@ -156,7 +156,7 @@ func (c *catFile) readBlob() ([]byte, error) {
 }
 
 func (c *catFile) close() error {
-	c.in.Close()
+	_ = c.in.Close() // ends cat-file's input; Wait reports how it went
 	if err := c.cmd.Wait(); err != nil {
 		return gitError(c.cmd, err, &c.stderr)
 	}

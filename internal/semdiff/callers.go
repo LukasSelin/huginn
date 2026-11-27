@@ -68,6 +68,8 @@ func newIndex(tree []*ast.File, pkgOf func(path, pkg string) string) *index {
 				}
 			case ast.KindType:
 				idx.types = append(idx.types, typeSite{sym: s, file: f, pkg: pkg})
+			case ast.KindFunc, ast.KindVar, ast.KindConst:
+				// Only methods and types make up method sets.
 			}
 		}
 	}

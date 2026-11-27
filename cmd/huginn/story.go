@@ -32,7 +32,7 @@ func tell(ctx context.Context, stdout, stderr io.Writer, args []string) error {
 		return fmt.Errorf("unexpected arguments: %s", strings.Join(fs.Args(), " "))
 	}
 
-	repo, err := git.Open(*dir)
+	repo, err := git.Open(ctx, *dir)
 	if err != nil {
 		return err
 	}

@@ -27,7 +27,7 @@ func semanticDiff(ctx context.Context, stdout, stderr io.Writer, args []string) 
 		return fmt.Errorf("want one revision, got %d", fs.NArg())
 	}
 
-	repo, err := git.Open(*dir)
+	repo, err := git.Open(ctx, *dir)
 	if err != nil {
 		return err
 	}

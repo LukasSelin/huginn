@@ -170,18 +170,18 @@ func Build(ctx context.Context, h *lineage.History, j *journey.Journey, rels []R
 	for i, p := range j.Packages {
 		pkgs[i] = p.Path
 	}
-	life := lives(j)
+	lv := lives(j)
 	rs := placeReleases(h, rels)
 	first := firstCommits(h)
-	all, sigs := moments(h, j, pkgs, life)
+	all, sigs := moments(h, j, pkgs, lv)
 	st.Releases = releaseMoments(j, rs, sigs)
 	all = append(all, st.Releases...)
 	all = append(all, newcomerMoments(j, first)...)
-	all = append(all, depMoments(j, pkgs, life)...)
+	all = append(all, depMoments(j, pkgs, lv)...)
 	all = append(all, knowledgeMoments(j, pkgs)...)
 	slices.SortStableFunc(all, byRev)
 
-	us := units(j, life)
+	us := units(j, lv)
 	cuts := segment(us, releaseBonus(us, rs))
 	spans := make([][2]int, len(cuts))
 	for c := range cuts {
@@ -194,7 +194,7 @@ func Build(ctx context.Context, h *lineage.History, j *journey.Journey, rels []R
 	msgs := messages(h)
 	df := termChapters(msgs, spans)
 	for c, sp := range spans {
-		f := facts(j, pkgs, life, sp[0], sp[1])
+		f := facts(j, pkgs, lv, sp[0], sp[1])
 		f.Number, f.Of = c+1, len(cuts)
 		f.Releases = releasesIn(rs, f.FirstRev, f.LastRev)
 		f.Themes = themes(msgs, sp[0], sp[1], df, len(spans))
@@ -618,7 +618,6 @@ func moments(h *lineage.History, j *journey.Journey, pkgs []string, l life) ([]M
 	// Renames, moves and exported signature changes, per commit.
 	type group struct {
 		rev   int
-		pkg   string // the package most of them are in
 		names []string
 		dirs  map[[2]string]int
 	}
@@ -671,6 +670,7 @@ func moments(h *lineage.History, j *journey.Journey, pkgs []string, l life) ([]M
 				}
 			}
 			m := Moment{Kind: k, Time: t, Rev: g.rev, SHA: sha, Package: top[1], Count: n, Weight: 1 + math.Log1p(float64(n))}
+			//exhaustive:ignore // groups holds only these three kinds
 			switch k {
 			case Rename:
 				m.Text = "Renamed " + g.names[0]

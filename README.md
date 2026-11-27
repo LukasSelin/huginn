@@ -244,6 +244,11 @@ other, and neither do reports. Only test files may import
 that breaks these rules; a new package needs a layer in `.golangci.yml`
 before others can import it.
 
+Side effects stay in place the same way: only `internal/git` runs programs
+(`os/exec`), and only `web` and `cmd/huginn` use the network. Outside
+`cmd/huginn` and tests, code doesn't exit, print to stdout or make a root
+context; it takes a `context.Context` and an `io.Writer` from its caller.
+
 ### Index cache
 
 `symbols` and `serve` store each walked commit's symbol changes in

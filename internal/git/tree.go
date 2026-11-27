@@ -49,7 +49,7 @@ func (r *Repo) Tree(ctx context.Context, rev string) (_ *Tree, err error) {
 	defer func() {
 		if err != nil {
 			cancel()
-			cf.close()
+			_ = cf.close() // err already says what went wrong
 			return
 		}
 		err = cf.close()

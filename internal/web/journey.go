@@ -37,8 +37,9 @@ func (s *Server) journey(ix *index, step journey.Step) *journey.Journey {
 func (s *Server) story(ix *index) (*story.Story, error) {
 	ix.journeys.storyOnce.Do(func() {
 		// Templated narration needs no context of its own; a narrator that
-		// calls out would get one from the request instead.
-		ctx := context.Background()
+		// calls out would get one from the request instead. The result is
+		// cached for every request, so it must not stop with the first one.
+		ctx := context.Background() //nolint:forbidigo // outlives the request that starts it, see above
 		tags, err := s.repo.Tags(ctx, git.Options{Branch: s.opts.Branch})
 		if err != nil {
 			ix.journeys.storyErr = err
