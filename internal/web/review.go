@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"strings"
 
+	"huginn/internal/cohesion"
 	"huginn/internal/review"
 	"huginn/internal/semdiff"
 )
@@ -24,6 +25,23 @@ type reviewJSON struct {
 
 	reportJSON
 	Relations relationsJSON `json:"relations"`
+	Types     []typeJSON    `json:"types"`
+
+	// Indexed says the history was indexed, so the types' change coupling
+	// was looked for.
+	Indexed bool `json:"indexed"`
+}
+
+// typeJSON is the seams of one struct type the merge request touches.
+type typeJSON struct {
+	Package string           `json:"package"`
+	Name    string           `json:"name"`
+	Path    string           `json:"path"`
+	Line    int              `json:"line"`
+	Changed []string         `json:"changed"`
+	Before  *cohesion.Report `json:"before"`
+	After   *cohesion.Report `json:"after"`
+	Notes   []cohesion.Note  `json:"notes"`
 }
 
 type relationsJSON struct {
@@ -70,7 +88,22 @@ func newReviewJSON(rv *review.Review) *reviewJSON {
 			AddedRefs:    refsJSON(rel.AddedRefs),
 			RemovedRefs:  refsJSON(rel.RemovedRefs),
 		},
+		Types: typesJSON(rv.Types),
 	}
+}
+
+func typesJSON(ts []review.TypeReview) []typeJSON {
+	out := make([]typeJSON, len(ts))
+	for i, t := range ts {
+		out[i] = typeJSON{
+			Package: t.Package, Name: t.Name, Path: t.Path, Line: t.Line, Changed: orEmpty(t.Changed),
+			Before: t.Before, After: t.After, Notes: t.Notes,
+		}
+		if out[i].Notes == nil {
+			out[i].Notes = []cohesion.Note{}
+		}
+	}
+	return out
 }
 
 // orEmpty returns ss, or an empty slice for nil, which encodes as [].
@@ -111,12 +144,17 @@ func (s *Server) reviewAPI(w http.ResponseWriter, r *http.Request) {
 			scope = append(scope, p)
 		}
 	}
-	rv, err := review.Build(r.Context(), s.repo, review.Options{
+	opts := review.Options{
 		Base:             strings.TrimSpace(q.Get("base")),
 		Head:             strings.TrimSpace(q.Get("head")),
 		Scope:            scope,
 		IncludeGenerated: s.opts.IncludeGenerated,
-	})
+	}
+	ix := s.index.Load()
+	if ix != nil {
+		opts.History = ix.h
+	}
+	rv, err := review.Build(r.Context(), s.repo, opts)
 	if err != nil {
 		if errors.Is(err, context.Canceled) {
 			return
@@ -124,7 +162,9 @@ func (s *Server) reviewAPI(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
-	writeJSON(w, newReviewJSON(rv))
+	out := newReviewJSON(rv)
+	out.Indexed = ix != nil
+	writeJSON(w, out)
 }
 
 // reviewOptionsJSON is what the review page offers to pick from.

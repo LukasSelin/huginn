@@ -311,6 +311,70 @@ and the imports and references the merge request starts and stops; point
 at a package to trace its lines, and pick it to narrow the callers,
 relations and changes listed below to the ones that involve it.
 
+#### Affinity matrix of the types it touches
+
+For each struct type the merge request touches (methods or definition, at
+least three methods, the twelve largest), the review reads the type's
+affinity matrix, the technique for finding the seams in a God object, on
+either side of the change, and says first what the change does to it. The
+page shows the whole reading; `huginn review` prints what the change does
+and where to start.
+
+- **The matrix.** A row per method, private ones too, and a column per
+  field, injected dependencies included; each cell is R where the method
+  reads the field and W where it writes it (assigned, `++`/`--`, address
+  taken, `delete`/`clear`, directly or through an index or a field of it),
+  and a last column lists the methods each calls.
+- **Column types**, guessed from names, types and writes, each with where
+  it ends up: *entity state* (written by methods; stays with the core
+  entity), *policy or config* (only read; a stateless policy or service),
+  *collaborator* (an I/O handle or service; the adapter that uses it),
+  *infrastructure* (logging, metrics; each new type gets its own) and
+  *temporary* (written and read only within one operation; a method object
+  for it).
+- **Hubs** are columns more than half the rows use, once at least five rows
+  use fields; they and infrastructure are set aside, and rows and columns
+  are reordered so each **block** sits on the diagonal. Writes and uses of
+  policy, collaborators and temporaries join a row to a block; reads of
+  another block's entity state are cheap and do not, and neither do calls
+  into rows placed only by reads. Each block is a candidate type, named by
+  where its columns end up: entity state, an adapter, a policy or a method
+  object. Rows using only hubs are the core.
+- **Patterns.** *Bridge rows* mark no field and only call other methods:
+  orchestration for a coordinator. A row whose columns fall into separate
+  blocks once it is removed *spans blocks*: split it with Extract Method
+  first. A column of entity state whose writers fall into separate blocks,
+  each with columns of its own, once it is removed is *written from two
+  blocks*: ownership follows writes, so one block should own it. Rows
+  marking nothing are free functions, and columns read only through
+  getters show code outside the type doing its work.
+- **LCOM4** is given on the raw type, where hubs and orchestration usually
+  make it 1, and with hubs, infrastructure and bridge rows removed.
+- **Callers × public methods.** The packages calling the exported methods,
+  grouped into roles by the methods they share (methods most callers use
+  set aside), each with the blocks its methods fall in: one block means the
+  callers split as the fields do; several make it a use case for a facade.
+  Public methods no caller uses are listed, leaving out those an interface
+  in the repository declares, since calls through interfaces are not seen.
+- **Naming pass.** Words several members share, and fields that look like
+  mode flags or states.
+- **Change coupling**, once `serve` has indexed the history: pairs of methods
+  changed together in at least two commits and in half the changes of the
+  one changed less, over the last year, leaving out commits that change
+  more than 40 symbols.
+- **Combining the signals.** Each block is checked against the callers (a
+  role using only it agrees), the history (methods changing together across
+  blocks disagree: a missing concept, a misplaced boundary, or a rule
+  written twice) and the names (a word most of its members share agrees; a
+  word spanning blocks says rename first), and the block to **start with**
+  is the one that owns its writes and changes most often, entity state
+  last.
+
+What the change does is put as notes, warnings first: blocks it joins,
+rows it makes span blocks, columns it makes written from two blocks; then
+new hubs, new columns and rows and where they go, and new public methods
+nothing calls.
+
 ## Architecture
 
 ```
@@ -350,7 +414,9 @@ git log / cat-file ──► internal/git ──► internal/ast ──► inter
   the tree after it with the changed files' old sides put back, so only
   one tree is read. **internal/review** finds a merge request's target and
   merge base and builds that report over its range, for `huginn review` and
-  the review page.
+  the review page, with the affinity matrix of each struct type it touches,
+  which **internal/cohesion** reads from the symbols' field reads and writes
+  and receiver calls.
 - **internal/knowledge** is the knowledge model: each author's decayed weight
   in each live symbol, and who counts as departed. The journey rolls it up
   per package frame by frame; **internal/silos** reads it at the last
@@ -360,7 +426,7 @@ git log / cat-file ──► internal/git ──► internal/ast ──► inter
 
 The packages are stacked in layers, and depguard rules in `.golangci.yml`
 keep them that way: foundation (`ast`, `git`, `modpath`), history
-(`lineage`, `knowledge`, `codemap`), analyses (`journey`, `health`,
+(`lineage`, `knowledge`, `codemap`), analyses (`journey`, `health`, `cohesion`,
 `semdiff`), reports (`story`, `silos`, `review`), then `web` and `cmd/huginn`. A
 package may import the layers below its own; analyses don't import each
 other, and neither do reports. Only test files may import

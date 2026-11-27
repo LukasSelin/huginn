@@ -50,7 +50,30 @@ func (m *markdown) review(rv *review.Review) {
 
 	m.impact(r.Blast, len(rv.Scope) > 0)
 	m.relations(r.Relations)
+	m.types(rv.Types)
 	m.changes(r)
+}
+
+// types lists what the change does to the affinity matrix of each struct
+// type it touches, warnings first.
+func (m *markdown) types(ts []review.TypeReview) {
+	if len(ts) == 0 {
+		return
+	}
+	m.printf("\n#### Affinity matrix of the types it touches\n\n")
+	for _, t := range ts {
+		m.printf("- %s at %s: %s\n", code(t.Name), code(fmt.Sprintf("%s:%d", t.Path, t.Line)), matrixSummary(t))
+		for _, n := range t.Notes {
+			if n.Warn {
+				m.printf("  - **%s**\n", n.Text)
+			} else {
+				m.printf("  - %s\n", n.Text)
+			}
+		}
+		if r := t.After; r != nil && r.Start != nil {
+			m.printf("  - Start with block %s: %s\n", r.Start.Block, r.Start.Reason)
+		}
+	}
 }
 
 func (m *markdown) impact(b semdiff.BlastRadius, scoped bool) {

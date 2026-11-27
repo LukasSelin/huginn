@@ -70,6 +70,14 @@
       <div class="focus small" id="focus" hidden></div>
     </section>
 
+    <section class="panel types" aria-labelledby="typesTitle" id="typesPanel" hidden>
+      <div class="titlerow">
+        <h2 class="h2" id="typesTitle">Affinity matrix of the types it touches</h2>
+        <span class="muted small">for each struct type the change touches: which fields and methods already form blocks, the candidate types, what holds the blocks together, and what the change does to them</span>
+      </div>
+      <div id="types"></div>
+    </section>
+
     <div class="pair">
       <section class="panel impact" aria-labelledby="impactTitle">
         <div class="titlerow">

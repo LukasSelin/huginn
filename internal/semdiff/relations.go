@@ -328,9 +328,9 @@ func sortRefs(rs []Reference) {
 	})
 }
 
-// treeBefore returns the tree as it was before the files changed: tree with
+// TreeBefore returns the tree as it was before the files changed: tree with
 // each file's new side replaced by its old one.
-func treeBefore(tree []*ast.File, files []FileDiff) []*ast.File {
+func TreeBefore(tree []*ast.File, files []FileDiff) []*ast.File {
 	changed := map[string]bool{}
 	for _, fd := range files {
 		if fd.New != nil {

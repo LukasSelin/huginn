@@ -83,6 +83,13 @@ type FieldRef struct {
 
 	Count int // occurrences
 	Line  int // first occurrence
+
+	// Writes counts the occurrences that may change the field: as the
+	// target of an assignment or of ++ or --, with its address taken, or
+	// passed to delete or clear, directly or through an index or a field
+	// of it (x.items[i] = v writes items). Calls of its methods count as
+	// reads; they may change it too.
+	Writes int
 }
 
 // Approximate reports that the struct type is unknown and the reference may
@@ -168,6 +175,7 @@ func funcRefs(fset *token.FileSet, imports map[string]string, d *goast.FuncDecl)
 		called:   map[goast.Expr]bool{},
 		refs:     map[refKey]*Ref{},
 		fields:   map[refKey]*FieldRef{},
+		written:  map[*goast.SelectorExpr]bool{},
 	}
 	if d.Recv != nil && len(d.Recv.List) > 0 {
 		r.recvType, _ = recvBase(d.Recv.List[0].Type)
@@ -214,6 +222,32 @@ type refCollector struct {
 	called   map[goast.Expr]bool   // callees of call expressions
 	refs     map[refKey]*Ref
 	fields   map[refKey]*FieldRef // kind is unused; recv holds the struct type
+	written  map[*goast.SelectorExpr]bool
+}
+
+// write records that e is written, which writes the field selected at its
+// root: x.f in x.f = v, x.f[i] = v, x.f.g = v or *x.f = v.
+func (r *refCollector) write(e goast.Expr) {
+	for {
+		switch x := e.(type) {
+		case *goast.ParenExpr:
+			e = x.X
+		case *goast.IndexExpr:
+			e = x.X
+		case *goast.IndexListExpr:
+			e = x.X
+		case *goast.StarExpr:
+			e = x.X
+		case *goast.SelectorExpr:
+			if _, ok := x.X.(*goast.Ident); ok {
+				r.written[x] = true
+				return
+			}
+			e = x.X
+		default:
+			return
+		}
+	}
 }
 
 // declare records the names a node declares and the identifiers that name
@@ -225,12 +259,17 @@ func (r *refCollector) declare(n goast.Node) bool {
 		r.declareFields(x.Params)
 		r.declareFields(x.Results)
 	case *goast.AssignStmt:
-		if x.Tok == token.DEFINE {
-			for _, e := range x.Lhs {
-				if id, ok := e.(*goast.Ident); ok {
-					r.declared[id.Name] = true
-				}
+		for _, e := range x.Lhs {
+			if id, ok := e.(*goast.Ident); ok && x.Tok == token.DEFINE {
+				r.declared[id.Name] = true
 			}
+			r.write(e)
+		}
+	case *goast.IncDecStmt:
+		r.write(x.X)
+	case *goast.UnaryExpr:
+		if x.Op == token.AND {
+			r.write(x.X)
 		}
 	case *goast.RangeStmt:
 		if x.Tok == token.DEFINE {
@@ -279,6 +318,9 @@ func (r *refCollector) declare(n goast.Node) bool {
 		}
 	case *goast.CallExpr:
 		r.called[callee(x.Fun)] = true
+		if id, ok := x.Fun.(*goast.Ident); ok && (id.Name == "delete" || id.Name == "clear") && len(x.Args) > 0 {
+			r.write(x.Args[0])
+		}
 	}
 	return true
 }
@@ -361,6 +403,9 @@ func (r *refCollector) addField(k refKey, n goast.Node) {
 		r.fields[k] = f
 	}
 	f.Count++
+	if sel, ok := n.(*goast.SelectorExpr); ok && r.written[sel] {
+		f.Writes++
+	}
 }
 
 // literalType resolves the spelled-out type of a struct literal to a type
