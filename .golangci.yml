@@ -7,7 +7,10 @@ version: "2"
 #                make). capslock, which huginn review runs, finds the same
 #                boundaries in the call graph: files, programs, network.
 #   correctness  low-noise checks that find bugs rather than style.
-#   complexity   gocognit, a budget on how hard a function is to follow.
+#   complexity   gocognit, a budget on how hard a function is to follow, and
+#                gocyclo, a budget on how many paths run through it. How many
+#                functions a package holds is a design question, not a lint
+#                (see .claude/hooks/limits.sh).
 #
 # Every enabled linter is listed explicitly; turn a new one on in its own
 # change so its findings are not mixed with another's.
@@ -32,6 +35,7 @@ linters:
     # checked form only adds dead branches.
     # complexity
     - gocognit
+    - gocyclo
   settings:
     depguard:
       # The packages are stacked in layers, bottom to top:
@@ -221,6 +225,13 @@ linters:
       # Past this a function does several jobs at once; split out the steps.
       min-complexity: 20
 
+    gocyclo:
+      # Past this a function has too many paths to test one by one. Each
+      # case counts, so a long switch that maps values is better as a table.
+      # Splitting it into unexported helpers in the same package costs no
+      # API.
+      min-complexity: 15
+
     gosec:
       excludes:
         - G104 # unchecked errors: errcheck covers these
@@ -259,4 +270,4 @@ linters:
       # The complexity budget is for production code; table-driven tests
       # branch by design.
       - path: _test\.go
-        linters: [gocognit]
+        linters: [gocognit, gocyclo]

@@ -334,13 +334,18 @@ func focusDetail(f review.Focus, r *semdiff.Report, name func(string) string) st
 	if f.Why != "" {
 		parts = append(parts, f.Why)
 	}
-	verb := "used by"
-	switch {
-	case f.Implementers:
-		verb = "implemented by"
-	case f.Change >= 0 && (r.Changes[f.Change].Symbol == "func" || r.Changes[f.Change].Symbol == "method"):
-		verb = "called by"
+	if reach := focusReach(f, r, name); reach != "" {
+		parts = append(parts, reach)
 	}
+	if f.Tests > 0 {
+		parts = append(parts, fmt.Sprintf("%d in tests", f.Tests))
+	}
+	return strings.Join(parts, " · ")
+}
+
+// focusReach says what reaches a focus item from outside the change:
+// "called by a, b, 2 more", or that nothing does; "" when neither applies.
+func focusReach(f review.Focus, r *semdiff.Report, name func(string) string) string {
 	switch {
 	case len(f.Reaches) > 0:
 		var names []string
@@ -351,18 +356,27 @@ func focusDetail(f review.Focus, r *semdiff.Report, name func(string) string) st
 			}
 			names = append(names, name(c.Name))
 		}
-		parts = append(parts, verb+" "+strings.Join(names, ", "))
+		return reachVerb(f, r) + " " + strings.Join(names, ", ")
 	case f.Implementers:
-		parts = append(parts, "no implementer found outside the change")
+		return "no implementer found outside the change"
 	case (f.Kind == review.FocusBehavior || f.Kind == review.FocusExternal) && f.Tests == 0:
-		parts = append(parts, "nothing calls it")
+		return "nothing calls it"
 	case f.Kind == review.FocusBehavior || f.Kind == review.FocusExternal:
-		parts = append(parts, "only tests use it")
+		return "only tests use it"
 	}
-	if f.Tests > 0 {
-		parts = append(parts, fmt.Sprintf("%d in tests", f.Tests))
+	return ""
+}
+
+// reachVerb is how a focus item's reach is introduced: implemented by,
+// called by for a function or method, or used by.
+func reachVerb(f review.Focus, r *semdiff.Report) string {
+	switch {
+	case f.Implementers:
+		return "implemented by"
+	case f.Change >= 0 && (r.Changes[f.Change].Symbol == "func" || r.Changes[f.Change].Symbol == "method"):
+		return "called by"
 	}
-	return strings.Join(parts, " · ")
+	return "used by"
 }
 
 // at locates a focus item: "path:line", the path alone, or nothing.

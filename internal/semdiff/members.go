@@ -115,10 +115,9 @@ func isFieldKind(k ast.MemberKind) bool { return k == ast.MemberField || k == as
 // breaks both. Removing a type term breaks instantiations with that type;
 // adding one can break generic code relying on the old type set.
 func breaks(mc ast.MemberChange) string {
-	m := mc.Cur()
 	f := mc.Flags
 	gone := f&(ast.MemberRemoved|ast.MemberRetyped|ast.MemberRenamed) != 0
-	switch m.Kind {
+	switch mc.Cur().Kind {
 	case ast.MemberField:
 		if gone && mc.Old.Exported {
 			return "callers"
@@ -128,28 +127,39 @@ func breaks(mc ast.MemberChange) string {
 			return "callers"
 		}
 	case ast.MemberMethod:
-		switch {
-		case f.Has(ast.MemberAdded):
-			return "implementers"
-		case gone && mc.Old.Exported && f.Has(ast.MemberRemoved):
-			return "callers"
-		case gone && mc.Old.Exported:
-			return "callers and implementers"
-		}
+		return methodBreaks(mc, gone)
 	case ast.MemberInterface:
-		switch {
-		case f.Has(ast.MemberAdded):
-			return "implementers"
-		case f.Has(ast.MemberRemoved):
-			return "callers"
-		}
+		return addedOrRemoved(f, "implementers", "callers")
 	case ast.MemberTerm:
-		switch {
-		case f.Has(ast.MemberAdded):
-			return "generic code"
-		case f.Has(ast.MemberRemoved):
-			return "callers"
-		}
+		return addedOrRemoved(f, "generic code", "callers")
+	}
+	return ""
+}
+
+// methodBreaks says whose code a change to an interface method breaks:
+// adding one breaks implementers, removing an exported one breaks callers,
+// and retyping or renaming an exported one breaks both. gone says the
+// method was removed, retyped or renamed.
+func methodBreaks(mc ast.MemberChange, gone bool) string {
+	switch {
+	case mc.Flags.Has(ast.MemberAdded):
+		return "implementers"
+	case gone && mc.Old.Exported && mc.Flags.Has(ast.MemberRemoved):
+		return "callers"
+	case gone && mc.Old.Exported:
+		return "callers and implementers"
+	}
+	return ""
+}
+
+// addedOrRemoved returns added when a member was added, removed when it was
+// removed, and "" otherwise.
+func addedOrRemoved(f ast.MemberFlags, added, removed string) string {
+	switch {
+	case f.Has(ast.MemberAdded):
+		return added
+	case f.Has(ast.MemberRemoved):
+		return removed
 	}
 	return ""
 }

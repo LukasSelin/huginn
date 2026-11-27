@@ -56,6 +56,12 @@ func (h *hasher) visit(n goast.Node) bool {
 // details emits what tells two nodes of the same type apart (a name, literal,
 // operator or token) and counts the branches that add to the complexity.
 func (h *hasher) details(n goast.Node) {
+	h.emitDetail(n)
+	h.complexity += branches(n)
+}
+
+// emitDetail emits the name, literal, operator or token of n, if it has one.
+func (h *hasher) emitDetail(n goast.Node) {
 	switch x := n.(type) {
 	case *goast.Ident:
 		h.emit(x.Name)
@@ -63,9 +69,6 @@ func (h *hasher) details(n goast.Node) {
 		h.emit(x.Value)
 	case *goast.BinaryExpr:
 		h.emit(x.Op.String())
-		if x.Op == token.LAND || x.Op == token.LOR {
-			h.complexity++
-		}
 	case *goast.UnaryExpr:
 		h.emit(x.Op.String())
 	case *goast.AssignStmt:
@@ -80,18 +83,29 @@ func (h *hasher) details(n goast.Node) {
 		h.emit(string(rune('0' + x.Dir)))
 	case *goast.RangeStmt:
 		h.emit(x.Tok.String())
-		h.complexity++
-	case *goast.IfStmt, *goast.ForStmt:
-		h.complexity++
+	}
+}
+
+// branches is what n adds to its function's cyclomatic complexity: one for
+// an if, for, range, && or ||, and for each case but default.
+func branches(n goast.Node) int {
+	switch x := n.(type) {
+	case *goast.IfStmt, *goast.ForStmt, *goast.RangeStmt:
+		return 1
+	case *goast.BinaryExpr:
+		if x.Op == token.LAND || x.Op == token.LOR {
+			return 1
+		}
 	case *goast.CaseClause:
 		if x.List != nil {
-			h.complexity++
+			return 1
 		}
 	case *goast.CommClause:
 		if x.Comm != nil {
-			h.complexity++
+			return 1
 		}
 	}
+	return 0
 }
 
 // finish stores the hash, shingles and metrics on s.

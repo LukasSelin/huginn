@@ -470,17 +470,7 @@ func summary(c ast.Change) string {
 	}
 	switch {
 	case c.Flags.Has(ast.BodyChanged) && isFunc(n):
-		var body []string
-		if d := n.Stmts - o.Stmts; d != 0 {
-			body = append(body, stmtDelta(d))
-		}
-		if o.Complexity != n.Complexity {
-			body = append(body, fmt.Sprintf("cyclomatic %d → %d", o.Complexity, n.Complexity))
-		}
-		if body == nil {
-			body = []string{"body edited, same size"}
-		}
-		parts = append(parts, body...)
+		parts = append(parts, bodyDelta(o, n)...)
 	case c.Flags.Has(ast.BodyChanged) && len(c.Members) > 0:
 		parts = append(parts, memberSummary(c.Members))
 	case c.Flags.Has(ast.BodyChanged):
@@ -489,6 +479,22 @@ func summary(c ast.Change) string {
 		parts = append(parts, "body unchanged")
 	}
 	return strings.Join(parts, " · ")
+}
+
+// bodyDelta describes how a function's body changed from o to n: "+4 stmts",
+// "cyclomatic 7 → 9", or that it kept its size.
+func bodyDelta(o, n *ast.Symbol) []string {
+	var body []string
+	if d := n.Stmts - o.Stmts; d != 0 {
+		body = append(body, stmtDelta(d))
+	}
+	if o.Complexity != n.Complexity {
+		body = append(body, fmt.Sprintf("cyclomatic %d → %d", o.Complexity, n.Complexity))
+	}
+	if body == nil {
+		return []string{"body edited, same size"}
+	}
+	return body
 }
 
 // impact describes a change's reach:

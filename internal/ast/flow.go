@@ -338,16 +338,22 @@ func (w *flowWalker) stmt(depth int, s goast.Stmt) {
 		w.stmt(depth, s.Stmt)
 
 	case *goast.ExprStmt:
-		if w.exits(s.X) {
-			text, key := w.str(s)
-			w.emit(s, depth, StepExit, text, key, "", "", "")
-			return
-		}
-		w.effects(depth, s)
+		w.exprStmt(depth, s)
 
 	default:
 		w.effects(depth, s)
 	}
+}
+
+// exprStmt adds an expression statement: a way out when it calls panic,
+// os.Exit, or log's Fatal or Panic functions, and its effects otherwise.
+func (w *flowWalker) exprStmt(depth int, s *goast.ExprStmt) {
+	if w.exits(s.X) {
+		text, key := w.str(s)
+		w.emit(s, depth, StepExit, text, key, "", "", "")
+		return
+	}
+	w.effects(depth, s)
 }
 
 // forStmt adds a for loop, written as its header, and walks its body.

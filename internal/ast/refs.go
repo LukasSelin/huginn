@@ -268,6 +268,37 @@ func (r *refCollector) declare(n goast.Node) bool {
 		r.declareFields(x.TypeParams)
 		r.declareFields(x.Params)
 		r.declareFields(x.Results)
+	case *goast.AssignStmt, *goast.IncDecStmt, *goast.UnaryExpr, *goast.SendStmt, *goast.RangeStmt:
+		r.assign(x)
+	case *goast.ValueSpec:
+		for _, id := range x.Names {
+			r.declared[id.Name] = true
+		}
+	case *goast.TypeSpec:
+		r.declared[x.Name.Name] = true
+	case *goast.StructType:
+		r.skipFieldNames(x.Fields)
+	case *goast.InterfaceType:
+		r.skipFieldNames(x.Methods)
+	case *goast.LabeledStmt:
+		r.skip[x.Label] = true
+	case *goast.BranchStmt:
+		if x.Label != nil {
+			r.skip[x.Label] = true
+		}
+	case *goast.CompositeLit:
+		r.declareLiteral(x)
+	case *goast.CallExpr:
+		r.declareCall(x)
+	}
+	return true
+}
+
+// assign records what a statement that changes a value writes (an
+// assignment, ++ or --, a send, a range clause or taking an address), and
+// the names := declares.
+func (r *refCollector) assign(n goast.Node) {
+	switch x := n.(type) {
 	case *goast.AssignStmt:
 		if x.Tok == token.DEFINE {
 			r.declareIdents(x.Lhs...)
@@ -291,28 +322,7 @@ func (r *refCollector) declare(n goast.Node) bool {
 		if x.Tok == token.DEFINE {
 			r.declareIdents(x.Key, x.Value)
 		}
-	case *goast.ValueSpec:
-		for _, id := range x.Names {
-			r.declared[id.Name] = true
-		}
-	case *goast.TypeSpec:
-		r.declared[x.Name.Name] = true
-	case *goast.StructType:
-		r.skipFieldNames(x.Fields)
-	case *goast.InterfaceType:
-		r.skipFieldNames(x.Methods)
-	case *goast.LabeledStmt:
-		r.skip[x.Label] = true
-	case *goast.BranchStmt:
-		if x.Label != nil {
-			r.skip[x.Label] = true
-		}
-	case *goast.CompositeLit:
-		r.declareLiteral(x)
-	case *goast.CallExpr:
-		r.declareCall(x)
 	}
-	return true
 }
 
 // declareCall records the callee of a call, the field that delete, clear or
