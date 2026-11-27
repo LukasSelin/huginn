@@ -78,8 +78,8 @@ const SPREAD_STEP = 1.25, SPREAD_STEPS = 7;
 const SPREAD_KEY = 'huginn.spread';
 
 // spreadControl lets the viewer spread the packages out or draw them
-// together: with the more and less buttons, with Alt and the scroll wheel
-// over stage, and through by(steps), for the page's own keys. It calls
+// together: with the more and less buttons, with Ctrl and the scroll wheel
+// over stage (the wheel alone zooms), and through by(steps), for the page's own keys. It calls
 // onChange with each new spread, and returns the one to start from as value.
 function spreadControl({ stage, more, less, onChange }) {
   const lo = SPREAD_STEP ** -SPREAD_STEPS, hi = SPREAD_STEP ** SPREAD_STEPS;
@@ -102,9 +102,18 @@ function spreadControl({ stage, more, less, onChange }) {
   const by = (steps) => set(SPREAD_STEP ** (Math.round(Math.log(value) / Math.log(SPREAD_STEP)) + steps));
   more.addEventListener('click', () => by(1));
   less.addEventListener('click', () => by(-1));
+  // A touchpad pinch also arrives as the wheel with Ctrl, and should still
+  // zoom. It comes with no Ctrl key pressed, and in small steps, where a
+  // mouse wheel's steps are large; so the wheel with Ctrl spreads when the
+  // key is held down or the step is a mouse wheel's.
+  let ctrlDown = false;
+  addEventListener('keydown', (e) => { if (e.key === 'Control') ctrlDown = true; }, true);
+  addEventListener('keyup', (e) => { if (e.key === 'Control') ctrlDown = false; }, true);
+  addEventListener('blur', () => { ctrlDown = false; });
   // Caught on the way down, before the stage zooms with the wheel.
   stage.addEventListener('wheel', (e) => {
-    if (!e.altKey) return;
+    if (!e.ctrlKey) ctrlDown = false; // let go outside the page
+    if (!e.ctrlKey || !(ctrlDown || e.deltaMode || Math.abs(e.deltaY) >= 50)) return;
     e.preventDefault();
     e.stopImmediatePropagation();
     set(value * Math.exp(-e.deltaY * (e.deltaMode === 1 ? 0.05 : e.deltaMode ? 1 : 0.0015)));
