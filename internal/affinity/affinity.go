@@ -123,47 +123,12 @@ func New(h *lineage.History, tests bool) *Analyzer {
 	}
 	keep := func(s *ast.Symbol) bool { return tests || !isTest(s.Path) }
 	a.files = h.LiveFiles(keep)
-	for sym := range h.All() {
-		if !sym.Alive() || !keep(sym.Latest()) {
-			continue
-		}
-		cur := sym.Latest()
-		a.idOf[cur] = sym.ID
-		a.all = append(a.all, cur)
-		for _, e := range sym.Events {
-			if counted(e) {
-				if i, ok := h.Position(e.SHA); ok {
-					a.revs[i] = append(a.revs[i], sym.ID)
-				}
-			}
-		}
-	}
+	a.collectLive(keep)
 	a.mods = modpath.Infer(a.all)
 	a.signatureImports()
 
 	for _, s := range a.all {
-		dir := path.Dir(s.Path)
-		switch s.Kind {
-		case ast.KindType:
-			a.types = append(a.types, s)
-			if isInterface(s) {
-				a.ifaces[s.Name] = append(a.ifaces[s.Name], s)
-			}
-			for _, m := range s.Members {
-				if m.Kind == ast.MemberField || m.Kind == ast.MemberEmbedded {
-					if a.fieldsIn[dir] == nil {
-						a.fieldsIn[dir] = map[string]bool{}
-					}
-					a.fieldsIn[dir][m.Name] = true
-				}
-			}
-		case ast.KindMethod:
-			k := recvKey{dir, s.Package, s.Recv}
-			a.methods[k] = append(a.methods[k], s)
-		case ast.KindFunc, ast.KindVar, ast.KindConst:
-			// Only their struct literals matter, below.
-		}
-		a.noteCtor(s)
+		a.collectDecl(s)
 	}
 	for _, ms := range a.methods {
 		slices.SortFunc(ms, func(x, y *ast.Symbol) int {
@@ -171,6 +136,66 @@ func New(h *lineage.History, tests bool) *Analyzer {
 		})
 	}
 	return a
+}
+
+// collectLive records the live symbols that keep accepts, in their latest
+// version, and the revisions that changed each.
+func (a *Analyzer) collectLive(keep func(*ast.Symbol) bool) {
+	for sym := range a.h.All() {
+		if !sym.Alive() || !keep(sym.Latest()) {
+			continue
+		}
+		cur := sym.Latest()
+		a.idOf[cur] = sym.ID
+		a.all = append(a.all, cur)
+		a.collectRevisions(sym)
+	}
+}
+
+// collectRevisions adds sym to each revision that changed it.
+func (a *Analyzer) collectRevisions(sym *lineage.Symbol) {
+	for _, e := range sym.Events {
+		if !counted(e) {
+			continue
+		}
+		if i, ok := a.h.Position(e.SHA); ok {
+			a.revs[i] = append(a.revs[i], sym.ID)
+		}
+	}
+}
+
+// collectDecl files a live declaration by kind, types with their fields
+// and methods by receiver, and records the fields it sets where it
+// constructs a type.
+func (a *Analyzer) collectDecl(s *ast.Symbol) {
+	dir := path.Dir(s.Path)
+	switch s.Kind {
+	case ast.KindType:
+		a.types = append(a.types, s)
+		if isInterface(s) {
+			a.ifaces[s.Name] = append(a.ifaces[s.Name], s)
+		}
+		a.collectFields(dir, s)
+	case ast.KindMethod:
+		k := recvKey{dir, s.Package, s.Recv}
+		a.methods[k] = append(a.methods[k], s)
+	case ast.KindFunc, ast.KindVar, ast.KindConst:
+		// Only their struct literals matter, below.
+	}
+	a.noteCtor(s)
+}
+
+// collectFields records the names of the fields type s declares in dir.
+func (a *Analyzer) collectFields(dir string, s *ast.Symbol) {
+	for _, m := range s.Members {
+		if m.Kind != ast.MemberField && m.Kind != ast.MemberEmbedded {
+			continue
+		}
+		if a.fieldsIn[dir] == nil {
+			a.fieldsIn[dir] = map[string]bool{}
+		}
+		a.fieldsIn[dir][m.Name] = true
+	}
 }
 
 // signatureImports adds to each file of the live tree the repository
@@ -293,25 +318,9 @@ func isInterface(s *ast.Symbol) bool { return strings.HasPrefix(typeBody(s), "in
 // receiver's type.
 func (a *Analyzer) Lookup(name string) (lineage.ID, error) {
 	name = strings.TrimSpace(name)
-	var found []*ast.Symbol
-	for _, t := range a.types {
-		if slices.Contains(a.names(t, t.Name), name) {
-			found = append(found, t)
-		}
-	}
+	found := a.typesNamed(name)
 	if len(found) == 0 {
-		for k, ms := range a.methods {
-			for _, m := range ms {
-				if !slices.Contains(a.names(m, m.QualifiedName()), name) && !slices.Contains(a.names(m, m.Recv+"."+m.Name), name) {
-					continue
-				}
-				for _, t := range a.types {
-					if t.Name == k.recv && t.Package == k.pkg && path.Dir(t.Path) == k.dir && !slices.Contains(found, t) {
-						found = append(found, t)
-					}
-				}
-			}
-		}
+		found = a.receiversNamed(name)
 	}
 	switch len(found) {
 	case 0:
@@ -325,6 +334,47 @@ func (a *Analyzer) Lookup(name string) (lineage.ID, error) {
 	}
 	slices.Sort(e.Matches)
 	return 0, e
+}
+
+// typesNamed returns the live types that answer to name.
+func (a *Analyzer) typesNamed(name string) []*ast.Symbol {
+	var found []*ast.Symbol
+	for _, t := range a.types {
+		if slices.Contains(a.names(t, t.Name), name) {
+			found = append(found, t)
+		}
+	}
+	return found
+}
+
+// receiversNamed returns the live types with a method that answers to name.
+func (a *Analyzer) receiversNamed(name string) []*ast.Symbol {
+	var found []*ast.Symbol
+	for k, ms := range a.methods {
+		for _, m := range ms {
+			if a.methodNamed(m, name) {
+				found = a.appendReceiver(found, k)
+			}
+		}
+	}
+	return found
+}
+
+// methodNamed reports whether name is a way to write method m, as
+// "(*Server).Index" or "Server.Index".
+func (a *Analyzer) methodNamed(m *ast.Symbol, name string) bool {
+	return slices.Contains(a.names(m, m.QualifiedName()), name) || slices.Contains(a.names(m, m.Recv+"."+m.Name), name)
+}
+
+// appendReceiver appends to found the live types the methods under k
+// belong to, those it does not hold yet.
+func (a *Analyzer) appendReceiver(found []*ast.Symbol, k recvKey) []*ast.Symbol {
+	for _, t := range a.types {
+		if t.Name == k.recv && t.Package == k.pkg && path.Dir(t.Path) == k.dir && !slices.Contains(found, t) {
+			found = append(found, t)
+		}
+	}
+	return found
 }
 
 // names returns the ways to write name, declared by s: bare, and qualified

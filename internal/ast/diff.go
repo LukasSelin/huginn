@@ -60,64 +60,13 @@ const minShingles = 6
 func Diff(old, new []*File) []Change {
 	oldSyms, newSyms := collect(old), collect(new)
 	matchedOld := make([]bool, len(oldSyms))
-	var changes []Change
-	var unmatchedNew []*Symbol
 
-	// Pass 1: same package and key. Prefer a candidate in the same file, so
-	// that repeated names (init) pair up with their own file's declaration.
-	byID := map[string][]int{}
-	for i, s := range oldSyms {
-		byID[symbolID(s)] = append(byID[symbolID(s)], i)
-	}
-	for _, n := range newSyms {
-		best := -1
-		for _, i := range byID[symbolID(n)] {
-			if matchedOld[i] || oldSyms[i].Kind != n.Kind {
-				continue
-			}
-			if best < 0 || oldSyms[i].Path == n.Path {
-				best = i
-			}
-		}
-		if best < 0 {
-			unmatchedNew = append(unmatchedNew, n)
-			continue
-		}
-		matchedOld[best] = true
-		if f := compare(oldSyms[best], n); f != 0 {
-			changes = append(changes, matched(f, oldSyms[best], n, 1))
-		}
-	}
+	// Pass 1: same package and key.
+	changes, unmatchedNew := matchByID(oldSyms, newSyms, matchedOld)
 
 	// Pass 2: pair leftovers of the same kind by body similarity, best first.
-	type pair struct {
-		o, n  int
-		score float64
-	}
-	var pairs []pair
-	for i, o := range oldSyms {
-		if matchedOld[i] {
-			continue
-		}
-		for j, n := range unmatchedNew {
-			if o.Kind != n.Kind {
-				continue
-			}
-			if score := matchScore(o, n); score >= RenameThreshold {
-				pairs = append(pairs, pair{i, j, score})
-			}
-		}
-	}
-	slices.SortStableFunc(pairs, func(a, b pair) int { return cmp.Compare(b.score, a.score) })
 	matchedNew := make([]bool, len(unmatchedNew))
-	for _, p := range pairs {
-		if matchedOld[p.o] || matchedNew[p.n] {
-			continue
-		}
-		matchedOld[p.o], matchedNew[p.n] = true, true
-		o, n := oldSyms[p.o], unmatchedNew[p.n]
-		changes = append(changes, matched(compare(o, n), o, n, p.score))
-	}
+	changes = matchBySimilarity(changes, oldSyms, unmatchedNew, matchedOld, matchedNew)
 
 	// Pass 3: whatever is left was added or deleted.
 	for j, n := range unmatchedNew {
@@ -142,6 +91,87 @@ func Diff(old, new []*File) []Change {
 		return cmp.Or(cmp.Compare(sa.Path, sb.Path), cmp.Compare(sa.StartLine, sb.StartLine), cmp.Compare(sa.Key, sb.Key))
 	})
 	return changes
+}
+
+// matchByID pairs each new symbol with an unmatched old symbol of the same
+// package, key and kind, and marks the old one in matchedOld. It returns the
+// changes of the pairs and the new symbols it could not pair, in order.
+func matchByID(oldSyms, newSyms []*Symbol, matchedOld []bool) (changes []Change, unmatchedNew []*Symbol) {
+	byID := map[string][]int{}
+	for i, s := range oldSyms {
+		byID[symbolID(s)] = append(byID[symbolID(s)], i)
+	}
+	for _, n := range newSyms {
+		best := pickByID(oldSyms, byID[symbolID(n)], matchedOld, n)
+		if best < 0 {
+			unmatchedNew = append(unmatchedNew, n)
+			continue
+		}
+		matchedOld[best] = true
+		if f := compare(oldSyms[best], n); f != 0 {
+			changes = append(changes, matched(f, oldSyms[best], n, 1))
+		}
+	}
+	return changes, unmatchedNew
+}
+
+// pickByID chooses which of the old symbols at candidates n pairs with, or
+// returns -1. It prefers a candidate in the same file, so that repeated names
+// (init) pair up with their own file's declaration.
+func pickByID(oldSyms []*Symbol, candidates []int, matchedOld []bool, n *Symbol) int {
+	best := -1
+	for _, i := range candidates {
+		if matchedOld[i] || oldSyms[i].Kind != n.Kind {
+			continue
+		}
+		if best < 0 || oldSyms[i].Path == n.Path {
+			best = i
+		}
+	}
+	return best
+}
+
+// symbolPair is a candidate fuzzy match: indexes into the old symbols and the
+// unmatched new ones, with their match score.
+type symbolPair struct {
+	o, n  int
+	score float64
+}
+
+// matchBySimilarity pairs the symbols left unmatched on both sides by body
+// similarity, best first, marking them in matchedOld and matchedNew. It
+// appends the changes of the pairs to changes.
+func matchBySimilarity(changes []Change, oldSyms, unmatchedNew []*Symbol, matchedOld, matchedNew []bool) []Change {
+	for _, p := range similarPairs(oldSyms, unmatchedNew, matchedOld) {
+		if matchedOld[p.o] || matchedNew[p.n] {
+			continue
+		}
+		matchedOld[p.o], matchedNew[p.n] = true, true
+		o, n := oldSyms[p.o], unmatchedNew[p.n]
+		changes = append(changes, matched(compare(o, n), o, n, p.score))
+	}
+	return changes
+}
+
+// similarPairs lists the unmatched old and new symbols of the same kind that
+// score at least RenameThreshold, best score first.
+func similarPairs(oldSyms, unmatchedNew []*Symbol, matchedOld []bool) []symbolPair {
+	var pairs []symbolPair
+	for i, o := range oldSyms {
+		if matchedOld[i] {
+			continue
+		}
+		for j, n := range unmatchedNew {
+			if o.Kind != n.Kind {
+				continue
+			}
+			if score := matchScore(o, n); score >= RenameThreshold {
+				pairs = append(pairs, symbolPair{i, j, score})
+			}
+		}
+	}
+	slices.SortStableFunc(pairs, func(a, b symbolPair) int { return cmp.Compare(b.score, a.score) })
+	return pairs
 }
 
 // matched builds the change of a symbol found on both sides.

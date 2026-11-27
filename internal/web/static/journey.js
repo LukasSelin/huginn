@@ -1349,7 +1349,7 @@
   function zoom(f) {
     if (state.mode === 'arch') {
       if (f) stack.zoomBy(f);
-      else stack.resetZoom();
+      else stack.fit();
     } else if (f) zoomBy(f);
     else zoomTo(d3.zoomIdentity);
   }

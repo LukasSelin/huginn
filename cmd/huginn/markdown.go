@@ -74,13 +74,13 @@ func (m *markdown) types(ts []review.TypeReview) {
 	}
 }
 
-// focus lists what to look at first, exported API it breaks first.
+// focus lists what to look at first, what reaches outside the process
+// first.
 func (m *markdown) focus(rv *review.Review) {
 	m.printf("\n#### Look here first\n\n")
-	shown, more := shownFocus(rv.Focus)
+	shown, moreOutside, moreEdits := shownFocus(rv.Focus)
 	if len(shown) == 0 {
 		m.printf("Nothing beyond new code: no existing code is edited and no import between packages starts.\n")
-		return
 	}
 	for _, f := range shown {
 		name := code(f.Name)
@@ -92,10 +92,21 @@ func (m *markdown) focus(rv *review.Review) {
 		if loc := at(f); loc != "" {
 			where = " at " + code(loc)
 		}
-		m.printf("- **%s** %s%s: %s\n", focusLabel(f.Kind), name, where, focusDetail(f, rv.Report, func(s string) string { return code(s) }))
+		codeName := func(s string) string { return code(s) }
+		m.printf("- **%s** %s%s: %s\n", focusLabel(f.Kind), name, where, focusDetail(f, rv.Report, codeName))
+		for _, c := range f.Capabilities {
+			text, loc := capabilityText(f, c, codeName)
+			if loc != "" {
+				text += " at " + code(loc)
+			}
+			m.printf("  - %s\n", text)
+		}
 	}
-	if more > 0 {
-		m.printf("- … and %s of existing code under Changes\n", plural(more, "more edit"))
+	if more := focusMore(moreOutside, moreEdits); more != "" {
+		m.printf("- … and %s under Changes\n", more)
+	}
+	if tracedNothing(rv) {
+		m.printf("\n%s.\n", strings.ToUpper(noneOutside[:1])+noneOutside[1:])
 	}
 }
 
@@ -133,22 +144,27 @@ func (m *markdown) impact(b semdiff.BlastRadius, scoped bool) {
 			m.printf("| … and %d more | | |\n", len(b.Callers)-limit)
 			break
 		}
-		var notes []string
-		if cl.Approximate {
-			notes = append(notes, "approx.")
-		}
-		if cl.Test {
-			notes = append(notes, "test")
-		}
-		if cl.Outside {
-			notes = append(notes, "**outside**")
-		}
-		note := ""
-		if len(notes) > 0 {
-			note = " " + strings.Join(notes, ", ")
-		}
-		m.printf("| %s | %s | ×%d%s |\n", code(cl.Name), code(fmt.Sprintf("%s:%d", cl.Path, cl.Line)), cl.Calls, note)
+		m.printf("| %s | %s | ×%d%s |\n", code(cl.Name), code(fmt.Sprintf("%s:%d", cl.Path, cl.Line)), cl.Calls, callerNote(cl))
 	}
+}
+
+// callerNote is what the Uses column adds after a caller's count: whether
+// the caller is approximate, a test or outside the scope.
+func callerNote(cl semdiff.Caller) string {
+	var notes []string
+	if cl.Approximate {
+		notes = append(notes, "approx.")
+	}
+	if cl.Test {
+		notes = append(notes, "test")
+	}
+	if cl.Outside {
+		notes = append(notes, "**outside**")
+	}
+	if len(notes) == 0 {
+		return ""
+	}
+	return " " + strings.Join(notes, ", ")
 }
 
 func (m *markdown) relations(rel semdiff.Relations) {
@@ -218,39 +234,50 @@ func (m *markdown) changes(r *semdiff.Report) {
 	if len(r.Changes) > 0 {
 		m.printf("\n<details><summary>Changes (%s)</summary>\n\n", plural(r.Symbols, "symbol"))
 		for _, ch := range r.Changes {
-			impact := ch.Impact
-			if ch.APIChange {
-				impact += " · **API change**"
-			}
-			m.printf("- **%s** %s %s at %s", kinds(ch.Kinds), ch.Symbol, code(ch.Name), code(fmt.Sprintf("%s:%d", ch.Path, ch.Line)))
-			if ch.OldName != "" {
-				m.printf(", was %s", code(ch.OldName))
-			}
-			if ch.Summary != "" {
-				m.printf(" · %s", ch.Summary)
-			}
-			m.printf("  \n  %s\n", impact)
-			if ch.OldSignature != "" && ch.NewSignature != "" && ch.OldSignature != ch.NewSignature {
-				m.printf("  ```diff\n  - %s\n  + %s\n  ```\n", ch.OldSignature, ch.NewSignature)
-			}
+			m.change(ch)
 		}
 		m.printf("\n</details>\n")
 	}
 	if len(r.Files) > 0 {
 		m.printf("\n<details><summary>Files (%d)</summary>\n\n| File | Lines | Changes |\n| --- | --- | --- |\n", len(r.Files))
 		for _, f := range r.Files {
-			name := code(f.Path)
-			if f.OldPath != "" {
-				name = code(f.OldPath) + " → " + name
-			}
-			what := ""
-			if f.Changes > 0 {
-				what = plural(f.Changes, "symbol") + ": " + kinds(f.Kinds)
-			}
-			m.printf("| %s | +%d −%d | %s |\n", name, f.Added, f.Removed, what)
+			m.file(f)
 		}
 		m.printf("\n</details>\n")
 	}
+}
+
+// change writes one changed symbol as a list item, with its impact and,
+// if its signature changed, both signatures as a diff.
+func (m *markdown) change(ch semdiff.Change) {
+	impact := ch.Impact
+	if ch.APIChange {
+		impact += " · **API change**"
+	}
+	m.printf("- **%s** %s %s at %s", kinds(ch.Kinds), ch.Symbol, code(ch.Name), code(fmt.Sprintf("%s:%d", ch.Path, ch.Line)))
+	if ch.OldName != "" {
+		m.printf(", was %s", code(ch.OldName))
+	}
+	if ch.Summary != "" {
+		m.printf(" · %s", ch.Summary)
+	}
+	m.printf("  \n  %s\n", impact)
+	if ch.OldSignature != "" && ch.NewSignature != "" && ch.OldSignature != ch.NewSignature {
+		m.printf("  ```diff\n  - %s\n  + %s\n  ```\n", ch.OldSignature, ch.NewSignature)
+	}
+}
+
+// file writes one file as a table row: its path, lines and kinds of change.
+func (m *markdown) file(f semdiff.FileSummary) {
+	name := code(f.Path)
+	if f.OldPath != "" {
+		name = code(f.OldPath) + " → " + name
+	}
+	what := ""
+	if f.Changes > 0 {
+		what = plural(f.Changes, "symbol") + ": " + kinds(f.Kinds)
+	}
+	m.printf("| %s | +%d −%d | %s |\n", name, f.Added, f.Removed, what)
 }
 
 // code formats each of ss as inline code, separated by commas.

@@ -134,29 +134,38 @@ func newRevision(tree []*ast.File, pkgOf func(path, pkg string) string) *revisio
 			continue
 		}
 		files = append(files, f)
-		rv.files[f.Path] = f
-		pkg := pkgOf(f.Path, f.Package)
-		rv.dirs[pkg] = path.Dir(f.Path)
-		for _, s := range f.Symbols {
-			id := symID(pkg, s.Key)
-			rv.decls[id] = decl{s, pkg}
-			if s.Kind == ast.KindMethod {
-				rv.methods[s.Name] = append(rv.methods[s.Name], id)
-			}
-		}
+		rv.addDecls(f, pkgOf(f.Path, f.Package))
 	}
 	for _, f := range files {
-		from := pkgOf(f.Path, f.Package)
-		for _, im := range f.Imports {
-			if _, ok := rv.dirs[im.Path]; ok && im.Path != from {
-				k := [2]string{from, im.Path}
-				if fs := rv.deps[k]; len(fs) == 0 || fs[len(fs)-1] != f.Path {
-					rv.deps[k] = append(fs, f.Path)
-				}
+		rv.addDeps(f, pkgOf(f.Path, f.Package))
+	}
+	return rv
+}
+
+// addDecls indexes f, a file of package pkg, and its declarations.
+func (rv *revision) addDecls(f *ast.File, pkg string) {
+	rv.files[f.Path] = f
+	rv.dirs[pkg] = path.Dir(f.Path)
+	for _, s := range f.Symbols {
+		id := symID(pkg, s.Key)
+		rv.decls[id] = decl{s, pkg}
+		if s.Kind == ast.KindMethod {
+			rv.methods[s.Name] = append(rv.methods[s.Name], id)
+		}
+	}
+}
+
+// addDeps records the imports of f, a file of package from, of other
+// packages of the revision.
+func (rv *revision) addDeps(f *ast.File, from string) {
+	for _, im := range f.Imports {
+		if _, ok := rv.dirs[im.Path]; ok && im.Path != from {
+			k := [2]string{from, im.Path}
+			if fs := rv.deps[k]; len(fs) == 0 || fs[len(fs)-1] != f.Path {
+				rv.deps[k] = append(fs, f.Path)
 			}
 		}
 	}
-	return rv
 }
 
 // targets returns what s, declared in package pkg, refers to in other
@@ -167,50 +176,68 @@ func newRevision(tree []*ast.File, pkgOf func(path, pkg string) string) *revisio
 // way round.
 func (rv *revision) targets(s *ast.Symbol, pkg string) map[string]target {
 	out := map[string]target{}
-	add := func(id string, ref ast.Ref, approx bool) {
-		d, ok := rv.decls[id]
-		if !ok || d.pkg == pkg {
-			return
-		}
-		t, seen := out[id]
-		if !seen {
-			t = target{decl: d, line: ref.Line, approx: true}
-		}
-		t.uses += ref.Count
-		t.line = min(t.line, ref.Line)
-		t.approx = t.approx && approx
-		out[id] = t
-	}
 	var imports map[string]bool
 	for _, ref := range s.Refs {
 		switch ref.Kind {
 		case ast.RefLocal:
 			continue // its own package: not a target in another
 		case ast.RefImport:
-			add(symID(ref.Pkg, ref.Name), ref, false)
+			rv.addTarget(out, pkg, symID(ref.Pkg, ref.Name), ref, false)
 		case ast.RefMethod:
 			if _, own := rv.decls[symID(pkg, ref.Recv+"."+ref.Name)]; ref.Recv != "" && own {
 				continue // the receiver's own method, in this package
 			}
 			if imports == nil {
-				imports = map[string]bool{}
-				if f := rv.files[s.Path]; f != nil {
-					for _, im := range f.Imports {
-						imports[im.Path] = true
-					}
-				}
+				imports = rv.importsOf(s.Path)
 			}
-			if !goast.IsExported(ref.Name) {
-				continue // only callable in its own package
-			}
-			for _, id := range rv.methods[ref.Name] {
-				if imports[rv.decls[id].pkg] {
-					add(id, ref, true)
-				}
-			}
+			rv.addMethodTargets(out, pkg, ref, imports)
 		}
 	}
 	return out
+}
+
+// importsOf returns the import paths of the file at filePath, none when the
+// revision has no such file.
+func (rv *revision) importsOf(filePath string) map[string]bool {
+	imports := map[string]bool{}
+	if f := rv.files[filePath]; f != nil {
+		for _, im := range f.Imports {
+			imports[im.Path] = true
+		}
+	}
+	return imports
+}
+
+// addMethodTargets adds to out the methods ref may call when its receiver
+// type is unknown: the methods so named in the packages in imports.
+func (rv *revision) addMethodTargets(out map[string]target, pkg string, ref ast.Ref, imports map[string]bool) {
+	if !goast.IsExported(ref.Name) {
+		return // only callable in its own package
+	}
+	for _, id := range rv.methods[ref.Name] {
+		if imports[rv.decls[id].pkg] {
+			rv.addTarget(out, pkg, id, ref, true)
+		}
+	}
+}
+
+// addTarget adds ref, a reference to the declaration id, to out, unless the
+// declaration is not in the revision or is in pkg, the package of the
+// declaration making the reference. A target is approximate only when every
+// reference to it is.
+func (rv *revision) addTarget(out map[string]target, pkg, id string, ref ast.Ref, approx bool) {
+	d, ok := rv.decls[id]
+	if !ok || d.pkg == pkg {
+		return
+	}
+	t, seen := out[id]
+	if !seen {
+		t = target{decl: d, line: ref.Line, approx: true}
+	}
+	t.uses += ref.Count
+	t.line = min(t.line, ref.Line)
+	t.approx = t.approx && approx
+	out[id] = t
 }
 
 // relations works out what the changes start and stop between before and
@@ -219,26 +246,42 @@ func (rv *revision) targets(s *ast.Symbol, pkg string) map[string]target {
 // end are left out.
 func relations(changes []ast.Change, before, after []*ast.File, pkgOf func(path, pkg string) string, inScope func(string) bool) Relations {
 	old, cur := newRevision(before, pkgOf), newRevision(after, pkgOf)
-	var r Relations
+	r := Relations{
+		NewPackages:  packagesOnlyIn(cur, old, inScope),
+		GonePackages: packagesOnlyIn(old, cur, inScope),
+		AddedDeps:    depsOnlyIn(cur, old, inScope),
+		RemovedDeps:  depsOnlyIn(old, cur, inScope),
+	}
 
-	for pkg, dir := range cur.dirs {
-		if _, ok := old.dirs[pkg]; !ok && inScope(dir) {
-			r.NewPackages = append(r.NewPackages, pkg)
+	renamed := renames(changes, pkgOf)
+	for _, c := range changes {
+		was := renamedTargets(old.sideTargets(c.Old, pkgOf), renamed)
+		now := cur.sideTargets(c.New, pkgOf)
+		r.AddedRefs = appendRefsOnlyIn(r.AddedRefs, now, was, c.New, pkgOf, inScope)
+		r.RemovedRefs = appendRefsOnlyIn(r.RemovedRefs, was, now, c.Old, pkgOf, inScope)
+	}
+	sortRefs(r.AddedRefs)
+	sortRefs(r.RemovedRefs)
+	return r
+}
+
+// packagesOnlyIn returns the import paths of the packages in scope that a
+// has and b has not, sorted.
+func packagesOnlyIn(a, b *revision, inScope func(string) bool) []string {
+	var out []string
+	for pkg, dir := range a.dirs {
+		if _, ok := b.dirs[pkg]; !ok && inScope(dir) {
+			out = append(out, pkg)
 		}
 	}
-	for pkg, dir := range old.dirs {
-		if _, ok := cur.dirs[pkg]; !ok && inScope(dir) {
-			r.GonePackages = append(r.GonePackages, pkg)
-		}
-	}
-	slices.Sort(r.NewPackages)
-	slices.Sort(r.GonePackages)
+	slices.Sort(out)
+	return out
+}
 
-	r.AddedDeps = depsOnlyIn(cur, old, inScope)
-	r.RemovedDeps = depsOnlyIn(old, cur, inScope)
-
-	// The new identity of every symbol the changes rename or move, so that
-	// a reference that follows it is not reported as stopped and started.
+// renames returns the new identity of every symbol the changes rename or
+// move, by symID, so that a reference that follows it is not reported as
+// stopped and started.
+func renames(changes []ast.Change, pkgOf func(path, pkg string) string) map[string]string {
 	renamed := map[string]string{}
 	for _, c := range changes {
 		if c.Old != nil && c.New != nil {
@@ -248,31 +291,40 @@ func relations(changes []ast.Change, before, after []*ast.File, pkgOf func(path,
 			}
 		}
 	}
-	for _, c := range changes {
-		var was, now map[string]target
-		if s := c.Old; s != nil && !strings.HasSuffix(s.Path, "_test.go") {
-			was = map[string]target{}
-			for id, t := range old.targets(s, pkgOf(s.Path, s.Package)) {
-				was[cmp.Or(renamed[id], id)] = t
-			}
-		}
-		if s := c.New; s != nil && !strings.HasSuffix(s.Path, "_test.go") {
-			now = cur.targets(s, pkgOf(s.Path, s.Package))
-		}
-		for id, t := range now {
-			if _, ok := was[id]; !ok {
-				r.AddedRefs = appendRef(r.AddedRefs, c.New, pkgOf(c.New.Path, c.New.Package), t, inScope)
-			}
-		}
-		for id, t := range was {
-			if _, ok := now[id]; !ok {
-				r.RemovedRefs = appendRef(r.RemovedRefs, c.Old, pkgOf(c.Old.Path, c.Old.Package), t, inScope)
-			}
+	return renamed
+}
+
+// sideTargets returns the targets of s, one side of a change, or nil when s
+// is absent or declared in a test file.
+func (rv *revision) sideTargets(s *ast.Symbol, pkgOf func(path, pkg string) string) map[string]target {
+	if s == nil || strings.HasSuffix(s.Path, "_test.go") {
+		return nil
+	}
+	return rv.targets(s, pkgOf(s.Path, s.Package))
+}
+
+// renamedTargets returns ts with each renamed symID replaced by its new
+// identity, or nil when ts is.
+func renamedTargets(ts map[string]target, renamed map[string]string) map[string]target {
+	if ts == nil {
+		return nil
+	}
+	out := map[string]target{}
+	for id, t := range ts {
+		out[cmp.Or(renamed[id], id)] = t
+	}
+	return out
+}
+
+// appendRefsOnlyIn appends the references from s to the targets that a has
+// and b has not.
+func appendRefsOnlyIn(refs []Reference, a, b map[string]target, s *ast.Symbol, pkgOf func(path, pkg string) string, inScope func(string) bool) []Reference {
+	for id, t := range a {
+		if _, ok := b[id]; !ok {
+			refs = appendRef(refs, s, pkgOf(s.Path, s.Package), t, inScope)
 		}
 	}
-	sortRefs(r.AddedRefs)
-	sortRefs(r.RemovedRefs)
-	return r
+	return refs
 }
 
 // depsOnlyIn returns the imports between packages that a has and b has not.

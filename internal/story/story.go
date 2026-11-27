@@ -334,24 +334,46 @@ func editsOf(f journey.Frame) map[int]int {
 // best starts win: at least minChapters chapters when the history allows,
 // and more only for strong shifts.
 func segment(us []unit, bonus []float64) []int {
+	active := activeUnits(us)
+	if len(active) <= minChapters {
+		return active
+	}
+	w := min(max(len(active)/8, 2), 12)
+	// Keep the local maxima first, then the rest, each best first.
+	peaks, rest := splitPeaks(candidates(us, active, bonus, w), w)
+	p := newPicker(us)
+	p.pick(peaks, func(w float64) bool { return len(p.cuts) < minChapters || w >= strong })
+	// Too few shifts stand out: split where the scores are best anyway.
+	p.pick(rest, func(float64) bool { return len(p.cuts) < minChapters })
+	p.fill(active)
+	return p.cuts
+}
+
+// activeUnits returns the indexes of the units with commits, the only ones
+// that can start a chapter.
+func activeUnits(us []unit) []int {
 	var active []int
 	for i, u := range us {
 		if u.to > u.from {
 			active = append(active, i)
 		}
 	}
-	if len(active) <= minChapters {
-		return active
-	}
+	return active
+}
+
+// cand is a unit scored as a possible chapter start.
+type cand struct {
+	i     int
+	score float64
+}
+
+// candidates scores the active units as possible starts, from the w units
+// just before and just after each. Units too close to either end of the
+// history to have neighbors on both sides are left out.
+func candidates(us []unit, active []int, bonus []float64, w int) []cand {
 	n := len(us)
-	w := min(max(len(active)/8, 2), 12)
 	edge := max(1, w/2)
 	pause := pauseScores(us)
-
-	type cand struct {
-		i     int
-		score float64
-	}
 	var cs []cand
 	for _, i := range active {
 		if i < edge || n-i < edge {
@@ -361,73 +383,106 @@ func segment(us []unit, bonus []float64) []int {
 		s := shift(before, after) + min(1, 0.5*float64(us[i].births)) + 0.5*rateChange(before, after) + pause[i] + bonus[i]
 		cs = append(cs, cand{i, s})
 	}
-	// Keep the local maxima first, then the rest, each best first.
-	var peaks, rest []cand
+	return cs
+}
+
+// splitPeaks splits the candidates into the local maxima and the rest,
+// each kept in order.
+func splitPeaks(cs []cand, w int) (peaks, rest []cand) {
 	for k, c := range cs {
-		peak := true
-		for _, o := range cs {
-			d := o.i - c.i
-			if d != 0 && d > -w && d < w && (o.score > c.score || o.score == c.score && d < 0) {
-				peak = false
-				break
-			}
-		}
-		if peak {
+		if isPeak(c, cs, w) {
 			peaks = append(peaks, cs[k])
 		} else {
 			rest = append(rest, cs[k])
 		}
 	}
-	// Pick starts greedily, best first, weighing each by the chapter it
-	// splits: a start that leaves a sliver of a chapter on either side
-	// counts for less, and one inside a long chapter counts for more, by
-	// the square root of its length against an even share of the commits,
-	// so that one quiet stretch does not swallow years.
-	total := us[n-1].to - us[0].from
-	sliver := float64(total) / (4 * maxChapters)
-	even := float64(total) / maxChapters
-	cuts := []int{0}
-	worth := func(c cand) float64 {
-		k, _ := slices.BinarySearch(cuts, c.i)
-		lo, hi := us[cuts[k-1]].from, us[n-1].to
-		if k < len(cuts) {
-			hi = us[cuts[k]].from
-		}
-		at := us[c.i].from
-		small := float64(min(at-lo, hi-at))
-		return c.score * min(1, small/sliver) * math.Sqrt(float64(hi-lo)/even)
-	}
-	pick := func(pool []cand, enough func(w float64) bool) {
-		for len(cuts) < maxChapters {
-			best, bw := -1, 0.0
-			for k, c := range pool {
-				if slices.Contains(cuts, c.i) {
-					continue
-				}
-				if w := worth(c); best < 0 || w > bw {
-					best, bw = k, w
-				}
-			}
-			if best < 0 || !enough(bw) {
-				return
-			}
-			cuts = append(cuts, pool[best].i)
-			slices.Sort(cuts)
+	return peaks, rest
+}
+
+// isPeak says whether no other candidate closer than w units beats c. Of
+// equal scores the earlier wins, so a plateau has one peak.
+func isPeak(c cand, cs []cand, w int) bool {
+	for _, o := range cs {
+		d := o.i - c.i
+		if d != 0 && d > -w && d < w && (o.score > c.score || o.score == c.score && d < 0) {
+			return false
 		}
 	}
-	pick(peaks, func(w float64) bool { return len(cuts) < minChapters || w >= strong })
-	// Too few shifts stand out: split where the scores are best anyway.
-	pick(rest, func(float64) bool { return len(cuts) < minChapters })
+	return true
+}
+
+// picker picks chapter starts greedily, best first, and keeps them sorted.
+// The first chapter always starts at unit 0.
+type picker struct {
+	us     []unit
+	cuts   []int
+	sliver float64 // in commits; a chapter left shorter than this is a sliver
+	even   float64 // an even share of the commits
+}
+
+// newPicker starts a picker on us, with unit 0 as the only start so far.
+func newPicker(us []unit) *picker {
+	total := us[len(us)-1].to - us[0].from
+	return &picker{us: us, cuts: []int{0}, sliver: float64(total) / (4 * maxChapters), even: float64(total) / maxChapters}
+}
+
+// worth weighs a candidate by the chapter it splits: a start that leaves a
+// sliver of a chapter on either side counts for less, and one inside a
+// long chapter counts for more, by the square root of its length against
+// an even share of the commits, so that one quiet stretch does not swallow
+// years.
+func (p *picker) worth(c cand) float64 {
+	us, n := p.us, len(p.us)
+	k, _ := slices.BinarySearch(p.cuts, c.i)
+	lo, hi := us[p.cuts[k-1]].from, us[n-1].to
+	if k < len(p.cuts) {
+		hi = us[p.cuts[k]].from
+	}
+	at := us[c.i].from
+	small := float64(min(at-lo, hi-at))
+	return c.score * min(1, small/p.sliver) * math.Sqrt(float64(hi-lo)/p.even)
+}
+
+// pick adds the worthiest candidate of pool as a start, again and again,
+// while there is room for another chapter and enough says it is worth it.
+func (p *picker) pick(pool []cand, enough func(w float64) bool) {
+	for len(p.cuts) < maxChapters {
+		best, bw := p.best(pool)
+		if best < 0 || !enough(bw) {
+			return
+		}
+		p.cuts = append(p.cuts, pool[best].i)
+		slices.Sort(p.cuts)
+	}
+}
+
+// best returns the index in pool of the worthiest candidate that is not a
+// start yet, the first among equals, and its worth; -1 if there is none.
+func (p *picker) best(pool []cand) (int, float64) {
+	best, bw := -1, 0.0
+	for k, c := range pool {
+		if slices.Contains(p.cuts, c.i) {
+			continue
+		}
+		if w := p.worth(c); best < 0 || w > bw {
+			best, bw = k, w
+		}
+	}
+	return best, bw
+}
+
+// fill makes up minChapters starts, when the candidates did not, from the
+// earliest active units that are not starts yet.
+func (p *picker) fill(active []int) {
 	for _, i := range active {
-		if len(cuts) >= minChapters {
+		if len(p.cuts) >= minChapters {
 			break
 		}
-		if !slices.Contains(cuts, i) {
-			cuts = append(cuts, i)
+		if !slices.Contains(p.cuts, i) {
+			p.cuts = append(p.cuts, i)
 		}
 	}
-	slices.Sort(cuts)
-	return cuts
+	slices.Sort(p.cuts)
 }
 
 // strong is the score a shift needs to open a chapter beyond minChapters.
@@ -592,45 +647,64 @@ func facts(j *journey.Journey, pkgs []string, l life, from, to int) Facts {
 // commit times make, and counts the exported signature changes per
 // revision.
 func moments(h *lineage.History, j *journey.Journey, pkgs []string, l life) ([]Moment, []int) {
-	sigs := make([]int, len(j.Frames))
-	var out []Moment
-	at := func(rev int) (time.Time, string) { return j.Frames[rev].Start, j.Frames[rev].SHA }
+	out := lifeMoments(j, pkgs, l)
+	groups, sigs := groupEdits(h, len(j.Frames), pkgs)
+	out = append(out, groups.moments(j)...)
+	out = append(out, pauses(j)...)
+	out = append(out, busiest(j)...)
+	slices.SortStableFunc(out, byRev)
+	return out, sigs
+}
 
-	for rev := range j.Frames {
-		t, sha := at(rev)
+// lifeMoments finds where packages were born, with the symbols they were
+// born with, and where they died, with the most they ever held.
+func lifeMoments(j *journey.Journey, pkgs []string, l life) []Moment {
+	var out []Moment
+	for rev, f := range j.Frames {
 		for _, p := range l.born[rev] {
-			n := 0
-			for _, s := range j.Frames[rev].Packages {
-				if s.Package == p {
-					n = s.Live
-				}
-			}
-			out = append(out, Moment{Kind: Birth, Time: t, Rev: rev, SHA: sha, Package: pkgs[p], Count: n,
+			n := liveIn(f, p)
+			out = append(out, Moment{Kind: Birth, Time: f.Start, Rev: rev, SHA: f.SHA, Package: pkgs[p], Count: n,
 				Text: pkgName(pkgs[p]) + " appears with " + plural(n, "symbol"), Weight: 3 + math.Log1p(float64(n))})
 		}
 		for _, p := range l.died[rev] {
 			peak := j.Packages[p].Peak
-			out = append(out, Moment{Kind: Death, Time: t, Rev: rev, SHA: sha, Package: pkgs[p], Count: peak,
+			out = append(out, Moment{Kind: Death, Time: f.Start, Rev: rev, SHA: f.SHA, Package: pkgs[p], Count: peak,
 				Text: pkgName(pkgs[p]) + " is gone; it once held " + plural(peak, "symbol"), Weight: 3 + math.Log1p(float64(peak))})
 		}
 	}
+	return out
+}
 
-	// Renames, moves and exported signature changes, per commit.
-	type group struct {
-		rev   int
-		names []string
-		dirs  map[[2]string]int
-	}
-	groups := map[MomentKind]map[int]*group{Rename: {}, Move: {}, Signature: {}}
-	add := func(k MomentKind, rev int, e *lineage.Event, name string) {
-		g := groups[k][rev]
-		if g == nil {
-			g = &group{rev: rev, dirs: map[[2]string]int{}}
-			groups[k][rev] = g
+// liveIn returns how many symbols package p holds at the end of frame f.
+func liveIn(f journey.Frame, p int) int {
+	n := 0
+	for _, s := range f.Packages {
+		if s.Package == p {
+			n = s.Live
 		}
-		g.names = append(g.names, name)
-		g.dirs[[2]string{path.Dir(e.Old.Path), path.Dir(e.New.Path)}]++
 	}
+	return n
+}
+
+// editGroup is what one commit did of one kind: the symbols it renamed,
+// moved or changed the exported signature of, and how many of them went
+// from and to each pair of directories.
+type editGroup struct {
+	rev   int
+	names []string
+	dirs  map[[2]string]int
+}
+
+// editGroups are the renames, moves and exported signature changes, per
+// kind and commit.
+type editGroups map[MomentKind]map[int]*editGroup
+
+// groupEdits groups the renames, moves and exported signature changes of
+// the symbols in pkgs by commit, and counts the exported signature changes
+// in each of the revs revisions.
+func groupEdits(h *lineage.History, revs int, pkgs []string) (editGroups, []int) {
+	sigs := make([]int, revs)
+	groups := editGroups{Rename: {}, Move: {}, Signature: {}}
 	known := map[string]bool{}
 	for _, p := range pkgs {
 		known[p] = true
@@ -641,65 +715,96 @@ func moments(h *lineage.History, j *journey.Journey, pkgs []string, l life) ([]M
 			if e.Old == nil || e.New == nil || !known[path.Dir(e.New.Path)] {
 				continue // added, deleted, or filtered out (tests)
 			}
-			rev, ok := h.Position(e.SHA)
-			if !ok {
-				continue
-			}
-			if e.Flags.Has(ast.Renamed) {
-				add(Rename, rev, e, e.Old.QualifiedName()+" → "+e.New.QualifiedName())
-			}
-			if e.Flags.Has(ast.Moved) {
-				add(Move, rev, e, e.New.QualifiedName())
-			}
-			if e.Flags.Has(ast.SignatureChanged) && (e.Old.Exported || e.New.Exported) {
-				add(Signature, rev, e, e.New.QualifiedName())
+			if rev, ok := h.Position(e.SHA); ok && groups.addEvent(rev, e) {
 				sigs[rev]++
 			}
 		}
 	}
+	return groups, sigs
+}
+
+// addEvent adds an event of revision rev to the group of each kind of
+// edit it made, and reports whether it changed an exported signature.
+func (gs editGroups) addEvent(rev int, e *lineage.Event) bool {
+	if e.Flags.Has(ast.Renamed) {
+		gs.add(Rename, rev, e, e.Old.QualifiedName()+" → "+e.New.QualifiedName())
+	}
+	if e.Flags.Has(ast.Moved) {
+		gs.add(Move, rev, e, e.New.QualifiedName())
+	}
+	if e.Flags.Has(ast.SignatureChanged) && (e.Old.Exported || e.New.Exported) {
+		gs.add(Signature, rev, e, e.New.QualifiedName())
+		return true
+	}
+	return false
+}
+
+// add adds the symbol of event e, as name, to the group of kind k in
+// revision rev.
+func (gs editGroups) add(k MomentKind, rev int, e *lineage.Event, name string) {
+	g := gs[k][rev]
+	if g == nil {
+		g = &editGroup{rev: rev, dirs: map[[2]string]int{}}
+		gs[k][rev] = g
+	}
+	g.names = append(g.names, name)
+	g.dirs[[2]string{path.Dir(e.Old.Path), path.Dir(e.New.Path)}]++
+}
+
+// moments tells of every group as a moment, a kind at a time.
+func (gs editGroups) moments(j *journey.Journey) []Moment {
+	var out []Moment
 	for _, k := range []MomentKind{Rename, Move, Signature} {
-		for _, g := range groups[k] {
-			slices.Sort(g.names)
-			t, sha := at(g.rev)
-			n := len(g.names)
-			// The pair of directories most of the group is in.
-			var top [2]string
-			for d, c := range g.dirs {
-				if c > g.dirs[top] || c == g.dirs[top] && (d[0] < top[0] || d[0] == top[0] && d[1] < top[1]) {
-					top = d
-				}
-			}
-			m := Moment{Kind: k, Time: t, Rev: g.rev, SHA: sha, Package: top[1], Count: n, Weight: 1 + math.Log1p(float64(n))}
-			//exhaustive:ignore // groups holds only these three kinds
-			switch k {
-			case Rename:
-				m.Text = "Renamed " + g.names[0]
-				if n > 1 {
-					m.Text = plural(n, "symbol") + " renamed, including " + g.names[0]
-				}
-			case Move:
-				if top[0] != top[1] && g.dirs[top] == n {
-					m.Text = plural(n, "symbol") + " moved from " + pkgName(top[0]) + " to " + pkgName(top[1])
-				} else {
-					m.Text = plural(n, "symbol") + " moved between files, including " + g.names[0]
-				}
-				if top[0] != top[1] {
-					m.Weight += 1
-				}
-			case Signature:
-				m.Text = "Exported signature of " + g.names[0] + " changed"
-				if n > 1 {
-					m.Text = plural(n, "exported signature") + " changed, including " + g.names[0]
-				}
-			}
-			out = append(out, m)
+		for _, g := range gs[k] {
+			out = append(out, g.moment(k, j.Frames[g.rev]))
 		}
 	}
+	return out
+}
 
-	out = append(out, pauses(j)...)
-	out = append(out, busiest(j)...)
-	slices.SortStableFunc(out, byRev)
-	return out, sigs
+// moment tells of the group, of kind k, as a moment in its commit's frame
+// f. It names the first symbol by name, and for moves between packages the
+// packages.
+func (g *editGroup) moment(k MomentKind, f journey.Frame) Moment {
+	slices.Sort(g.names)
+	n := len(g.names)
+	top := g.topDirs()
+	m := Moment{Kind: k, Time: f.Start, Rev: g.rev, SHA: f.SHA, Package: top[1], Count: n, Weight: 1 + math.Log1p(float64(n))}
+	//exhaustive:ignore // groups holds only these three kinds
+	switch k {
+	case Rename:
+		m.Text = "Renamed " + g.names[0]
+		if n > 1 {
+			m.Text = plural(n, "symbol") + " renamed, including " + g.names[0]
+		}
+	case Move:
+		if top[0] != top[1] && g.dirs[top] == n {
+			m.Text = plural(n, "symbol") + " moved from " + pkgName(top[0]) + " to " + pkgName(top[1])
+		} else {
+			m.Text = plural(n, "symbol") + " moved between files, including " + g.names[0]
+		}
+		if top[0] != top[1] {
+			m.Weight += 1
+		}
+	case Signature:
+		m.Text = "Exported signature of " + g.names[0] + " changed"
+		if n > 1 {
+			m.Text = plural(n, "exported signature") + " changed, including " + g.names[0]
+		}
+	}
+	return m
+}
+
+// topDirs returns the pair of directories, from and to, most of the group
+// is in, the first in order among equals.
+func (g *editGroup) topDirs() [2]string {
+	var top [2]string
+	for d, c := range g.dirs {
+		if c > g.dirs[top] || c == g.dirs[top] && (d[0] < top[0] || d[0] == top[0] && d[1] < top[1]) {
+			top = d
+		}
+	}
+	return top
 }
 
 // pauses finds the gaps between commits that stand out: at least three days

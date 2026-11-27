@@ -28,10 +28,18 @@ const (
 
 	// FocusStructure is a warning about the blocks of a type it touches.
 	FocusStructure
+
+	// FocusExternal is production code the change adds or edits whose
+	// calls reach outside the process: the network, files, other programs
+	// or the operating system, as capslock finds. Tests rarely run those
+	// paths for real, so they come first.
+	FocusExternal
 )
 
 func (k FocusKind) String() string {
 	switch k {
+	case FocusExternal:
+		return "external"
 	case FocusBreaking:
 		return "breaking"
 	case FocusBehavior:
@@ -48,8 +56,10 @@ func (k FocusKind) String() string {
 func (k FocusKind) MarshalText() ([]byte, error) { return []byte(k.String()), nil }
 
 // Focus is one thing to look at first in a merge request: what its diff does
-// not show, such as the existing code an edit reaches or the import between
-// packages it starts. New code is left out, since the diff shows all of it.
+// not show, such as where its calls lead outside the process, the existing
+// code an edit reaches or the import between packages it starts. New code
+// is left out, since the diff shows all of it, unless it reaches outside
+// the process.
 type Focus struct {
 	Kind FocusKind
 	Name string // the symbol or type, or "from → to" import paths
@@ -70,30 +80,59 @@ type Focus struct {
 	Reaches      []semdiff.Caller
 	Tests        int
 	Implementers bool
+
+	// Capabilities are the ways a FocusExternal item reaches outside the
+	// process, those the change makes first.
+	Capabilities []Capability
 }
 
-// focus lists what to look at first in r, most important first: exported
-// API changes that break code, then edits of existing production code, the
-// largest reaching the most callers first, then the imports between
-// packages it starts, the most used first, then warnings about the types
-// it touches.
-func focus(r *semdiff.Report, types []TypeReview) []Focus {
-	var breaking, behavior []Focus
+// focus lists what to look at first in r, most important first: the code
+// the change adds or edits whose calls reach outside the process, by caps
+// (indexed as the changes), then exported API changes that break code,
+// then edits of existing production code, the largest reaching the most
+// callers first, then the imports between packages it starts, the most
+// used first, then warnings about the types it touches.
+//
+// Code reaching outside the process comes first: what it does there
+// depends on the world, which tests rarely bring along. Of it, existing
+// code the change makes reach somewhere new comes first, then new code,
+// then the rest, each the largest edit reaching the most callers first.
+func focus(r *semdiff.Report, types []TypeReview, caps map[int][]Capability) []Focus {
+	var external, breaking, behavior []Focus
 	weights := map[int]float64{}
 	for i, c := range r.Changes {
+		var f Focus
 		switch {
 		case c.APIChange:
-			breaking = append(breaking, breakingFocus(i, c))
-		case editsBehavior(c):
-			f := Focus{Kind: FocusBehavior, Name: c.Name, Path: c.Path, Line: c.Line, What: c.Summary, Change: i}
+			f = breakingFocus(i, c)
+		case editsBehavior(c) || len(caps[i]) > 0:
+			f = Focus{Kind: FocusBehavior, Name: c.Name, Path: c.Path, Line: c.Line, What: c.Summary, Change: i}
+			if c.Flags.Has(ast.Added) {
+				f.What = "new " + c.Symbol + " · " + c.Summary
+			}
 			f.Reaches, f.Tests = production(c.Callers)
+		default:
+			continue
+		}
+		weights[i] = weight(c, f.Reaches)
+		switch {
+		case len(caps[i]) > 0:
+			f.Kind, f.Capabilities = FocusExternal, caps[i]
+			external = append(external, f)
+		case f.Kind == FocusBreaking:
+			breaking = append(breaking, f)
+		default:
 			behavior = append(behavior, f)
-			weights[i] = weight(c, f.Reaches)
 		}
 	}
-	slices.SortStableFunc(behavior, func(a, b Focus) int { return cmp.Compare(weights[b.Change], weights[a.Change]) })
+	byWeight := func(a, b Focus) int { return cmp.Compare(weights[b.Change], weights[a.Change]) }
+	slices.SortStableFunc(behavior, byWeight)
+	slices.SortStableFunc(external, func(a, b Focus) int {
+		return cmp.Or(cmp.Compare(novelty(r, b), novelty(r, a)), byWeight(a, b))
+	})
 
-	out := append(breaking, behavior...)
+	out := append(external, breaking...)
+	out = append(out, behavior...)
 	out = append(out, dependencies(r.Relations)...)
 	for _, t := range types {
 		for _, n := range t.Notes {
@@ -103,6 +142,18 @@ func focus(r *semdiff.Report, types []TypeReview) []Focus {
 		}
 	}
 	return out
+}
+
+// novelty ranks an item reaching outside the process: 2 for existing code
+// the change makes reach somewhere new, 1 for new code, 0 for the rest.
+func novelty(r *semdiff.Report, f Focus) int {
+	if r.Changes[f.Change].Flags.Has(ast.Added) {
+		return 1
+	}
+	if slices.ContainsFunc(f.Capabilities, func(c Capability) bool { return c.New }) {
+		return 2
+	}
+	return 0
 }
 
 // editsBehavior reports whether c edits existing production code in a way

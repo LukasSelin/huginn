@@ -35,7 +35,7 @@
       <span class="muted">Every package stacked above the packages it refers to</span>
     </div>
 
-    <section class="panel stage" id="stage" aria-label="Packages in layers; drag to turn, scroll to zoom">
+    <section class="panel stage" id="stage" aria-label="Packages in layers; drag to turn, right-drag or Shift+drag to move, scroll to zoom">
       <canvas id="canvas" aria-hidden="true"></canvas>
       <div class="ov ov-tl">
         <div class="date" id="date"></div>
@@ -57,6 +57,9 @@
         </button>
         <button type="button" class="icon zb" id="zoomOut" aria-label="Zoom out" title="Zoom out (−)">
           <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" aria-hidden="true"><path d="M5 12h14"></path></svg>
+        </button>
+        <button type="button" class="icon zb" id="zoomReset" aria-label="Fit the whole stack" title="Fit the whole stack (0)">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 9V4h5M20 9V4h-5M4 15v5h5M20 15v5h-5"></path></svg>
         </button>
         <div class="zgroup" role="group" aria-label="Spread">
           <button type="button" class="icon zb" id="spreadMore" aria-label="More room between packages" title="More room between packages (&gt;, or Ctrl+scroll)">
@@ -105,6 +108,10 @@
 
   <aside class="detail" aria-label="Packages by layer">
     <section class="pick" id="pick" aria-live="polite"></section>
+    <div class="find" role="search">
+      <input type="search" id="find" placeholder="Find a package…" title="Find a package by name (/)" aria-label="Find a package" aria-controls="list" aria-describedby="findNote" autocomplete="off" spellcheck="false">
+      <p class="muted small" id="findNote" aria-live="polite"></p>
+    </div>
     <section aria-labelledby="listHead">
       <h2 class="eyebrow" id="listHead">Layers, top first</h2>
       <div class="layers" id="list"></div>

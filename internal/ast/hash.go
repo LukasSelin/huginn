@@ -28,61 +28,70 @@ func (h *hasher) emit(s string) {
 }
 
 func (h *hasher) walk(root goast.Node) {
-	goast.Inspect(root, func(n goast.Node) bool {
-		if n == nil {
-			h.emit(")")
-			return false
-		}
-		switch n.(type) {
-		case *goast.CommentGroup, *goast.Comment:
-			return false
-		}
+	goast.Inspect(root, h.visit)
+}
 
-		h.emit(reflect.TypeOf(n).Elem().Name())
-		if _, ok := n.(goast.Stmt); ok {
-			if _, block := n.(*goast.BlockStmt); !block {
-				h.stmts++
-			}
-		}
+// visit emits a node's type and details on the way in and ")" on the way
+// out, so the token stream keeps the tree's shape. Comments are skipped.
+func (h *hasher) visit(n goast.Node) bool {
+	if n == nil {
+		h.emit(")")
+		return false
+	}
+	switch n.(type) {
+	case *goast.CommentGroup, *goast.Comment:
+		return false
+	}
 
-		switch x := n.(type) {
-		case *goast.Ident:
-			h.emit(x.Name)
-		case *goast.BasicLit:
-			h.emit(x.Value)
-		case *goast.BinaryExpr:
-			h.emit(x.Op.String())
-			if x.Op == token.LAND || x.Op == token.LOR {
-				h.complexity++
-			}
-		case *goast.UnaryExpr:
-			h.emit(x.Op.String())
-		case *goast.AssignStmt:
-			h.emit(x.Tok.String())
-		case *goast.IncDecStmt:
-			h.emit(x.Tok.String())
-		case *goast.BranchStmt:
-			h.emit(x.Tok.String())
-		case *goast.GenDecl:
-			h.emit(x.Tok.String())
-		case *goast.ChanType:
-			h.emit(string(rune('0' + x.Dir)))
-		case *goast.RangeStmt:
-			h.emit(x.Tok.String())
-			h.complexity++
-		case *goast.IfStmt, *goast.ForStmt:
-			h.complexity++
-		case *goast.CaseClause:
-			if x.List != nil {
-				h.complexity++
-			}
-		case *goast.CommClause:
-			if x.Comm != nil {
-				h.complexity++
-			}
+	h.emit(reflect.TypeOf(n).Elem().Name())
+	if _, ok := n.(goast.Stmt); ok {
+		if _, block := n.(*goast.BlockStmt); !block {
+			h.stmts++
 		}
-		return true
-	})
+	}
+	h.details(n)
+	return true
+}
+
+// details emits what tells two nodes of the same type apart (a name, literal,
+// operator or token) and counts the branches that add to the complexity.
+func (h *hasher) details(n goast.Node) {
+	switch x := n.(type) {
+	case *goast.Ident:
+		h.emit(x.Name)
+	case *goast.BasicLit:
+		h.emit(x.Value)
+	case *goast.BinaryExpr:
+		h.emit(x.Op.String())
+		if x.Op == token.LAND || x.Op == token.LOR {
+			h.complexity++
+		}
+	case *goast.UnaryExpr:
+		h.emit(x.Op.String())
+	case *goast.AssignStmt:
+		h.emit(x.Tok.String())
+	case *goast.IncDecStmt:
+		h.emit(x.Tok.String())
+	case *goast.BranchStmt:
+		h.emit(x.Tok.String())
+	case *goast.GenDecl:
+		h.emit(x.Tok.String())
+	case *goast.ChanType:
+		h.emit(string(rune('0' + x.Dir)))
+	case *goast.RangeStmt:
+		h.emit(x.Tok.String())
+		h.complexity++
+	case *goast.IfStmt, *goast.ForStmt:
+		h.complexity++
+	case *goast.CaseClause:
+		if x.List != nil {
+			h.complexity++
+		}
+	case *goast.CommClause:
+		if x.Comm != nil {
+			h.complexity++
+		}
+	}
 }
 
 // finish stores the hash, shingles and metrics on s.

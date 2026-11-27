@@ -24,21 +24,46 @@ const (
 // than half the methods (at least five), as a receiver rename or a sweep
 // does. The rest weigh 1/(n-1) for the n methods they changed.
 func (b *build) coupling() {
-	r, h := b.r, b.a.h
+	r := b.r
 	from, to, in := b.a.window(b.opts.Months)
 	r.From, r.To = from, to
 	n := len(r.Rows)
 	limit := max(5, n/2)
 	r.Coupling = Coupling{Limit: limit, Min: b.opts.MinCoChanges, Pairs: []Pair{}}
 
-	birth := ""
-	if ev := h.Symbol(r.Type.ID).Events; len(ev) > 0 && ev[0].Flags.Has(ast.Added) {
-		birth = ev[0].SHA
+	birth := b.typeBirth()
+	byRev := b.changedRows(func(e lineage.Event) bool { return counted(e) && e.SHA != birth && in(e.Time) })
+	revs, positions := b.keptRevisions(byRev, limit)
+	r.Coupling.Commits = len(revs)
+
+	changes, pairs := cochange.Count(revs, n)
+	keys := slices.SortedFunc(maps.Keys(pairs), func(x, y [2]int) int {
+		return cmp.Or(cmp.Compare(x[0], y[0]), cmp.Compare(x[1], y[1]))
+	})
+	b.couplingPairs(changes, keys, pairs)
+	for nb := range r.Blocks {
+		b.blockCoupling(nb, revs, keys, pairs)
 	}
+	b.outside(revs, positions)
+}
+
+// typeBirth returns the commit that added the type, or "" when its history
+// does not start with one.
+func (b *build) typeBirth() string {
+	if ev := b.a.h.Symbol(b.r.Type.ID).Events; len(ev) > 0 && ev[0].Flags.Has(ast.Added) {
+		return ev[0].SHA
+	}
+	return ""
+}
+
+// changedRows maps each revision to the rows whose methods it changed, in
+// the events keep accepts.
+func (b *build) changedRows(keep func(lineage.Event) bool) map[int][]int {
+	h := b.a.h
 	byRev := map[int][]int{} // revision → rows it changed
-	for i, row := range r.Rows {
+	for i, row := range b.r.Rows {
 		for _, e := range h.Symbol(row.ID).Events {
-			if !counted(e) || e.SHA == birth || !in(e.Time) {
+			if !keep(e) {
 				continue
 			}
 			if p, ok := h.Position(e.SHA); ok && !slices.Contains(byRev[p], i) {
@@ -46,8 +71,14 @@ func (b *build) coupling() {
 			}
 		}
 	}
-	var revs [][]int
-	var positions []int
+	return byRev
+}
+
+// keptRevisions returns, in history order, the rows each revision changed
+// and its position, leaving out as mass edits those changing more than
+// limit rows. It counts the edits of every row in the ones it keeps.
+func (b *build) keptRevisions(byRev map[int][]int, limit int) (revs [][]int, positions []int) {
+	r := b.r
 	for _, p := range slices.Sorted(maps.Keys(byRev)) {
 		rows := byRev[p]
 		if len(rows) > limit {
@@ -60,12 +91,14 @@ func (b *build) coupling() {
 			r.Rows[i].Edits++
 		}
 	}
-	r.Coupling.Commits = len(revs)
+	return revs, positions
+}
 
-	changes, pairs := cochange.Count(revs, n)
-	keys := slices.SortedFunc(maps.Keys(pairs), func(x, y [2]int) int {
-		return cmp.Or(cmp.Compare(x[0], y[0]), cmp.Compare(x[1], y[1]))
-	})
+// couplingPairs lists the pairs of rows that changed together, the most
+// coupled first, and says why the strong ones across blocks did. keys are
+// the keys of pairs, sorted.
+func (b *build) couplingPairs(changes map[int]int, keys [][2]int, pairs map[[2]int]cochange.Pair) {
+	r := b.r
 	reach := b.closures()
 	for _, k := range keys {
 		x, y, p := k[0], k[1], pairs[k]
@@ -82,23 +115,26 @@ func (b *build) coupling() {
 	slices.SortStableFunc(r.Coupling.Pairs, func(x, y Pair) int {
 		return cmp.Or(cmp.Compare(y.Logical, x.Logical), cmp.Compare(y.N, x.N))
 	})
+}
 
-	for nb := range r.Blocks {
-		bl := &r.Blocks[nb]
-		inBlock := func(i int) bool { return b.rowBlock[i] == nb }
-		for _, i := range bl.Rows {
-			bl.Edits += r.Rows[i].Edits
-		}
-		for _, rows := range revs {
-			if slices.ContainsFunc(rows, inBlock) {
-				bl.Commits++
-			}
-		}
-		if c, ok := blockCohesion(b.rowBlock, nb, keys, pairs); ok && len(bl.Rows) >= 2 {
-			bl.Cohesion = &c
+// blockCoupling counts block nb's edits and the commits changing it and,
+// for two methods or more, how much of its co-change weight stays inside
+// it rather than going to other blocks. keys are the keys of pairs, sorted.
+func (b *build) blockCoupling(nb int, revs [][]int, keys [][2]int, pairs map[[2]int]cochange.Pair) {
+	r := b.r
+	bl := &r.Blocks[nb]
+	inBlock := func(i int) bool { return b.rowBlock[i] == nb }
+	for _, i := range bl.Rows {
+		bl.Edits += r.Rows[i].Edits
+	}
+	for _, rows := range revs {
+		if slices.ContainsFunc(rows, inBlock) {
+			bl.Commits++
 		}
 	}
-	b.outside(revs, positions)
+	if c, ok := blockCohesion(b.rowBlock, nb, keys, pairs); ok && len(bl.Rows) >= 2 {
+		bl.Cohesion = &c
+	}
 }
 
 // blockCohesion is the share of the co-change weight between block nb and

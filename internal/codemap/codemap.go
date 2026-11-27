@@ -162,49 +162,64 @@ type Map struct {
 // Build aggregates h. h must not change afterwards.
 func Build(h *lineage.History) *Map {
 	m := &Map{h: h, dirs: map[string]*Dir{}, repo: &Dir{}}
-	dir := func(p string) *Dir {
-		d := m.dirs[p]
-		if d == nil {
-			d = &Dir{Path: p}
-			m.dirs[p] = d
-		}
-		return d
-	}
 	for sym := range h.All() {
-		for i := range sym.Events {
-			e := &sym.Events[i]
-			if e.Primary() == 0 {
-				continue
-			}
-			s := e.New
-			if s == nil {
-				s = e.Old
-			}
-			t := Touch{Symbol: sym.ID, Event: e, Kind: e.Primary(), Test: isTest(s.Path), ComplexityDelta: complexity(e.New) - complexity(e.Old)}
-			d := dir(path.Dir(s.Path))
-			d.touches = append(d.touches, t)
-			m.repo.touches = append(m.repo.touches, t)
-		}
-		if sym.Alive() {
-			cur := sym.Latest()
-			d := dir(path.Dir(cur.Path))
-			for _, tests := range []bool{false, true} {
-				if !tests && isTest(cur.Path) {
-					continue
-				}
-				for _, c := range []*Current{&d.cur[b2i(tests)], &m.repo.cur[b2i(tests)]} {
-					c.Symbols++
-					c.LOC += cur.EndLine - cur.StartLine + 1
-					c.Complexity += cur.Complexity
-				}
-			}
-		}
+		m.addTouches(sym)
+		m.addLive(sym)
 	}
 	for _, d := range m.dirs {
 		d.finish()
 	}
 	m.repo.finish()
 	return m
+}
+
+// dir returns the aggregate for directory p, starting it on first use.
+func (m *Map) dir(p string) *Dir {
+	d := m.dirs[p]
+	if d == nil {
+		d = &Dir{Path: p}
+		m.dirs[p] = d
+	}
+	return d
+}
+
+// addTouches attributes sym's semantic edits to their directories and to
+// the repository.
+func (m *Map) addTouches(sym *lineage.Symbol) {
+	for i := range sym.Events {
+		e := &sym.Events[i]
+		if e.Primary() == 0 {
+			continue
+		}
+		s := e.New
+		if s == nil {
+			s = e.Old
+		}
+		t := Touch{Symbol: sym.ID, Event: e, Kind: e.Primary(), Test: isTest(s.Path), ComplexityDelta: complexity(e.New) - complexity(e.Old)}
+		d := m.dir(path.Dir(s.Path))
+		d.touches = append(d.touches, t)
+		m.repo.touches = append(m.repo.touches, t)
+	}
+}
+
+// addLive adds sym, if it is live, to the current code of its directory and
+// of the repository. Test code counts only where test files do.
+func (m *Map) addLive(sym *lineage.Symbol) {
+	if !sym.Alive() {
+		return
+	}
+	cur := sym.Latest()
+	d := m.dir(path.Dir(cur.Path))
+	for _, tests := range []bool{false, true} {
+		if !tests && isTest(cur.Path) {
+			continue
+		}
+		for _, c := range []*Current{&d.cur[b2i(tests)], &m.repo.cur[b2i(tests)]} {
+			c.Symbols++
+			c.LOC += cur.EndLine - cur.StartLine + 1
+			c.Complexity += cur.Complexity
+		}
+	}
 }
 
 // finish sorts the touches and precomputes the weekly series.

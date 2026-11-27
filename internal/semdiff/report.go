@@ -285,17 +285,7 @@ func Build(in Input) *Report {
 		inScope = func(string) bool { return true }
 	}
 
-	side := func(f *ast.File) *ast.File {
-		if f == nil || f.Generated && !in.IncludeGenerated {
-			return nil
-		}
-		return f
-	}
-	var olds, news []*ast.File
-	for _, fd := range in.Files {
-		olds = append(olds, side(fd.Old))
-		news = append(news, side(fd.New))
-	}
+	olds, news := sides(in.Files, in.IncludeGenerated)
 
 	r := &Report{Counts: map[Kind]int{}}
 	idx := newIndex(in.Tree, pkgOf)
@@ -307,49 +297,85 @@ func Build(in Input) *Report {
 
 	changes := ast.Diff(olds, news)
 	for _, c := range changes {
-		if (c.New == nil || !inScope(c.New.Path)) && (c.Old == nil || !inScope(c.Old.Path)) { // neither side in scope
+		if !changeInScope(c, inScope) {
 			continue
 		}
-		rc := newChange(c, pkgOf)
-		rc.Members = memberChanges(c, pkgOf, idx)
-		for _, m := range rc.Members {
-			rc.APIChange = rc.APIChange || m.Breaking
-		}
-		target := c.New
-		if target == nil {
-			target = c.Old
-		}
-		rc.Callers, rc.Approximate = idx.callers(target, rc.Package, blastFor(c, blast, pkgs))
-		for _, cl := range rc.Callers {
-			rc.CallSites += cl.Calls
-		}
-		rc.Impact = impact(rc)
-
-		r.Changes = append(r.Changes, rc)
-		r.Symbols++
-		for _, k := range rc.Kinds {
-			r.Counts[k]++
-			r.SemanticChanges++
-		}
-		if rc.APIChange {
-			r.Blast.APIChanges = append(r.Blast.APIChanges, rc.Name)
-		}
+		r.addChange(indexedChange(c, pkgOf, idx, blastFor(c, blast, pkgs)))
 	}
-
-	for _, cl := range blast {
-		r.Blast.Callers = append(r.Blast.Callers, *cl)
-		r.Blast.CallSites += cl.Calls
-		r.Blast.Approximate = r.Blast.Approximate || cl.Approximate
-	}
-	sortCallers(r.Blast.Callers)
-	for p := range pkgs {
-		r.Blast.Packages = append(r.Blast.Packages, p)
-	}
-	slices.Sort(r.Blast.Packages)
+	r.Blast.addCallers(blast, pkgs)
 
 	r.Relations = relations(changes, TreeBefore(in.Tree, in.Files), in.Tree, pkgOf, inScope)
 	r.summarizeFiles(in, inScope)
 	return r
+}
+
+// sides returns the old and new sides of files to diff, one entry per file
+// on each side. A generated side is nil unless includeGenerated is set.
+func sides(files []FileDiff, includeGenerated bool) (olds, news []*ast.File) {
+	side := func(f *ast.File) *ast.File {
+		if f == nil || f.Generated && !includeGenerated {
+			return nil
+		}
+		return f
+	}
+	for _, fd := range files {
+		olds = append(olds, side(fd.Old))
+		news = append(news, side(fd.New))
+	}
+	return olds, news
+}
+
+// changeInScope reports whether either side of a change is in scope.
+func changeInScope(c ast.Change, inScope func(string) bool) bool {
+	return c.New != nil && inScope(c.New.Path) || c.Old != nil && inScope(c.Old.Path)
+}
+
+// indexedChange is newChange completed with what idx knows: the member
+// changes, the callers and the impact. record is passed on to idx.callers.
+func indexedChange(c ast.Change, pkgOf func(path, pkg string) string, idx *index, record func(callerID, Caller)) Change {
+	rc := newChange(c, pkgOf)
+	rc.Members = memberChanges(c, pkgOf, idx)
+	for _, m := range rc.Members {
+		rc.APIChange = rc.APIChange || m.Breaking
+	}
+	target := c.New
+	if target == nil {
+		target = c.Old
+	}
+	rc.Callers, rc.Approximate = idx.callers(target, rc.Package, record)
+	for _, cl := range rc.Callers {
+		rc.CallSites += cl.Calls
+	}
+	rc.Impact = impact(rc)
+	return rc
+}
+
+// addChange adds one change to the report and to its counts.
+func (r *Report) addChange(rc Change) {
+	r.Changes = append(r.Changes, rc)
+	r.Symbols++
+	for _, k := range rc.Kinds {
+		r.Counts[k]++
+		r.SemanticChanges++
+	}
+	if rc.APIChange {
+		r.Blast.APIChanges = append(r.Blast.APIChanges, rc.Name)
+	}
+}
+
+// addCallers fills in the callers, call sites and packages from what
+// blastFor recorded.
+func (b *BlastRadius) addCallers(blast map[callerID]*Caller, pkgs map[string]bool) {
+	for _, cl := range blast {
+		b.Callers = append(b.Callers, *cl)
+		b.CallSites += cl.Calls
+		b.Approximate = b.Approximate || cl.Approximate
+	}
+	sortCallers(b.Callers)
+	for p := range pkgs {
+		b.Packages = append(b.Packages, p)
+	}
+	slices.Sort(b.Packages)
 }
 
 // blastFor returns the function that records a change's callers in the blast
@@ -503,10 +529,41 @@ func impact(c Change) string {
 // summarizeFiles fills in the line counts, the file list and the noise list,
 // for the files in scope.
 func (r *Report) summarizeFiles(in Input, inScope func(string) bool) {
-	type touch struct {
-		kinds   map[Kind]bool
-		changes int
+	touched := touchedFiles(r.Changes)
+	for _, fd := range in.Files {
+		if !fileInScope(fd, inScope) {
+			continue
+		}
+		r.Added += fd.Added
+		r.Removed += fd.Removed
+
+		fs := newFileSummary(fd)
+		if fs.Path == "" {
+			continue
+		}
+		ts := touchesOf(touched, fs)
+		if len(ts) == 0 {
+			if reason := noiseReason(fd, in.IncludeGenerated); reason != "" {
+				r.Noise = append(r.Noise, NoiseFile{Path: fs.Path, Reason: reason, Added: fd.Added, Removed: fd.Removed})
+				continue
+			}
+		}
+		fs.addTouches(ts)
+		r.Files = append(r.Files, fs)
 	}
+	slices.SortFunc(r.Files, func(a, b FileSummary) int { return cmp.Compare(a.Path, b.Path) })
+	slices.SortFunc(r.Noise, func(a, b NoiseFile) int { return cmp.Compare(a.Path, b.Path) })
+}
+
+// touch is what the changes did to one file.
+type touch struct {
+	kinds   map[Kind]bool
+	changes int
+}
+
+// touchedFiles returns what changes did to each file, by path. A file a
+// symbol moved out of is touched by a move.
+func touchedFiles(changes []Change) map[string]*touch {
 	touched := map[string]*touch{}
 	at := func(p string) *touch {
 		t := touched[p]
@@ -516,7 +573,7 @@ func (r *Report) summarizeFiles(in Input, inScope func(string) bool) {
 		}
 		return t
 	}
-	for _, c := range r.Changes {
+	for _, c := range changes {
 		t := at(c.Path)
 		t.changes++
 		for _, k := range c.Kinds {
@@ -526,55 +583,55 @@ func (r *Report) summarizeFiles(in Input, inScope func(string) bool) {
 			at(c.OldPath).kinds[KindMoved] = true
 		}
 	}
+	return touched
+}
 
-	for _, fd := range in.Files {
-		if (fd.New == nil || !inScope(fd.New.Path)) && (fd.Old == nil || !inScope(fd.Old.Path)) { // neither side in scope
-			continue
-		}
-		r.Added += fd.Added
-		r.Removed += fd.Removed
+// fileInScope reports whether either side of a file is in scope.
+func fileInScope(fd FileDiff, inScope func(string) bool) bool {
+	return fd.New != nil && inScope(fd.New.Path) || fd.Old != nil && inScope(fd.Old.Path)
+}
 
-		var fs FileSummary
-		if fd.New != nil {
-			fs.Path = fd.New.Path
-		}
-		if fd.Old != nil {
-			if fs.Path == "" {
-				fs.Path = fd.Old.Path
-			} else if fd.Old.Path != fs.Path {
-				fs.OldPath = fd.Old.Path
-			}
-		}
-		if fs.Path == "" {
-			continue
-		}
-		fs.Added, fs.Removed = fd.Added, fd.Removed
-
-		var ts []*touch
-		for _, p := range []string{fs.Path, fs.OldPath} {
-			if t := touched[p]; p != "" && t != nil {
-				ts = append(ts, t)
-			}
-		}
-		if len(ts) == 0 {
-			if reason := noiseReason(fd, in.IncludeGenerated); reason != "" {
-				r.Noise = append(r.Noise, NoiseFile{Path: fs.Path, Reason: reason, Added: fd.Added, Removed: fd.Removed})
-				continue
-			}
-		}
-		for _, t := range ts {
-			fs.Changes += t.changes
-			for _, k := range Kinds {
-				if t.kinds[k] && !slices.Contains(fs.Kinds, k) {
-					fs.Kinds = append(fs.Kinds, k)
-				}
-			}
-		}
-		slices.Sort(fs.Kinds)
-		r.Files = append(r.Files, fs)
+// newFileSummary starts the summary of a file with its paths and line
+// counts. Path is empty when both sides are nil.
+func newFileSummary(fd FileDiff) FileSummary {
+	var fs FileSummary
+	if fd.New != nil {
+		fs.Path = fd.New.Path
 	}
-	slices.SortFunc(r.Files, func(a, b FileSummary) int { return cmp.Compare(a.Path, b.Path) })
-	slices.SortFunc(r.Noise, func(a, b NoiseFile) int { return cmp.Compare(a.Path, b.Path) })
+	if fd.Old != nil {
+		if fs.Path == "" {
+			fs.Path = fd.Old.Path
+		} else if fd.Old.Path != fs.Path {
+			fs.OldPath = fd.Old.Path
+		}
+	}
+	fs.Added, fs.Removed = fd.Added, fd.Removed
+	return fs
+}
+
+// touchesOf returns what the changes did to a file, under its path and
+// under its old one.
+func touchesOf(touched map[string]*touch, fs FileSummary) []*touch {
+	var ts []*touch
+	for _, p := range []string{fs.Path, fs.OldPath} {
+		if t := touched[p]; p != "" && t != nil {
+			ts = append(ts, t)
+		}
+	}
+	return ts
+}
+
+// addTouches adds the changes and kinds of ts to the summary.
+func (fs *FileSummary) addTouches(ts []*touch) {
+	for _, t := range ts {
+		fs.Changes += t.changes
+		for _, k := range Kinds {
+			if t.kinds[k] && !slices.Contains(fs.Kinds, k) {
+				fs.Kinds = append(fs.Kinds, k)
+			}
+		}
+	}
+	slices.Sort(fs.Kinds)
 }
 
 // noiseReason says why a file without symbol changes is noise, or returns ""

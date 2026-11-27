@@ -99,47 +99,19 @@ func (c *Cache) build(ctx context.Context, repo *git.Repo, walk git.Options, app
 		return err
 	}
 	revs := c.load(walk.IncludeGenerated)
-	var missing []string
-	for _, sha := range hashes {
-		if _, ok := revs[sha]; !ok {
-			missing = append(missing, sha)
-		}
-	}
+	missing := uncached(hashes, revs)
 	c.Hits, c.Walked = len(hashes)-len(missing), len(missing)
 
 	// The walk delivers the missing commits in order; the cached ones
 	// between them are applied as it reaches them.
-	next := 0
-	applyCached := func(until string) error {
-		for ; next < len(hashes) && hashes[next] != until; next++ {
-			r, ok := revs[hashes[next]]
-			if !ok {
-				return fmt.Errorf("walk skipped commit %s", hashes[next])
-			}
-			apply(r)
-		}
-		return nil
-	}
+	p := &cacheReplay{hashes: hashes, revs: revs, apply: apply}
 	if len(missing) > 0 {
 		walk.Commits = missing
-		err := repo.Walk(ctx, walk, func(cm *git.Commit) error {
-			if err := applyCached(cm.Hash); err != nil {
-				return err
-			}
-			if next == len(hashes) {
-				return fmt.Errorf("walk returned unexpected commit %s", cm.Hash)
-			}
-			r := FromCommit(cm)
-			revs[cm.Hash] = r
-			apply(r)
-			next++
-			return nil
-		})
-		if err != nil {
+		if err := repo.Walk(ctx, walk, p.applyWalked); err != nil {
 			return err
 		}
 	}
-	if err := applyCached(""); err != nil {
+	if err := p.applyCached(""); err != nil {
 		return err
 	}
 	if len(missing) == 0 {
@@ -148,6 +120,55 @@ func (c *Cache) build(ctx context.Context, repo *git.Repo, walk git.Options, app
 	if err := c.save(walk.IncludeGenerated, revs); err != nil {
 		return fmt.Errorf("save cache: %w", err)
 	}
+	return nil
+}
+
+// uncached returns the hashes that revs has no revision for, in order.
+func uncached(hashes []string, revs map[string]Revision) []string {
+	var missing []string
+	for _, sha := range hashes {
+		if _, ok := revs[sha]; !ok {
+			missing = append(missing, sha)
+		}
+	}
+	return missing
+}
+
+// cacheReplay applies the revisions of hashes in order, each from the cache
+// or, for those it lacks, from the walk.
+type cacheReplay struct {
+	hashes []string
+	revs   map[string]Revision // gains the revisions walked
+	next   int                 // index into hashes of the next to apply
+	apply  func(Revision)
+}
+
+// applyCached applies the cached revisions from next up to, not including,
+// until; "" applies all that are left.
+func (p *cacheReplay) applyCached(until string) error {
+	for ; p.next < len(p.hashes) && p.hashes[p.next] != until; p.next++ {
+		r, ok := p.revs[p.hashes[p.next]]
+		if !ok {
+			return fmt.Errorf("walk skipped commit %s", p.hashes[p.next])
+		}
+		p.apply(r)
+	}
+	return nil
+}
+
+// applyWalked applies the cached revisions before cm, then cm's, which it
+// keeps for the cache.
+func (p *cacheReplay) applyWalked(cm *git.Commit) error {
+	if err := p.applyCached(cm.Hash); err != nil {
+		return err
+	}
+	if p.next == len(p.hashes) {
+		return fmt.Errorf("walk returned unexpected commit %s", cm.Hash)
+	}
+	r := FromCommit(cm)
+	p.revs[cm.Hash] = r
+	p.apply(r)
+	p.next++
 	return nil
 }
 

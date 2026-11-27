@@ -32,37 +32,11 @@ type Resolver struct {
 
 // Infer returns the resolver for the import paths syms refer to.
 func Infer(syms []*ast.Symbol) *Resolver {
-	seen := map[string]bool{}
-	r := &Resolver{dirs: map[string]bool{}, cache: map[string]string{}, imported: seen}
-	var imports []string
-	for _, s := range syms {
-		r.dirs[path.Dir(s.Path)] = true
-		for _, ref := range s.Refs {
-			if ref.Kind == ast.RefImport && !seen[ref.Pkg] {
-				seen[ref.Pkg] = true
-				imports = append(imports, ref.Pkg)
-			}
-		}
-	}
-	slices.Sort(imports)
+	r := &Resolver{dirs: map[string]bool{}, cache: map[string]string{}, imported: map[string]bool{}}
+	imports := r.collect(syms)
 	first := 0
 	for len(imports) > 0 {
-		// Every import ending in a directory other than the root makes the
-		// rest of it a candidate.
-		matches := map[string]int{}
-		for _, imp := range imports {
-			for i := range len(imp) {
-				if imp[i] == '/' && r.dirs[imp[i+1:]] && imp[i+1:] != "." {
-					matches[imp[:i]]++
-				}
-			}
-		}
-		mod, best := "", 0
-		for m, n := range matches {
-			if n > best || n == best && m < mod {
-				mod, best = m, n
-			}
-		}
+		mod, best := bestCandidate(r.candidates(imports))
 		if best == 0 || first > 0 && (best < 2 || best*10 < first) {
 			break
 		}
@@ -72,6 +46,51 @@ func Infer(syms []*ast.Symbol) *Resolver {
 	}
 	slices.SortStableFunc(r.modules, func(a, b string) int { return cmp.Compare(len(b), len(a)) })
 	return r
+}
+
+// collect records the directories of syms and every import path they refer
+// to, and returns those import paths sorted, each once.
+func (r *Resolver) collect(syms []*ast.Symbol) []string {
+	var imports []string
+	for _, s := range syms {
+		r.dirs[path.Dir(s.Path)] = true
+		for _, ref := range s.Refs {
+			if ref.Kind == ast.RefImport && !r.imported[ref.Pkg] {
+				r.imported[ref.Pkg] = true
+				imports = append(imports, ref.Pkg)
+			}
+		}
+	}
+	slices.Sort(imports)
+	return imports
+}
+
+// candidates counts, for each module path the imports suggest, how many of
+// them it would resolve.
+func (r *Resolver) candidates(imports []string) map[string]int {
+	// Every import ending in a directory other than the root makes the
+	// rest of it a candidate.
+	matches := map[string]int{}
+	for _, imp := range imports {
+		for i := range len(imp) {
+			if imp[i] == '/' && r.dirs[imp[i+1:]] && imp[i+1:] != "." {
+				matches[imp[:i]]++
+			}
+		}
+	}
+	return matches
+}
+
+// bestCandidate returns the candidate that resolves the most imports, the
+// first in sort order on a tie, and how many it resolves: 0 without
+// candidates. The tie-break keeps the choice independent of map order.
+func bestCandidate(matches map[string]int) (mod string, best int) {
+	for m, n := range matches {
+		if n > best || n == best && m < mod {
+			mod, best = m, n
+		}
+	}
+	return mod, best
 }
 
 // under returns the directory of the package imported as imp if it is in

@@ -280,16 +280,33 @@ type analysis struct {
 	blocks []struct{ fields, methods []int } // A, B, ... in order
 }
 
+// newAnalysis lays out the matrix of the type in: its columns, its rows
+// and the cells and calls of each row.
 func newAnalysis(in Input) *analysis {
 	a := &analysis{typ: in.Type.Name, field: map[string]int{}, method: map[string]int{}}
-	for _, m := range in.Type.Members {
+	a.addFieldColumns(in.Type.Members)
+	a.addMethodRows(in.Methods)
+	for i := range a.syms {
+		a.markRow(i)
+	}
+	return a
+}
+
+// addFieldColumns adds a column for each named field and embedded type.
+func (a *analysis) addFieldColumns(members []ast.Member) {
+	for _, m := range members {
 		if (m.Kind != ast.MemberField && m.Kind != ast.MemberEmbedded) || m.Name == "" || m.Name == "_" {
 			continue
 		}
 		a.field[m.Name] = len(a.fields)
 		a.fields = append(a.fields, Field{Name: m.Name, Type: m.Type})
 	}
-	ms := slices.Clone(in.Methods)
+}
+
+// addMethodRows adds a row for each method, in source order, keeping the
+// first of methods sharing a name.
+func (a *analysis) addMethodRows(methods []*ast.Symbol) {
+	ms := slices.Clone(methods)
 	slices.SortFunc(ms, func(x, y *ast.Symbol) int {
 		return cmp.Or(cmp.Compare(x.Path, y.Path), cmp.Compare(x.StartLine, y.StartLine))
 	})
@@ -301,40 +318,50 @@ func newAnalysis(in Input) *analysis {
 		a.methods = append(a.methods, Method{Name: s.Name, Exported: goast.IsExported(s.Name), Path: s.Path, Line: s.StartLine, Stmts: s.Stmts})
 		a.syms = append(a.syms, s)
 	}
-	for i, s := range a.syms {
-		m := &a.methods[i]
-		for _, fr := range s.FieldRefs {
-			if fr.Type != a.typ || fr.Pkg != "" {
-				continue
-			}
-			if f, ok := a.field[fr.Name]; ok {
-				m.Uses = append(m.Uses, Use{Field: f, Read: fr.Count > fr.Writes, Write: fr.Writes > 0})
-				continue
-			}
-			// A method value, x.M without a call.
-			if j, ok := a.method[fr.Name]; ok && j != i && !slices.Contains(m.Calls, fr.Name) {
-				m.Calls = append(m.Calls, fr.Name)
-			}
+}
+
+// markRow fills in row i's cells and calls from its method's references,
+// and counts the row among its columns' readers and writers.
+func (a *analysis) markRow(i int) {
+	s, m := a.syms[i], &a.methods[i]
+	for _, fr := range s.FieldRefs {
+		a.markFieldRef(i, fr)
+	}
+	for _, ref := range s.Refs {
+		if ref.Kind != ast.RefMethod || ref.Recv != a.typ || ref.Name == s.Name {
+			continue
 		}
-		for _, ref := range s.Refs {
-			if ref.Kind == ast.RefMethod && ref.Recv == a.typ && ref.Name != s.Name {
-				if _, ok := a.method[ref.Name]; ok && !slices.Contains(m.Calls, ref.Name) {
-					m.Calls = append(m.Calls, ref.Name)
-				}
-			}
-		}
-		slices.SortFunc(m.Uses, func(x, y Use) int { return cmp.Compare(x.Field, y.Field) })
-		slices.Sort(m.Calls)
-		for _, u := range m.Uses {
-			if u.Read {
-				a.fields[u.Field].Readers++
-			}
-			if u.Write {
-				a.fields[u.Field].Writers++
-			}
+		if _, ok := a.method[ref.Name]; ok && !slices.Contains(m.Calls, ref.Name) {
+			m.Calls = append(m.Calls, ref.Name)
 		}
 	}
-	return a
+	slices.SortFunc(m.Uses, func(x, y Use) int { return cmp.Compare(x.Field, y.Field) })
+	slices.Sort(m.Calls)
+	for _, u := range m.Uses {
+		if u.Read {
+			a.fields[u.Field].Readers++
+		}
+		if u.Write {
+			a.fields[u.Field].Writers++
+		}
+	}
+}
+
+// markFieldRef adds to row i the cell or the call a selector on the
+// receiver makes: a field of the type, or another of its methods.
+func (a *analysis) markFieldRef(i int, fr ast.FieldRef) {
+	if fr.Type != a.typ || fr.Pkg != "" {
+		return
+	}
+	m := &a.methods[i]
+	if f, ok := a.field[fr.Name]; ok {
+		m.Uses = append(m.Uses, Use{Field: f, Read: fr.Count > fr.Writes, Write: fr.Writes > 0})
+		return
+	}
+	// A method value, x.M without a call.
+	if j, ok := a.method[fr.Name]; ok && j != i && !slices.Contains(m.Calls, fr.Name) {
+		m.Calls = append(m.Calls, fr.Name)
+	}
 }
 
 // Hubs are columns used by more than half the rows that mark any column,
@@ -434,22 +461,11 @@ func (a *analysis) lcom4(split bool) int {
 	for i := range byField {
 		byField[i] = -1
 	}
-	n := 0
 	for i, m := range a.methods {
 		if !keep(i) {
 			continue
 		}
-		n++
-		for _, u := range m.Uses {
-			if split && (a.fields[u.Field].Hub || a.fields[u.Field].Role == "infrastructure") {
-				continue
-			}
-			if j := byField[u.Field]; j >= 0 {
-				uf.join(i, j)
-			} else {
-				byField[u.Field] = i
-			}
-		}
+		a.lcomJoinColumns(uf, byField, i, split)
 		for _, c := range m.Calls {
 			if j := a.method[c]; keep(j) {
 				uf.join(i, j)
@@ -463,6 +479,22 @@ func (a *analysis) lcom4(split bool) int {
 		}
 	}
 	return len(roots)
+}
+
+// lcomJoinColumns joins row i with the first row to use each of its
+// columns, which byField holds per column, or makes it that row; with
+// split, hubs and infrastructure join nothing.
+func (a *analysis) lcomJoinColumns(uf *union, byField []int, i int, split bool) {
+	for _, u := range a.methods[i].Uses {
+		if split && (a.fields[u.Field].Hub || a.fields[u.Field].Role == "infrastructure") {
+			continue
+		}
+		if j := byField[u.Field]; j >= 0 {
+			uf.join(i, j)
+		} else {
+			byField[u.Field] = i
+		}
+	}
 }
 
 // kinds finds, for each row, the columns that place it in a block. A write
@@ -519,45 +551,66 @@ const minTieGroup = 3
 // fall apart once the row is removed spans blocks, and is set aside too.
 // What stays connected is a block.
 func (a *analysis) block() {
-	placed := func() []int {
-		var out []int
-		for i, m := range a.methods {
-			if m.Kind == "" {
-				out = append(out, i)
-			}
-		}
-		return out
+	if a.asideSharedWrites() {
+		a.kinds() // rows the shared columns placed are placed by what else they use
 	}
+	a.markTies()
+	a.labelBlocks()
+}
+
+// placedRows returns the rows a column places, in order.
+func (a *analysis) placedRows() []int {
+	var out []int
+	for i, m := range a.methods {
+		if m.Kind == "" {
+			out = append(out, i)
+		}
+	}
+	return out
+}
+
+// asideSharedWrites sets aside the columns written from two blocks, and
+// reports whether there were any.
+func (a *analysis) asideSharedWrites() bool {
 	shared := false
-	for _, part := range a.parts(placed(), nil, nil) {
+	for _, part := range a.parts(a.placedRows(), nil, nil) {
 		if len(part) < minTieGroup {
 			continue
 		}
 		for _, f := range a.columns(part) {
-			if a.fields[f].Writers < 2 {
-				continue
-			}
-			writes := func(j int) bool {
-				return slices.ContainsFunc(a.methods[j].Uses, func(u Use) bool { return u.Field == f && u.Write })
-			}
-			n := 0
-			for _, side := range a.parts(part, nil, map[int]bool{f: true}) {
-				own := slices.ContainsFunc(a.columns(side), func(c int) bool { return c != f })
-				if own && slices.ContainsFunc(side, writes) {
-					n++
-				}
-			}
-			if n > 1 {
+			if a.writtenApart(part, f) {
 				a.aside[f], shared = true, true
 			}
 		}
 	}
-	if shared {
-		a.kinds() // rows the shared columns placed are placed by what else they use
-	}
+	return shared
+}
 
+// writtenApart reports whether column f of part is written from two
+// blocks: once it is removed, more than one side of part has columns of
+// its own and a row writing f.
+func (a *analysis) writtenApart(part []int, f int) bool {
+	if a.fields[f].Writers < 2 {
+		return false
+	}
+	writes := func(j int) bool {
+		return slices.ContainsFunc(a.methods[j].Uses, func(u Use) bool { return u.Field == f && u.Write })
+	}
+	n := 0
+	for _, side := range a.parts(part, nil, map[int]bool{f: true}) {
+		own := slices.ContainsFunc(a.columns(side), func(c int) bool { return c != f })
+		if own && slices.ContainsFunc(side, writes) {
+			n++
+		}
+	}
+	return n > 1
+}
+
+// markTies marks the rows spanning blocks: rows marking columns that fall
+// apart once the row is removed.
+func (a *analysis) markTies() {
 	tie := map[int]bool{}
-	for _, part := range a.parts(placed(), nil, nil) {
+	for _, part := range a.parts(a.placedRows(), nil, nil) {
 		if len(part) < minTieGroup {
 			continue
 		}
@@ -574,8 +627,13 @@ func (a *analysis) block() {
 	for i := range tie {
 		a.methods[i].Kind = "tie"
 	}
+}
 
-	parts := a.parts(placed(), nil, nil)
+// labelBlocks makes a block of each part that stays connected, largest
+// first, and labels its columns and rows; hubs and core rows go in the
+// core, and rows spanning blocks list the blocks they span.
+func (a *analysis) labelBlocks() {
+	parts := a.parts(a.placedRows(), nil, nil)
 	slices.SortStableFunc(parts, func(x, y []int) int { return cmp.Or(cmp.Compare(len(y), len(x)), cmp.Compare(x[0], y[0])) })
 	for k, part := range parts {
 		label := blockLabel(k)
@@ -598,14 +656,20 @@ func (a *analysis) block() {
 		case "core":
 			a.methods[i].Block = "core"
 		case "tie":
-			for _, f := range a.edges[i] {
-				if b := a.fields[f].Block; b != "" && !slices.Contains(a.methods[i].Spans, b) {
-					a.methods[i].Spans = append(a.methods[i].Spans, b)
-				}
-			}
-			slices.Sort(a.methods[i].Spans)
+			a.spanTie(i)
 		}
 	}
+}
+
+// spanTie lists, sorted, the blocks of the columns that place row i.
+func (a *analysis) spanTie(i int) {
+	m := &a.methods[i]
+	for _, f := range a.edges[i] {
+		if b := a.fields[f].Block; b != "" && !slices.Contains(m.Spans, b) {
+			m.Spans = append(m.Spans, b)
+		}
+	}
+	slices.Sort(m.Spans)
 }
 
 // apart reports whether the rows that touch the columns cols, as touches
@@ -637,19 +701,7 @@ func (a *analysis) parts(rows []int, skipRows, skipCols map[int]bool) [][]int {
 		}
 	}
 	for i := range in {
-		for _, f := range a.edges[i] {
-			if !skipCols[f] {
-				uf.join(i, len(a.methods)+f)
-			}
-		}
-		if !a.strong[i] {
-			continue
-		}
-		for _, c := range a.methods[i].Calls {
-			if j := a.method[c]; in[j] && a.strong[j] {
-				uf.join(i, j)
-			}
-		}
+		a.joinPartRow(uf, in, skipCols, i)
 	}
 	at := map[int]int{}
 	var out [][]int
@@ -667,6 +719,25 @@ func (a *analysis) parts(rows []int, skipRows, skipCols map[int]bool) [][]int {
 		out[k] = append(out[k], i)
 	}
 	return out
+}
+
+// joinPartRow joins row i with the columns that place it, but those in
+// skipCols, and, if a write or a non-entity column places it, with the
+// rows in in so placed that it calls.
+func (a *analysis) joinPartRow(uf *union, in, skipCols map[int]bool, i int) {
+	for _, f := range a.edges[i] {
+		if !skipCols[f] {
+			uf.join(i, len(a.methods)+f)
+		}
+	}
+	if !a.strong[i] {
+		return
+	}
+	for _, c := range a.methods[i].Calls {
+		if j := a.method[c]; in[j] && a.strong[j] {
+			uf.join(i, j)
+		}
+	}
 }
 
 // columns returns the columns that place the rows, sorted.
@@ -709,68 +780,94 @@ func blockKind(roles []string) string {
 // columns, then hubs, shared writes and the rest, infrastructure last;
 // block rows, then core rows, rows spanning blocks, bridges and free rows.
 func (a *analysis) report(r *Report) {
-	var forder, morder []int
-	for _, b := range a.blocks {
-		forder = append(forder, b.fields...)
-		morder = append(morder, b.methods...)
-	}
-	rest := func(order []int, n int, take func(int) bool) []int {
-		for i := range n {
-			if !slices.Contains(order, i) && take(i) {
-				order = append(order, i)
-			}
-		}
-		return order
-	}
-	forder = rest(forder, len(a.fields), func(i int) bool { return a.fields[i].Hub })
-	forder = rest(forder, len(a.fields), func(i int) bool { return a.fields[i].Role != "infrastructure" && a.fields[i].Role != "unused" })
-	forder = rest(forder, len(a.fields), func(int) bool { return true })
-	for _, kind := range []string{"core", "tie", "bridge", "free"} {
-		morder = rest(morder, len(a.methods), func(i int) bool { return a.methods[i].Kind == kind })
-	}
-
+	forder, morder := a.reportOrder()
 	newField := make([]int, len(a.fields))
 	for k, i := range forder {
 		newField[i] = k
 		r.Fields = append(r.Fields, a.fields[i])
 	}
 	for _, i := range morder {
-		m := a.methods[i]
-		uses := make([]Use, len(m.Uses))
-		for k, u := range m.Uses {
-			uses[k] = Use{Field: newField[u.Field], Read: u.Read, Write: u.Write}
-		}
-		slices.SortFunc(uses, func(x, y Use) int { return cmp.Compare(x.Field, y.Field) })
-		m.Uses = uses
-		r.Methods = append(r.Methods, m)
+		r.Methods = append(r.Methods, a.reportRow(i, newField))
 	}
-	for k, b := range a.blocks {
-		blk := Block{Label: blockLabel(k)}
-		var roles []string
-		for _, f := range b.fields {
-			blk.Fields = append(blk.Fields, a.fields[f].Name)
-			roles = append(roles, a.fields[f].Role)
-		}
-		for _, i := range b.methods {
-			blk.Methods = append(blk.Methods, a.methods[i].Name)
-		}
-		blk.Kind = blockKind(roles)
-		r.Blocks = append(r.Blocks, blk)
+	for k := range a.blocks {
+		r.Blocks = append(r.Blocks, a.reportBlock(k))
 	}
+	if core := a.reportCore(r.Methods); len(core.Fields)+len(core.Methods) > 0 {
+		r.Blocks = append(r.Blocks, core)
+	}
+}
+
+// reportOrder returns the order report puts the columns and the rows in.
+func (a *analysis) reportOrder() (forder, morder []int) {
+	for _, b := range a.blocks {
+		forder = append(forder, b.fields...)
+		morder = append(morder, b.methods...)
+	}
+	forder = appendRemaining(forder, len(a.fields), func(i int) bool { return a.fields[i].Hub })
+	forder = appendRemaining(forder, len(a.fields), func(i int) bool { return a.fields[i].Role != "infrastructure" && a.fields[i].Role != "unused" })
+	forder = appendRemaining(forder, len(a.fields), func(int) bool { return true })
+	for _, kind := range []string{"core", "tie", "bridge", "free"} {
+		morder = appendRemaining(morder, len(a.methods), func(i int) bool { return a.methods[i].Kind == kind })
+	}
+	return forder, morder
+}
+
+// appendRemaining appends to order, in turn, each of 0 to n-1 not yet in
+// it that take accepts.
+func appendRemaining(order []int, n int, take func(int) bool) []int {
+	for i := range n {
+		if !slices.Contains(order, i) && take(i) {
+			order = append(order, i)
+		}
+	}
+	return order
+}
+
+// reportRow returns row i with its cells moved to the columns' new
+// places, newField holding each column's.
+func (a *analysis) reportRow(i int, newField []int) Method {
+	m := a.methods[i]
+	uses := make([]Use, len(m.Uses))
+	for k, u := range m.Uses {
+		uses[k] = Use{Field: newField[u.Field], Read: u.Read, Write: u.Write}
+	}
+	slices.SortFunc(uses, func(x, y Use) int { return cmp.Compare(x.Field, y.Field) })
+	m.Uses = uses
+	return m
+}
+
+// reportBlock returns block k by its columns' and rows' names, with the
+// kind its columns give it.
+func (a *analysis) reportBlock(k int) Block {
+	b := a.blocks[k]
+	blk := Block{Label: blockLabel(k)}
+	var roles []string
+	for _, f := range b.fields {
+		blk.Fields = append(blk.Fields, a.fields[f].Name)
+		roles = append(roles, a.fields[f].Role)
+	}
+	for _, i := range b.methods {
+		blk.Methods = append(blk.Methods, a.methods[i].Name)
+	}
+	blk.Kind = blockKind(roles)
+	return blk
+}
+
+// reportCore returns the core block: the hubs, and the core rows among
+// methods, in their order.
+func (a *analysis) reportCore(methods []Method) Block {
 	core := Block{Label: "core", Kind: "core"}
 	for _, f := range a.fields {
 		if f.Hub {
 			core.Fields = append(core.Fields, f.Name)
 		}
 	}
-	for _, m := range r.Methods {
+	for _, m := range methods {
 		if m.Kind == "core" {
 			core.Methods = append(core.Methods, m.Name)
 		}
 	}
-	if len(core.Fields)+len(core.Methods) > 0 {
-		r.Blocks = append(r.Blocks, core)
-	}
+	return core
 }
 
 func (a *analysis) ties() []Tie {
@@ -791,26 +888,33 @@ func (a *analysis) sharedWrites() []SharedWrite {
 		if fld.Role == "infrastructure" {
 			continue
 		}
-		sw := SharedWrite{Field: fld.Name}
-		for _, m := range a.methods {
-			if m.Block == "" {
-				continue // spanning, bridge or free rows are in no block
-			}
-			for _, u := range m.Uses {
-				if u.Field == f && u.Write {
-					sw.Writers = append(sw.Writers, m.Name)
-					if !slices.Contains(sw.Blocks, m.Block) {
-						sw.Blocks = append(sw.Blocks, m.Block)
-					}
-				}
-			}
-		}
-		if len(sw.Blocks) > 1 {
+		if sw := a.blockWriters(f); len(sw.Blocks) > 1 {
 			slices.Sort(sw.Blocks)
 			out = append(out, sw)
 		}
 	}
 	return out
+}
+
+// blockWriters returns the rows in a block that write column f, and their
+// blocks in the order first met.
+func (a *analysis) blockWriters(f int) SharedWrite {
+	sw := SharedWrite{Field: a.fields[f].Name}
+	for _, m := range a.methods {
+		if m.Block == "" {
+			continue // spanning, bridge or free rows are in no block
+		}
+		for _, u := range m.Uses {
+			if u.Field != f || !u.Write {
+				continue
+			}
+			sw.Writers = append(sw.Writers, m.Name)
+			if !slices.Contains(sw.Blocks, m.Block) {
+				sw.Blocks = append(sw.Blocks, m.Block)
+			}
+		}
+	}
+	return sw
 }
 
 // envy finds columns read only by getters: exported methods of at most one
@@ -821,32 +925,48 @@ func (a *analysis) envy(in Input) []Envy {
 		if fld.Writers > 0 || fld.Readers == 0 || fld.Role == "infrastructure" {
 			continue
 		}
-		e := Envy{Field: fld.Name}
-		only := true
-		for i, m := range a.methods {
-			uses := slices.ContainsFunc(m.Uses, func(u Use) bool { return u.Field == f })
-			if !uses {
-				continue
-			}
-			if !m.Exported || m.Stmts > 1 || len(m.Uses) != 1 || len(m.Calls) > 0 {
-				only = false
-				break
-			}
-			e.Getters = append(e.Getters, m.Name)
-			if in.Clients != nil {
-				for _, c := range in.Clients(a.syms[i]) {
-					if !c.Test && !slices.Contains(e.Clients, c.Package) {
-						e.Clients = append(e.Clients, c.Package)
-					}
-				}
-			}
-		}
-		if only && len(e.Getters) > 0 {
+		if e, only := a.envyGetters(in, f); only && len(e.Getters) > 0 {
 			slices.Sort(e.Clients)
 			out = append(out, e)
 		}
 	}
 	return out
+}
+
+// envyGetters returns the rows using column f and the packages outside
+// tests calling them, and whether all of them are getters; it stops at
+// the first that is not.
+func (a *analysis) envyGetters(in Input, f int) (Envy, bool) {
+	e := Envy{Field: a.fields[f].Name}
+	for i, m := range a.methods {
+		uses := slices.ContainsFunc(m.Uses, func(u Use) bool { return u.Field == f })
+		if !uses {
+			continue
+		}
+		if !isGetter(m) {
+			return e, false
+		}
+		e.Getters = append(e.Getters, m.Name)
+		if in.Clients != nil {
+			addGetterClients(&e, in.Clients(a.syms[i]))
+		}
+	}
+	return e, true
+}
+
+// isGetter reports whether m is a getter: exported, of at most one
+// statement, using one field and calling nothing.
+func isGetter(m Method) bool {
+	return m.Exported && m.Stmts <= 1 && len(m.Uses) == 1 && len(m.Calls) == 0
+}
+
+// addGetterClients adds to e the packages of the clients outside tests.
+func addGetterClients(e *Envy, clients []Client) {
+	for _, c := range clients {
+		if !c.Test && !slices.Contains(e.Clients, c.Package) {
+			e.Clients = append(e.Clients, c.Package)
+		}
+	}
 }
 
 // union is a union-find over n elements.

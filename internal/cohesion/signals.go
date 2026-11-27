@@ -140,6 +140,17 @@ var implicitMethods = set("String", "GoString", "Error", "Format", "Unwrap", "Is
 // into roles: clients connected through the methods they use, once the
 // methods most of them use are set aside.
 func (a *analysis) clients(in Input) ([]ClientRow, []Role, []string) {
+	out, users, unused := a.clientUsage(in)
+	if len(out) == 0 {
+		return nil, nil, unused
+	}
+	return out, a.clientRoles(out, users), unused
+}
+
+// clientUsage reads the clients of the exported methods: a row per client
+// package, sorted by package, the client packages of each method, and the
+// methods no client uses and no interface or the runtime may call.
+func (a *analysis) clientUsage(in Input) ([]ClientRow, map[string][]string, []string) {
 	rows := map[string]*ClientRow{}
 	users := map[string][]string{} // method → client packages
 	var unused []string
@@ -147,25 +158,7 @@ func (a *analysis) clients(in Input) ([]ClientRow, []Role, []string) {
 		if !m.Exported {
 			continue
 		}
-		used := false
-		for _, c := range in.Clients(a.syms[i]) {
-			if c.Test {
-				continue
-			}
-			used = true
-			row := rows[c.Package]
-			if row == nil {
-				row = &ClientRow{Package: c.Package}
-				rows[c.Package] = row
-			}
-			if !slices.Contains(row.Methods, m.Name) {
-				row.Methods = append(row.Methods, m.Name)
-			}
-			row.Calls += c.Calls
-			if !slices.Contains(users[m.Name], c.Package) {
-				users[m.Name] = append(users[m.Name], c.Package)
-			}
-		}
+		used := addClientUses(rows, users, m.Name, in.Clients(a.syms[i]))
 		if !used && !implicitMethods[m.Name] && !in.Interfaces[m.Name] {
 			unused = append(unused, m.Name)
 		}
@@ -175,10 +168,50 @@ func (a *analysis) clients(in Input) ([]ClientRow, []Role, []string) {
 		out = append(out, *r)
 	}
 	slices.SortFunc(out, func(x, y ClientRow) int { return cmp.Compare(x.Package, y.Package) })
-	if len(out) == 0 {
-		return nil, nil, unused
-	}
+	return out, users, unused
+}
 
+// addClientUses adds the clients cs of method m, other than tests, to the
+// rows by package and to the users by method, and reports whether there
+// were any.
+func addClientUses(rows map[string]*ClientRow, users map[string][]string, m string, cs []Client) bool {
+	used := false
+	for _, c := range cs {
+		if c.Test {
+			continue
+		}
+		used = true
+		row := rows[c.Package]
+		if row == nil {
+			row = &ClientRow{Package: c.Package}
+			rows[c.Package] = row
+		}
+		if !slices.Contains(row.Methods, m) {
+			row.Methods = append(row.Methods, m)
+		}
+		row.Calls += c.Calls
+		if !slices.Contains(users[m], c.Package) {
+			users[m] = append(users[m], c.Package)
+		}
+	}
+	return used
+}
+
+// clientRoles groups the client rows out into roles, given the client
+// packages of each method, largest first.
+func (a *analysis) clientRoles(out []ClientRow, users map[string][]string) []Role {
+	var res []Role
+	for _, role := range clientGroups(out, clientUnion(out, users)) {
+		a.roleBlocks(role)
+		res = append(res, *role)
+	}
+	slices.SortStableFunc(res, func(x, y Role) int { return cmp.Compare(len(y.Clients), len(x.Clients)) })
+	return res
+}
+
+// clientUnion joins the clients that use a method in common, other than
+// the hubs: methods most of four or more clients use.
+func clientUnion(out []ClientRow, users map[string][]string) *union {
 	idx := map[string]int{}
 	for i, r := range out {
 		idx[r.Package] = i
@@ -193,6 +226,12 @@ func (a *analysis) clients(in Input) ([]ClientRow, []Role, []string) {
 			uf.join(idx[ps[0]], idx[p])
 		}
 	}
+	return uf
+}
+
+// clientGroups makes a role of each set of clients uf joined, in the order
+// of their first rows, with the methods they use.
+func clientGroups(out []ClientRow, uf *union) []*Role {
 	byRoot := map[int]*Role{}
 	var roles []*Role
 	for i, r := range out {
@@ -210,19 +249,19 @@ func (a *analysis) clients(in Input) ([]ClientRow, []Role, []string) {
 			}
 		}
 	}
-	var res []Role
-	for _, role := range roles {
-		slices.SortFunc(role.Methods, func(x, y string) int { return cmp.Compare(a.method[x], a.method[y]) })
-		for _, m := range role.Methods {
-			if b := a.methods[a.method[m]].Block; b != "" && !slices.Contains(role.Blocks, b) {
-				role.Blocks = append(role.Blocks, b)
-			}
+	return roles
+}
+
+// roleBlocks puts a role's methods in the matrix's order and lists the
+// blocks they fall in.
+func (a *analysis) roleBlocks(role *Role) {
+	slices.SortFunc(role.Methods, func(x, y string) int { return cmp.Compare(a.method[x], a.method[y]) })
+	for _, m := range role.Methods {
+		if b := a.methods[a.method[m]].Block; b != "" && !slices.Contains(role.Blocks, b) {
+			role.Blocks = append(role.Blocks, b)
 		}
-		slices.Sort(role.Blocks)
-		res = append(res, *role)
 	}
-	slices.SortStableFunc(res, func(x, y Role) int { return cmp.Compare(len(y.Clients), len(x.Clients)) })
-	return out, res, unused
+	slices.Sort(role.Blocks)
 }
 
 // Change coupling counts only methods changed at least minChanges times,
@@ -242,23 +281,9 @@ func (a *analysis) coupling(changes map[string][]string) []Coupling {
 			continue
 		}
 		for _, y := range a.methods[i+1:] {
-			cy := changes[y.Name]
-			if len(cy) < minChanges {
-				continue
+			if c, ok := couplingOf(x, y, cx, changes[y.Name]); ok {
+				out = append(out, c)
 			}
-			together := 0
-			for _, sha := range cx {
-				if slices.Contains(cy, sha) {
-					together++
-				}
-			}
-			if together < minTogether || 2*together < min(len(cx), len(cy)) {
-				continue
-			}
-			out = append(out, Coupling{
-				A: x.Name, B: y.Name, Together: together, AChanges: len(cx), BChanges: len(cy),
-				Across: x.Block != "" && y.Block != "" && x.Block != y.Block,
-			})
 		}
 	}
 	slices.SortStableFunc(out, func(p, q Coupling) int {
@@ -274,4 +299,26 @@ func (a *analysis) coupling(changes map[string][]string) []Coupling {
 		out = out[:maxCoupled]
 	}
 	return out
+}
+
+// couplingOf returns the change coupling of methods x and y, changed in
+// the commits cx and cy, and whether they changed together often enough to
+// count.
+func couplingOf(x, y Method, cx, cy []string) (Coupling, bool) {
+	if len(cy) < minChanges {
+		return Coupling{}, false
+	}
+	together := 0
+	for _, sha := range cx {
+		if slices.Contains(cy, sha) {
+			together++
+		}
+	}
+	if together < minTogether || 2*together < min(len(cx), len(cy)) {
+		return Coupling{}, false
+	}
+	return Coupling{
+		A: x.Name, B: y.Name, Together: together, AChanges: len(cx), BChanges: len(cy),
+		Across: x.Block != "" && y.Block != "" && x.Block != y.Block,
+	}, true
 }

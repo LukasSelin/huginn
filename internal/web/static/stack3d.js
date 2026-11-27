@@ -19,6 +19,10 @@
 //   onHover(p, x, y), onPick(p)   the pointer over or a click on package
 //               p, -1 for none, in pixels from the canvas's top left
 //
+// Dragging turns the camera round the point it looks at; dragging with the
+// right or middle button, or with Shift held, moves that point across, the
+// stack following the pointer; the wheel zooms toward the pointer.
+//
 // It returns an object to feed frames to and steer: see the end.
 function Stack3D(canvas, opts = {}) {
   const W = 10; // the map's side, in world units
@@ -65,7 +69,11 @@ function Stack3D(canvas, opts = {}) {
     // How far the packages are from the footprint's centre against the
     // layout, for the spread, and as shown, eased toward it.
     apart: 1, shownApart: 1,
-    ty: 0, // the height the camera looks at, eased
+    ty: 0, // the height of the stack's middle, eased
+    // Where the camera looks against the stack's middle: across in layout
+    // units, so that spreading the packages keeps the same ones in view,
+    // and up in world units.
+    pan: [0, 0, 0],
     az: VIEWS.angle[0], el: VIEWS.angle[1], zoom: 1,
     aim: null, // the [azimuth, elevation] the camera is turning to
     view: opts.build ? 'auto' : 'angle', // the views button pressed, '' once dragged
@@ -194,8 +202,8 @@ function Stack3D(canvas, opts = {}) {
       state.planes[l] = o.v;
     }
     while (state.planes.length && !state.planes[state.planes.length - 1]) state.planes.pop();
-    // The camera looks at the middle of the stack: of what stands now while
-    // building, of the tallest it ever stands otherwise.
+    // The stack's middle: of what stands now while building, of the tallest
+    // it ever stands otherwise.
     const o = { v: state.ty };
     step(o, 'v', ((opts.build ? Math.max(1, layers) : state.depth) - 1) * state.gap / 2, 0.08);
     state.ty = o.v;
@@ -208,18 +216,43 @@ function Stack3D(canvas, opts = {}) {
     return moving;
   }
 
-  // camera returns the view basis for the current angle and zoom: a point
-  // projects to the screen through project.
+  // dist is the camera's distance from the point it looks at, at zoom z.
+  const dist = (z = state.zoom) => (DIST * state.box.half) / z;
+
+  // target is the point the camera looks at and turns round: the stack's
+  // middle, moved by the pan.
+  function target() {
+    const { cx, cz } = state.box, a = state.shownApart, [px, py, pz] = clampPan(state.pan);
+    return [cx + a * px, state.ty + py, cz + a * pz];
+  }
+
+  // clampPan keeps the camera looking at the stack, within the box the
+  // layers standing now span, so that the pan cannot lose it. Zooming
+  // toward a disc stays within it, as the disc is.
+  function clampPan([px, py, pz]) {
+    const half = state.box.half, c = (v, l) => Math.max(-l, Math.min(l, v));
+    return [c(px, half), c(py, state.ty), c(pz, half)];
+  }
+
+  // move moves the point the camera looks at by v, in world units.
+  function move(v) {
+    const a = state.shownApart, p = clampPan(state.pan);
+    state.pan = clampPan([p[0] + v[0] / a, p[1] + v[1], p[2] + v[2] / a]);
+    state.dirty = true;
+  }
+
+  // camera returns the view basis for the current angle, zoom and pan: a
+  // point projects to the screen through project.
   function camera(w, hgt) {
-    const { cx, cz, half } = state.box;
-    const ty = state.ty;
-    const d = (DIST * half) / state.zoom;
-    const cam = [cx + d * Math.cos(state.el) * Math.sin(state.az), ty + d * Math.sin(state.el), cz + d * Math.cos(state.el) * Math.cos(state.az)];
-    const f = norm([cx - cam[0], ty - cam[1], cz - cam[2]]);
+    const [tx, ty, tz] = target();
+    const d = dist();
+    const cam = [tx + d * Math.cos(state.el) * Math.sin(state.az), ty + d * Math.sin(state.el), tz + d * Math.cos(state.el) * Math.cos(state.az)];
+    const f = norm([tx - cam[0], ty - cam[1], tz - cam[2]]);
     const r = norm([-f[2], 0, f[0]]); // f × up
     const u = [r[1] * f[2] - r[2] * f[1], r[2] * f[0] - r[0] * f[2], r[0] * f[1] - r[1] * f[0]];
     return { cam, f, r, u, focal: Math.min(w, hgt) * 1.1, cx: w / 2, cy: hgt / 2 };
   }
+  const onCanvas = () => camera(canvas.clientWidth, canvas.clientHeight);
   function norm(v) {
     const l = Math.hypot(v[0], v[1], v[2]) || 1;
     return [v[0] / l, v[1] / l, v[2] / l];
@@ -439,17 +472,23 @@ function Stack3D(canvas, opts = {}) {
     requestAnimationFrame(loop);
   }
 
-  // hit returns the package whose disc is under the point, nearest first.
-  function hit(x, y) {
-    let best = -1, bestDz = Infinity;
+  // under returns the disc drawn under the point, nearest first, or null.
+  function under(x, y) {
+    let best = null;
     for (const s of state.screen) {
       const rx = Math.max(s.rx, 6), ry = Math.max(s.ry, 6);
-      if (((x - s.x) / rx) ** 2 + ((y - s.y) / ry) ** 2 <= 1 && s.dz < bestDz) {
-        best = s.p;
-        bestDz = s.dz;
-      }
+      if (((x - s.x) / rx) ** 2 + ((y - s.y) / ry) ** 2 <= 1 && (!best || s.dz < best.dz)) best = s;
     }
     return best;
+  }
+  // hit returns the package whose disc is under the point, -1 for none.
+  const hit = (x, y) => under(x, y)?.p ?? -1;
+  // depthAt is how far in front of camera c the point is: the depth of the
+  // disc under it, or of the point the camera looks at. The wheel can turn
+  // twice between drawings, so the depth is taken afresh.
+  function depthAt(x, y, c) {
+    const s = under(x, y);
+    return s ? project(c, worldX(s.p), state.shown[s.p].y, worldZ(s.p))[2] : dist();
   }
 
   // neighbours lists what package p refers to and what refers to it in the
@@ -485,7 +524,28 @@ function Stack3D(canvas, opts = {}) {
     if (state.az - state.aim[0] > Math.PI) state.aim[0] += tau;
   }
 
-  const zoomBy = (k) => { state.zoom = Math.max(0.5, Math.min(8, state.zoom * k)); state.dirty = true; };
+  // zoomBy zooms by k toward the point (x, y) on the canvas, which stays
+  // under the pointer, or toward the middle of the canvas without one.
+  function zoomBy(k, x, y) {
+    const z = Math.max(0.5, Math.min(8, state.zoom * k));
+    if (x != null) {
+      // The point P under the pointer, at depth D, lies (D − d)·f +
+      // D·(sx·r − sy·u)/focal from the target. Moving the camera and the
+      // target toward P by the share the distance shrinks keeps P where it
+      // is on screen.
+      const c = onCanvas(), sx = x - c.cx, sy = y - c.cy, d = dist(), D = depthAt(x, y, c), m = 1 - dist(z) / d;
+      move([0, 1, 2].map((i) => ((D - d) * c.f[i] + (D * (sx * c.r[i] - sy * c.u[i])) / c.focal) * m));
+    }
+    state.zoom = z;
+    state.dirty = true;
+  }
+
+  // panBy moves the stack dx, dy pixels on screen, as measured at depth in
+  // front of the camera: by default, at the point it looks at.
+  function panBy(dx, dy, depth = dist()) {
+    const c = onCanvas(), m = depth / c.focal;
+    move([0, 1, 2].map((i) => (dy * c.u[i] - dx * c.r[i]) * m));
+  }
 
   if (opts.views) for (const b of opts.views.children) b.addEventListener('click', () => look(b.dataset.v));
 
@@ -495,10 +555,19 @@ function Stack3D(canvas, opts = {}) {
     return [e.clientX - r.left, e.clientY - r.top];
   };
   canvas.addEventListener('pointerdown', (e) => {
-    if (e.button) return;
-    drag = { x: e.clientX, y: e.clientY, az: state.az, el: state.el, moved: false };
+    if (e.button > 2) return;
+    if (e.button === 1) e.preventDefault(); // no scrolling by the middle button
+    // The left button turns the camera, unless Shift is held; the others
+    // pan, the disc grabbed keeping under the pointer.
+    const pan = e.button > 0 || e.shiftKey;
+    drag = {
+      x: e.clientX, y: e.clientY, lx: e.clientX, ly: e.clientY, az: state.az, el: state.el,
+      pan, depth: pan ? depthAt(...at(e), onCanvas()) : 0, pick: e.button === 0, moved: false,
+    };
     canvas.setPointerCapture(e.pointerId);
   });
+  // The right button pans, so it opens no menu.
+  canvas.addEventListener('contextmenu', (e) => e.preventDefault());
   canvas.addEventListener('pointermove', (e) => {
     if (drag) {
       const dx = e.clientX - drag.x, dy = e.clientY - drag.y;
@@ -506,8 +575,14 @@ function Stack3D(canvas, opts = {}) {
       if (!drag.moved) {
         drag.moved = true;
         canvas.classList.add('dragging');
-        pressView('');
+        if (!drag.pan) pressView('');
         opts.onHover?.(-1, 0, 0);
+      }
+      if (drag.pan) {
+        panBy(e.clientX - drag.lx, e.clientY - drag.ly, drag.depth);
+        drag.lx = e.clientX;
+        drag.ly = e.clientY;
+        return;
       }
       state.aim = null;
       state.az = drag.az - dx * 0.008;
@@ -522,7 +597,7 @@ function Stack3D(canvas, opts = {}) {
   });
   const endDrag = (e) => {
     if (!drag) return;
-    if (!drag.moved && e.type === 'pointerup') opts.onPick?.(hit(...at(e)));
+    if (!drag.moved && drag.pick && e.type === 'pointerup') opts.onPick?.(hit(...at(e)));
     drag = null;
     canvas.classList.remove('dragging');
   };
@@ -535,7 +610,7 @@ function Stack3D(canvas, opts = {}) {
   });
   canvas.addEventListener('wheel', (e) => {
     e.preventDefault();
-    zoomBy(Math.exp(-e.deltaY * (e.deltaMode === 1 ? 0.05 : e.deltaMode ? 1 : 0.0015)));
+    zoomBy(Math.exp(-e.deltaY * (e.deltaMode === 1 ? 0.05 : e.deltaMode ? 1 : 0.0015)), ...at(e));
   }, { passive: false });
   new ResizeObserver(() => { state.dirty = true; }).observe(canvas);
   document.fonts?.ready.then(() => { state.dirty = true; });
@@ -551,8 +626,13 @@ function Stack3D(canvas, opts = {}) {
     hit,
     look, // 'side' | 'angle' | 'top' | 'auto'
     get view() { return state.view; },
-    zoomBy,
-    resetZoom() { state.zoom = 1; state.dirty = true; },
+    zoomBy, // (k), toward the middle; (k, x, y), toward that point on the canvas
+    // fit zooms back out to the whole stack, looking at its middle.
+    fit() {
+      state.zoom = 1;
+      state.pan = [0, 0, 0];
+      state.dirty = true;
+    },
     setSpread, // the room between the packages, against SPREAD_ROOM
     get zoom() { return state.zoom; },
     // setLit draws package p's references, -1 for the strongest of all;

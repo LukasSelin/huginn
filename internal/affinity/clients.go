@@ -35,116 +35,169 @@ var stdMethods = map[string]string{
 // methods of the type or using them as values. Calls from the type's own
 // methods are counted per row as internal instead.
 func (b *build) clients() {
-	r, a := b.r, b.a
-	idx := a.index()
+	r := b.r
+	list := []Client{}
+	for _, x := range b.gatherClients() {
+		list = append(list, b.finishClient(x))
+	}
+	slices.SortFunc(list, compareClients)
+	for n := range list {
+		b.describeClient(&list[n])
+	}
+	r.Clients = Clients{List: list, Roles: []Role{}, Hubs: []int{}, Uncalled: []Uncalled{}}
+	b.roles()
+	b.blockClients()
+	b.uncalledRows()
+	b.getters()
+}
+
+// clientAcc is a client being gathered, with its callers kept as symbols
+// until they are sorted.
+type clientAcc struct {
+	c       *Client
+	callers []*ast.Symbol
+}
+
+// gatherClients collects the clients of every row's method by name, and
+// each row's callers outside the type.
+func (b *build) gatherClients() map[string]*clientAcc {
 	rowOf := map[*ast.Symbol]int{}
 	for i, s := range b.syms {
 		rowOf[s] = i
 	}
-	type acc struct {
-		c       *Client
-		callers []*ast.Symbol
-	}
-	byName := map[string]*acc{}
+	byName := map[string]*clientAcc{}
 	b.rowCallers = make([][]*ast.Symbol, len(b.syms))
 	for i, s := range b.syms {
-		uses := idx.Uses(s, r.Package)
-		values := idx.ValueUses(s, r.Package)
-		for n, u := range append(uses, values...) {
-			value := n >= len(uses)
-			if value && u.Approximate && a.fieldsIn[path.Dir(u.Caller.Path)][s.Name] {
-				continue // more likely a field of that name
-			}
-			if _, internal := rowOf[u.Caller]; internal {
-				// The type's own calls on its receiver resolve exactly;
-				// the others matched only the name, on another value.
-				if !u.Approximate {
-					r.Rows[i].Internal += u.Calls
-				}
-				continue
-			}
-			if !slices.Contains(b.rowCallers[i], u.Caller) {
-				b.rowCallers[i] = append(b.rowCallers[i], u.Caller)
-			}
-			name, isPkg := u.Package, true
-			if u.Package == r.Package {
-				name, isPkg = u.Caller.Path, false
-			}
-			x := byName[name]
-			if x == nil {
-				x = &acc{c: &Client{Name: name, Package: isPkg, Uses: []ClientUse{}, Callers: []Sym{}, Blocks: []int{}, Approximate: true}}
-				byName[name] = x
-			}
-			k := slices.IndexFunc(x.c.Uses, func(cu ClientUse) bool { return cu.Row == i })
-			if k < 0 {
-				k = len(x.c.Uses)
-				x.c.Uses = append(x.c.Uses, ClientUse{Row: i, Approximate: true})
-			}
-			cu := &x.c.Uses[k]
-			cu.Calls += u.Calls
-			cu.Value = cu.Value || value
-			cu.Approximate = cu.Approximate && u.Approximate
-			x.c.Approximate = x.c.Approximate && u.Approximate
-			if !slices.Contains(x.callers, u.Caller) {
-				x.callers = append(x.callers, u.Caller)
-			}
-		}
+		b.gatherRowClients(i, s, rowOf, byName)
 	}
+	return byName
+}
 
-	list := []Client{}
-	for _, x := range byName {
-		slices.SortFunc(x.c.Uses, func(p, q ClientUse) int { return cmp.Compare(p.Row, q.Row) })
-		slices.SortFunc(x.callers, func(p, q *ast.Symbol) int {
-			return cmp.Or(cmp.Compare(p.Path, q.Path), cmp.Compare(p.StartLine, q.StartLine))
-		})
-		for _, s := range x.callers {
-			x.c.Callers = append(x.c.Callers, a.sym(s))
+// gatherRowClients adds the calls and value uses of row i's method s to
+// the clients in byName, or to the row's internal calls when they come from
+// one of the type's own methods in rowOf.
+func (b *build) gatherRowClients(i int, s *ast.Symbol, rowOf map[*ast.Symbol]int, byName map[string]*clientAcc) {
+	r, a := b.r, b.a
+	idx := a.index()
+	uses := idx.Uses(s, r.Package)
+	values := idx.ValueUses(s, r.Package)
+	for n, u := range append(uses, values...) {
+		value := n >= len(uses)
+		if value && u.Approximate && a.fieldsIn[path.Dir(u.Caller.Path)][s.Name] {
+			continue // more likely a field of that name
 		}
-		for _, cu := range x.c.Uses {
-			if bl := b.rowBlock[cu.Row]; bl >= 0 && !slices.Contains(x.c.Blocks, bl) {
-				x.c.Blocks = append(x.c.Blocks, bl)
+		if _, internal := rowOf[u.Caller]; internal {
+			// The type's own calls on its receiver resolve exactly;
+			// the others matched only the name, on another value.
+			if !u.Approximate {
+				r.Rows[i].Internal += u.Calls
 			}
+			continue
 		}
-		slices.Sort(x.c.Blocks)
-		list = append(list, *x.c)
+		if !slices.Contains(b.rowCallers[i], u.Caller) {
+			b.rowCallers[i] = append(b.rowCallers[i], u.Caller)
+		}
+		b.clientNamed(byName, u.Package, u.Caller).addUse(i, u.Caller, u.Calls, value, u.Approximate)
 	}
-	slices.SortFunc(list, func(p, q Client) int {
-		if p.Package != q.Package {
-			if p.Package {
-				return -1
-			}
-			return 1
-		}
-		return cmp.Compare(p.Name, q.Name)
+}
+
+// clientNamed returns the client a caller in package pkg belongs to,
+// adding it to byName when new: the package, or the caller's file when it
+// is in the type's own package.
+func (b *build) clientNamed(byName map[string]*clientAcc, pkg string, caller *ast.Symbol) *clientAcc {
+	name, isPkg := pkg, true
+	if pkg == b.r.Package {
+		name, isPkg = caller.Path, false
+	}
+	x := byName[name]
+	if x == nil {
+		x = &clientAcc{c: &Client{Name: name, Package: isPkg, Uses: []ClientUse{}, Callers: []Sym{}, Blocks: []int{}, Approximate: true}}
+		byName[name] = x
+	}
+	return x
+}
+
+// addUse adds calls from caller to row i, as a value or not. The use and
+// the client stay approximate only while all their calls matched by name
+// only.
+func (x *clientAcc) addUse(i int, caller *ast.Symbol, calls int, value, approx bool) {
+	k := slices.IndexFunc(x.c.Uses, func(cu ClientUse) bool { return cu.Row == i })
+	if k < 0 {
+		k = len(x.c.Uses)
+		x.c.Uses = append(x.c.Uses, ClientUse{Row: i, Approximate: true})
+	}
+	cu := &x.c.Uses[k]
+	cu.Calls += calls
+	cu.Value = cu.Value || value
+	cu.Approximate = cu.Approximate && approx
+	x.c.Approximate = x.c.Approximate && approx
+	if !slices.Contains(x.callers, caller) {
+		x.callers = append(x.callers, caller)
+	}
+}
+
+// finishClient sorts a gathered client's uses and callers and lists the
+// blocks of the methods it uses.
+func (b *build) finishClient(x *clientAcc) Client {
+	slices.SortFunc(x.c.Uses, func(p, q ClientUse) int { return cmp.Compare(p.Row, q.Row) })
+	slices.SortFunc(x.callers, func(p, q *ast.Symbol) int {
+		return cmp.Or(cmp.Compare(p.Path, q.Path), cmp.Compare(p.StartLine, q.StartLine))
 	})
-	for n := range list {
-		c := &list[n]
-		for _, cu := range c.Uses {
-			r.Rows[cu.Row].Clients++
-		}
-		switch len(c.Blocks) {
-		case 0:
-			c.Text = "uses only methods outside the blocks"
-		case 1:
-			c.Text = fmt.Sprintf("uses only %s (%s)", letter(c.Blocks[0]), r.Blocks[c.Blocks[0]].Label)
-		default:
-			c.Text = fmt.Sprintf("spans %s: a use case; give it a facade rather than splitting along its lines", b.letters(c.Blocks))
-		}
-		if c.Package {
-			c.Interface = b.iface(c)
-		}
+	for _, s := range x.callers {
+		x.c.Callers = append(x.c.Callers, b.a.sym(s))
 	}
-	r.Clients = Clients{List: list, Roles: []Role{}, Hubs: []int{}, Uncalled: []Uncalled{}}
-	b.roles()
+	for _, cu := range x.c.Uses {
+		x.c.Blocks = addBlock(x.c.Blocks, b.rowBlock[cu.Row])
+	}
+	slices.Sort(x.c.Blocks)
+	return *x.c
+}
 
+// compareClients orders the packages before the files of the type's own
+// package, then by name.
+func compareClients(p, q Client) int {
+	if p.Package != q.Package {
+		if p.Package {
+			return -1
+		}
+		return 1
+	}
+	return cmp.Compare(p.Name, q.Name)
+}
+
+// describeClient counts c on the rows it uses, says which blocks it uses
+// and, for a package, writes the interface it could declare.
+func (b *build) describeClient(c *Client) {
+	r := b.r
+	for _, cu := range c.Uses {
+		r.Rows[cu.Row].Clients++
+	}
+	switch len(c.Blocks) {
+	case 0:
+		c.Text = "uses only methods outside the blocks"
+	case 1:
+		c.Text = fmt.Sprintf("uses only %s (%s)", letter(c.Blocks[0]), r.Blocks[c.Blocks[0]].Label)
+	default:
+		c.Text = fmt.Sprintf("spans %s: a use case; give it a facade rather than splitting along its lines", b.letters(c.Blocks))
+	}
+	if c.Package {
+		c.Interface = b.iface(c)
+	}
+}
+
+// blockClients counts each block's clients and the share of them that use
+// no other block.
+func (b *build) blockClients() {
+	r := b.r
 	for nb := range r.Blocks {
 		var users, only int
-		for _, c := range list {
-			if slices.Contains(c.Blocks, nb) {
-				users++
-				if len(c.Blocks) == 1 {
-					only++
-				}
+		for _, c := range r.Clients.List {
+			if !slices.Contains(c.Blocks, nb) {
+				continue
+			}
+			users++
+			if len(c.Blocks) == 1 {
+				only++
 			}
 		}
 		r.Blocks[nb].Clients = users
@@ -153,42 +206,74 @@ func (b *build) clients() {
 			r.Blocks[nb].Agreement = &ag
 		}
 	}
+}
 
-	ifaceMethods := map[string]string{}
-	for _, ss := range a.ifaces {
-		for _, s := range ss {
-			for _, m := range s.Members {
-				if m.Kind == ast.MemberMethod {
-					if _, ok := ifaceMethods[m.Name]; !ok {
-						ifaceMethods[m.Name] = path.Dir(s.Path) + "." + s.Name
-					}
-				}
-			}
-		}
-	}
+// uncalledRows lists the methods nothing calls, from inside the type or
+// out, with why that may be.
+func (b *build) uncalledRows() {
+	r := b.r
+	ifaceMethods := b.a.ifaceMethods()
 	for i, row := range r.Rows {
 		if row.Clients > 0 || row.Internal > 0 || len(b.callers(i)) > 0 {
 			continue
 		}
-		u := Uncalled{Row: i}
-		switch {
-		case stdMethods[row.Method] != "":
-			u.Why = "may implement " + stdMethods[row.Method]
-		case ifaceMethods[row.Method] != "":
-			u.Why = "may implement " + ifaceMethods[row.Method]
-		case row.Exported:
-			u.Why = "exported: may be used outside the repository"
-		default:
-			u.Why = "nothing calls it: delete it"
-		}
-		r.Clients.Uncalled = append(r.Clients.Uncalled, u)
+		r.Clients.Uncalled = append(r.Clients.Uncalled, Uncalled{Row: i, Why: uncalledWhy(row.Method, row.Exported, ifaceMethods)})
 	}
-	b.getters()
+}
+
+// uncalledWhy says why nothing may call a method: it may implement a
+// well-known interface or one in ifaceMethods, be used outside the
+// repository, or be dead.
+func uncalledWhy(method string, exported bool, ifaceMethods map[string]string) string {
+	switch {
+	case stdMethods[method] != "":
+		return "may implement " + stdMethods[method]
+	case ifaceMethods[method] != "":
+		return "may implement " + ifaceMethods[method]
+	case exported:
+		return "exported: may be used outside the repository"
+	default:
+		return "nothing calls it: delete it"
+	}
+}
+
+// ifaceMethods maps the name of each method the live interfaces declare to
+// an interface declaring it.
+func (a *Analyzer) ifaceMethods() map[string]string {
+	out := map[string]string{}
+	for _, ss := range a.ifaces {
+		for _, s := range ss {
+			for _, m := range s.Members {
+				if m.Kind != ast.MemberMethod {
+					continue
+				}
+				if _, ok := out[m.Name]; !ok {
+					out[m.Name] = path.Dir(s.Path) + "." + s.Name
+				}
+			}
+		}
+	}
+	return out
 }
 
 // roles groups the clients linked by the methods they share, leaving out
 // the methods most of them call.
 func (b *build) roles() {
+	r := b.r
+	hub := b.roleHubs()
+	u := b.linkClients(hub)
+	all := make([]int, len(r.Clients.List))
+	for n := range all {
+		all[n] = n
+	}
+	for _, group := range u.groups(all) {
+		r.Clients.Roles = append(r.Clients.Roles, b.roleOf(group, hub))
+	}
+}
+
+// roleHubs marks the methods more than half the clients call, once there
+// are four clients or more, and lists them as the hubs.
+func (b *build) roleHubs() []bool {
 	r := b.r
 	cs := r.Clients.List
 	users := make([]int, len(r.Rows))
@@ -198,16 +283,24 @@ func (b *build) roles() {
 		}
 	}
 	hub := make([]bool, len(r.Rows))
-	if len(cs) >= 4 {
-		for i, n := range users {
-			if float64(n) > 0.5*float64(len(cs)) {
-				hub[i] = true
-				r.Clients.Hubs = append(r.Clients.Hubs, i)
-			}
+	if len(cs) < 4 {
+		return hub
+	}
+	for i, n := range users {
+		if float64(n) > 0.5*float64(len(cs)) {
+			hub[i] = true
+			r.Clients.Hubs = append(r.Clients.Hubs, i)
 		}
 	}
+	return hub
+}
+
+// linkClients joins the clients that use the same method, unless it is a
+// hub.
+func (b *build) linkClients(hub []bool) union {
+	cs := b.r.Clients.List
 	u := newUnion(len(cs))
-	for i := range r.Rows {
+	for i := range b.r.Rows {
 		if hub[i] {
 			continue
 		}
@@ -223,35 +316,35 @@ func (b *build) roles() {
 			}
 		}
 	}
-	all := make([]int, len(cs))
-	for n := range all {
-		all[n] = n
-	}
-	for _, group := range u.groups(all) {
-		role := Role{Clients: group, Rows: []int{}, Blocks: []int{}}
-		var names []string
-		for _, n := range group {
-			cs[n].Role = len(r.Clients.Roles)
-			names = append(names, cs[n].Name)
-			for _, cu := range cs[n].Uses {
-				if !hub[cu.Row] && !slices.Contains(role.Rows, cu.Row) {
-					role.Rows = append(role.Rows, cu.Row)
-				}
+	return u
+}
+
+// roleOf builds the next role from a group of linked clients: the methods
+// they use other than the hubs, and the blocks of those.
+func (b *build) roleOf(group []int, hub []bool) Role {
+	r := b.r
+	cs := r.Clients.List
+	role := Role{Clients: group, Rows: []int{}, Blocks: []int{}}
+	var names []string
+	for _, n := range group {
+		cs[n].Role = len(r.Clients.Roles)
+		names = append(names, cs[n].Name)
+		for _, cu := range cs[n].Uses {
+			if !hub[cu.Row] && !slices.Contains(role.Rows, cu.Row) {
+				role.Rows = append(role.Rows, cu.Row)
 			}
 		}
-		slices.Sort(role.Rows)
-		for _, i := range role.Rows {
-			if bl := b.rowBlock[i]; bl >= 0 && !slices.Contains(role.Blocks, bl) {
-				role.Blocks = append(role.Blocks, bl)
-			}
-		}
-		slices.Sort(role.Blocks)
-		role.Text = join(names, 3) + " use " + or(b.rowNames(role.Rows, 4), "only the most called methods")
-		if len(role.Blocks) > 0 {
-			role.Text += " (" + b.letters(role.Blocks) + ")"
-		}
-		r.Clients.Roles = append(r.Clients.Roles, role)
 	}
+	slices.Sort(role.Rows)
+	for _, i := range role.Rows {
+		role.Blocks = addBlock(role.Blocks, b.rowBlock[i])
+	}
+	slices.Sort(role.Blocks)
+	role.Text = join(names, 3) + " use " + or(b.rowNames(role.Rows, 4), "only the most called methods")
+	if len(role.Blocks) > 0 {
+		role.Text += " (" + b.letters(role.Blocks) + ")"
+	}
+	return role
 }
 
 // getters finds the one-statement methods that only read one field and are
@@ -415,14 +508,19 @@ func qualifyExpr(e goast.Expr, q func(string) goast.Expr) goast.Expr {
 			x.Indices[n] = qualifyExpr(x.Indices[n], q)
 		}
 	case *goast.FuncType:
-		for _, fl := range []*goast.FieldList{x.Params, x.Results} {
-			if fl == nil {
-				continue
-			}
-			for _, f := range fl.List {
-				f.Type = qualifyExpr(f.Type, q)
-			}
-		}
+		qualifyFields(x.Params, q)
+		qualifyFields(x.Results, q)
 	}
 	return e
+}
+
+// qualifyFields qualifies the types of a func type's parameters or
+// results, which may be missing.
+func qualifyFields(fl *goast.FieldList, q func(string) goast.Expr) {
+	if fl == nil {
+		return
+	}
+	for _, f := range fl.List {
+		f.Type = qualifyExpr(f.Type, q)
+	}
 }
