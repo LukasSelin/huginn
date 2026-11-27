@@ -98,77 +98,103 @@ func (m *Member) String() string {
 // typeMembers returns the members of a struct or interface type
 // declaration, or nil for any other type.
 func typeMembers(fset *token.FileSet, sp *goast.TypeSpec) []Member {
-	var out []Member
-	group, prevEnd := 0, 0
-	// next moves to the group of field f: the next one when a blank line
-	// separates f, with its doc comment, from the field before it.
-	next := func(f *goast.Field) {
-		start, end := f.Pos(), f.End()
-		if f.Doc != nil {
-			start = f.Doc.Pos()
-		}
-		if f.Comment != nil {
-			end = f.Comment.End()
-		}
-		if l := fset.Position(start).Line; prevEnd > 0 && l > prevEnd+1 {
-			group++
-		}
-		prevEnd = fset.Position(end).Line
-	}
-	add := func(m Member, n goast.Node) {
-		m.Index = len(out)
-		m.Line = fset.Position(n.Pos()).Line
-		m.Group = group
-		if m.typeKey == "" {
-			m.typeKey = m.Type
-		}
-		out = append(out, m)
-	}
-
+	l := &memberList{fset: fset}
 	switch t := sp.Type.(type) {
 	case *goast.StructType:
-		for _, f := range t.Fields.List {
-			next(f)
-			typ := types.ExprString(f.Type)
-			tag := ""
-			if f.Tag != nil {
-				if s, err := strconv.Unquote(f.Tag.Value); err == nil {
-					tag = s
-				} else {
-					tag = f.Tag.Value
-				}
-			}
-			if len(f.Names) == 0 {
-				name := embeddedName(f.Type)
-				add(Member{Kind: MemberEmbedded, Name: name, Type: typ, Tag: tag, Exported: goast.IsExported(name)}, f)
-				continue
-			}
-			for _, id := range f.Names {
-				add(Member{Kind: MemberField, Name: id.Name, Type: typ, Tag: tag, Exported: goast.IsExported(id.Name)}, id)
-			}
-		}
+		l.structMembers(t)
 	case *goast.InterfaceType:
-		for _, f := range t.Methods.List {
-			next(f)
-			if ft, ok := f.Type.(*goast.FuncType); ok && len(f.Names) > 0 {
-				sig := strings.TrimPrefix(types.ExprString(ft), "func")
-				key := fieldList(ft.Params, "(", ")", false) + fieldList(ft.Results, "(", ")", false)
-				for _, id := range f.Names {
-					add(Member{Kind: MemberMethod, Name: id.Name, Type: sig, Exported: goast.IsExported(id.Name), typeKey: key}, id)
-				}
-				continue
-			}
-			typ := types.ExprString(f.Type)
-			switch f.Type.(type) {
-			case *goast.BinaryExpr, *goast.UnaryExpr:
-				add(Member{Kind: MemberTerm, Type: typ}, f)
-			default:
-				name := embeddedName(f.Type)
-				add(Member{Kind: MemberInterface, Name: name, Type: typ, Exported: goast.IsExported(name)}, f)
-			}
+		l.interfaceMembers(t)
+	}
+	return l.out
+}
+
+// memberList gathers the members of a type in declaration order.
+type memberList struct {
+	fset    *token.FileSet
+	out     []Member
+	group   int // of the field being read
+	prevEnd int // the line the field before it ends on; 0 for none
+}
+
+// next moves to the group of field f: the next one when a blank line
+// separates f, with its doc comment, from the field before it.
+func (l *memberList) next(f *goast.Field) {
+	start, end := f.Pos(), f.End()
+	if f.Doc != nil {
+		start = f.Doc.Pos()
+	}
+	if f.Comment != nil {
+		end = f.Comment.End()
+	}
+	if line := l.fset.Position(start).Line; l.prevEnd > 0 && line > l.prevEnd+1 {
+		l.group++
+	}
+	l.prevEnd = l.fset.Position(end).Line
+}
+
+// add appends m, declared at n, to the current group.
+func (l *memberList) add(m Member, n goast.Node) {
+	m.Index = len(l.out)
+	m.Line = l.fset.Position(n.Pos()).Line
+	m.Group = l.group
+	if m.typeKey == "" {
+		m.typeKey = m.Type
+	}
+	l.out = append(l.out, m)
+}
+
+// structMembers adds each field of a struct type: one member per declared
+// name, or one for an embedded field.
+func (l *memberList) structMembers(t *goast.StructType) {
+	for _, f := range t.Fields.List {
+		l.next(f)
+		typ := types.ExprString(f.Type)
+		tag := fieldTag(f.Tag)
+		if len(f.Names) == 0 {
+			name := embeddedName(f.Type)
+			l.add(Member{Kind: MemberEmbedded, Name: name, Type: typ, Tag: tag, Exported: goast.IsExported(name)}, f)
+			continue
+		}
+		for _, id := range f.Names {
+			l.add(Member{Kind: MemberField, Name: id.Name, Type: typ, Tag: tag, Exported: goast.IsExported(id.Name)}, id)
 		}
 	}
-	return out
+}
+
+// fieldTag returns a struct tag unquoted, or as written when it does not
+// unquote. It is empty when the field has no tag.
+func fieldTag(lit *goast.BasicLit) string {
+	if lit == nil {
+		return ""
+	}
+	if s, err := strconv.Unquote(lit.Value); err == nil {
+		return s
+	}
+	return lit.Value
+}
+
+// interfaceMembers adds each element of an interface type: its methods,
+// embedded interfaces and type terms.
+func (l *memberList) interfaceMembers(t *goast.InterfaceType) {
+	for _, f := range t.Methods.List {
+		l.next(f)
+		if ft, ok := f.Type.(*goast.FuncType); ok && len(f.Names) > 0 {
+			sig := strings.TrimPrefix(types.ExprString(ft), "func")
+			key := fieldList(ft.Params, "(", ")", false) + fieldList(ft.Results, "(", ")", false)
+			for _, id := range f.Names {
+				l.add(Member{Kind: MemberMethod, Name: id.Name, Type: sig, Exported: goast.IsExported(id.Name), typeKey: key}, id)
+			}
+			continue
+		}
+		typ := types.ExprString(f.Type)
+		switch f.Type.(type) {
+		case *goast.BinaryExpr, *goast.UnaryExpr:
+			l.add(Member{Kind: MemberTerm, Type: typ}, f)
+		default:
+			name := embeddedName(f.Type)
+			l.add(Member{Kind: MemberInterface, Name: name, Type: typ, Exported: goast.IsExported(name)}, f)
+		}
+	}
 }
 
 // embeddedName is the field name Go gives an embedded type: its base type
@@ -244,50 +270,14 @@ func DiffMembers(o, n *Symbol) []MemberChange {
 	if o == nil || n == nil || o.Kind != KindType || n.Kind != KindType {
 		return nil
 	}
-	var out []MemberChange
-
-	byKey := map[string]int{}
-	oldKeys := memberKeys(o.Members)
-	for i, k := range oldKeys {
-		byKey[k] = i
-	}
-	matchedOld := make([]bool, len(o.Members))
-	var added []int
-	for j, k := range memberKeys(n.Members) {
-		i, ok := byKey[k]
-		if !ok {
-			added = append(added, j)
-			continue
-		}
-		matchedOld[i] = true
-		om, nm := &o.Members[i], &n.Members[j]
-		var f MemberFlags
-		if om.typeKey != nm.typeKey {
-			f |= MemberRetyped
-		}
-		if om.Tag != nm.Tag {
-			f |= MemberTagChanged
-		}
-		if f != 0 {
-			out = append(out, MemberChange{Flags: f, Old: om, New: nm})
-		}
-	}
+	out, matchedOld, added := matchMembers(o.Members, n.Members)
 
 	for i := range o.Members {
 		if matchedOld[i] {
 			continue
 		}
 		om := &o.Members[i]
-		rename := -1
-		if om.Kind == MemberField || om.Kind == MemberMethod {
-			for x, j := range added {
-				nm := &n.Members[j]
-				if nm.Kind == om.Kind && nm.Index == om.Index && nm.typeKey == om.typeKey {
-					rename = x
-					break
-				}
-			}
-		}
+		rename := renameOf(om, n.Members, added)
 		if rename < 0 {
 			out = append(out, MemberChange{Flags: MemberRemoved, Old: om})
 			continue
@@ -308,6 +298,54 @@ func DiffMembers(o, n *Symbol) []MemberChange {
 		return cmp.Or(cmp.Compare(a.Cur().Index, b.Cur().Index), cmp.Compare(removedFirst(a), removedFirst(b)))
 	})
 	return out
+}
+
+// matchMembers pairs the old and new members of a type by key and reports
+// the pairs whose type or tag changed. It also returns which old members it
+// paired and the indexes of the new members it could not pair, in order.
+func matchMembers(oldMembers, newMembers []Member) (out []MemberChange, matchedOld []bool, added []int) {
+	byKey := map[string]int{}
+	oldKeys := memberKeys(oldMembers)
+	for i, k := range oldKeys {
+		byKey[k] = i
+	}
+	matchedOld = make([]bool, len(oldMembers))
+	for j, k := range memberKeys(newMembers) {
+		i, ok := byKey[k]
+		if !ok {
+			added = append(added, j)
+			continue
+		}
+		matchedOld[i] = true
+		om, nm := &oldMembers[i], &newMembers[j]
+		var f MemberFlags
+		if om.typeKey != nm.typeKey {
+			f |= MemberRetyped
+		}
+		if om.Tag != nm.Tag {
+			f |= MemberTagChanged
+		}
+		if f != 0 {
+			out = append(out, MemberChange{Flags: f, Old: om, New: nm})
+		}
+	}
+	return out, matchedOld, added
+}
+
+// renameOf returns the position in added of the new member that om was
+// renamed to, or -1. Only a field or method can be renamed, and only to one
+// of the same kind with the same type at the same position.
+func renameOf(om *Member, newMembers []Member, added []int) int {
+	if om.Kind != MemberField && om.Kind != MemberMethod {
+		return -1
+	}
+	for x, j := range added {
+		nm := &newMembers[j]
+		if nm.Kind == om.Kind && nm.Index == om.Index && nm.typeKey == om.typeKey {
+			return x
+		}
+	}
+	return -1
 }
 
 func removedFirst(c MemberChange) int {

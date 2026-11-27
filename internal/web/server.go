@@ -81,7 +81,7 @@ type index struct {
 
 	journeys journeys      // built with the prebuilt responses, or on first request
 	affinity affinityState // reports made on request
-	pre      sync.Map      // request key → *encoded, see prebuilt.go
+	pre      responses     // see prebuilt.go
 }
 
 // New returns a server for repo. name labels it in the UI.

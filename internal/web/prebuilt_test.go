@@ -36,7 +36,7 @@ func TestPrebuilt(t *testing.T) {
 		fresh := &index{h: ix.h, cmap: ix.cmap, health: ix.health, silos: silos.Build(ix.h, silos.Options{}), tests: ix.tests, tags: ix.tags}
 		indexRoutes(mux, func() *index { return fresh })
 		mux.ServeHTTP(live, r)
-		if !bytes.Equal(e.(*encoded).body, live.Body.Bytes()) {
+		if !bytes.Equal(e.body, live.Body.Bytes()) {
 			t.Errorf("%s: prebuilt body differs from a fresh one", u)
 		}
 	}

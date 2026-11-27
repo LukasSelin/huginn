@@ -17,30 +17,43 @@ var modeSuffixes = []string{"kind", "mode", "state", "status", "type", "typ", "p
 // groups the fields were declared in. A block's most shared word labels it.
 func (b *build) names() {
 	r := b.r
-	type members struct{ rows, cols []int }
-	byWord := map[string]*members{}
-	var order []string
-	note := func(name string, add func(*members)) {
-		seen := map[string]bool{}
-		for _, w := range words(name) {
-			if seen[w] {
-				continue
-			}
-			seen[w] = true
+	r.Names = Names{Words: b.sharedWords(), Clumps: b.clumps(), Flags: b.modeFlags(), Groups: b.fieldGroups()}
+	for n := range r.Blocks {
+		b.blockWord(&r.Blocks[n])
+	}
+}
+
+// wordMembers are the rows and columns whose names hold a word.
+type wordMembers struct{ rows, cols []int }
+
+// membersByWord gathers the members whose names hold each word, and the
+// words in the order first seen, the columns' before the rows'.
+func (b *build) membersByWord() (order []string, byWord map[string]*wordMembers) {
+	byWord = map[string]*wordMembers{}
+	note := func(name string, add func(*wordMembers)) {
+		for _, w := range uniq(words(name)) {
 			if byWord[w] == nil {
-				byWord[w] = &members{}
+				byWord[w] = &wordMembers{}
 				order = append(order, w)
 			}
 			add(byWord[w])
 		}
 	}
-	for j, c := range r.Columns {
-		note(c.Name, func(m *members) { m.cols = append(m.cols, j) })
+	for j, c := range b.r.Columns {
+		note(c.Name, func(m *wordMembers) { m.cols = append(m.cols, j) })
 	}
-	for i, row := range r.Rows {
-		note(row.Method, func(m *members) { m.rows = append(m.rows, i) })
+	for i, row := range b.r.Rows {
+		note(row.Method, func(m *wordMembers) { m.rows = append(m.rows, i) })
 	}
-	r.Names = Names{Words: []Word{}, Clumps: b.clumps(), Flags: []Flag{}, Groups: []Group{}}
+	return order, byWord
+}
+
+// sharedWords lists the words the names of two or more members share, the
+// most shared first, each with the blocks of those members.
+func (b *build) sharedWords() []Word {
+	r := b.r
+	order, byWord := b.membersByWord()
+	out := []Word{}
 	for _, w := range order {
 		m := byWord[w]
 		if len(m.rows)+len(m.cols) < 2 {
@@ -54,56 +67,55 @@ func (b *build) names() {
 			word.Blocks = addBlock(word.Blocks, r.Columns[j].Block)
 		}
 		slices.Sort(word.Blocks)
-		r.Names.Words = append(r.Names.Words, word)
+		out = append(out, word)
 	}
-	slices.SortStableFunc(r.Names.Words, func(x, y Word) int {
+	slices.SortStableFunc(out, func(x, y Word) int {
 		return cmp.Compare(len(y.Rows)+len(y.Cols), len(x.Rows)+len(x.Cols))
 	})
+	return out
+}
 
-	// A block's word is the one most of its members share, the first seen
-	// on a tie.
-	for n := range r.Blocks {
-		bl := &r.Blocks[n]
-		if bl.Kind == Shared {
-			continue
-		}
-		count := map[string]int{}
-		var seen []string
-		for _, j := range bl.Columns {
-			for _, w := range uniq(words(r.Columns[j].Name)) {
-				if count[w] == 0 {
-					seen = append(seen, w)
-				}
-				count[w]++
+// blockWord gives a block its word and, unless it is the core, makes that
+// its label; a shared block gets none. A block's word is the one most of
+// its members share, the first seen on a tie.
+func (b *build) blockWord(bl *Block) {
+	if bl.Kind == Shared {
+		return
+	}
+	r := b.r
+	count := map[string]int{}
+	var seen []string
+	tally := func(name string) {
+		for _, w := range uniq(words(name)) {
+			if count[w] == 0 {
+				seen = append(seen, w)
 			}
-		}
-		for _, i := range bl.Rows {
-			for _, w := range uniq(words(r.Rows[i].Method)) {
-				if count[w] == 0 {
-					seen = append(seen, w)
-				}
-				count[w]++
-			}
-		}
-		for _, w := range seen {
-			if count[w] >= 2 && (bl.Word == "" || count[w] > count[bl.Word]) {
-				bl.Word = w
-			}
-		}
-		if bl.Word != "" && bl.Kind != Core {
-			bl.Label = bl.Word
+			count[w]++
 		}
 	}
-
-	for j, c := range r.Columns {
-		why := ""
-		lower := strings.ToLower(c.Name)
-		switch {
-		case c.Type == "bool":
-			why = "a flag: each value may be a hidden type or strategy"
-		case slices.ContainsFunc(modeSuffixes, func(s string) bool { return strings.HasSuffix(lower, s) }):
-			why = "named like a mode or state: each value may be a hidden type, with fields valid only in it"
+	for _, j := range bl.Columns {
+		tally(r.Columns[j].Name)
+	}
+	for _, i := range bl.Rows {
+		tally(r.Rows[i].Method)
+	}
+	for _, w := range seen {
+		if count[w] >= 2 && (bl.Word == "" || count[w] > count[bl.Word]) {
+			bl.Word = w
 		}
+	}
+	if bl.Word != "" && bl.Kind != Core {
+		bl.Label = bl.Word
+	}
+}
+
+// modeFlags lists the fields other than infrastructure that look like a
+// flag or a mode, with the methods reading them.
+func (b *build) modeFlags() []Flag {
+	r := b.r
+	out := []Flag{}
+	for j, c := range r.Columns {
+		why := modeWhy(c.Name, c.Type)
 		if why == "" || c.Class == Infra {
 			continue
 		}
@@ -113,9 +125,28 @@ func (b *build) names() {
 				f.Readers = append(f.Readers, i)
 			}
 		}
-		r.Names.Flags = append(r.Names.Flags, f)
+		out = append(out, f)
 	}
+	return out
+}
 
+// modeWhy says why a field of the given name and type looks like a flag or
+// a mode; "" when it does not.
+func modeWhy(name, typ string) string {
+	lower := strings.ToLower(name)
+	switch {
+	case typ == "bool":
+		return "a flag: each value may be a hidden type or strategy"
+	case slices.ContainsFunc(modeSuffixes, func(s string) bool { return strings.HasSuffix(lower, s) }):
+		return "named like a mode or state: each value may be a hidden type, with fields valid only in it"
+	}
+	return ""
+}
+
+// fieldGroups lists the runs of fields declared together, in order, and
+// whether each lies within one block.
+func (b *build) fieldGroups() []Group {
+	r := b.r
 	byGroup := map[int]*Group{}
 	var groups []int
 	for j, c := range r.Columns {
@@ -129,13 +160,15 @@ func (b *build) names() {
 		g.Blocks = addBlock(g.Blocks, c.Block)
 	}
 	slices.Sort(groups)
+	out := []Group{}
 	for _, n := range groups {
 		g := byGroup[n]
 		slices.SortFunc(g.Cols, func(x, y int) int { return cmp.Compare(r.Columns[x].Decl, r.Columns[y].Decl) })
 		slices.Sort(g.Blocks)
 		g.Agrees = len(g.Blocks) <= 1
-		r.Names.Groups = append(r.Names.Groups, *g)
+		out = append(out, *g)
 	}
+	return out
 }
 
 func addBlock(blocks []int, bl int) []int {

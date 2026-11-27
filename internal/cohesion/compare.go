@@ -26,40 +26,47 @@ func Compare(before, after *Report) []Note {
 	case before == nil:
 		return created(after)
 	}
-	var warn, info []Note
-	add := func(w bool, format string, args ...any) {
-		n := Note{Warn: w, Text: fmt.Sprintf(format, args...)}
-		if w {
-			warn = append(warn, n)
-		} else {
-			info = append(info, n)
-		}
-	}
+	var c comparison
+	c.joinedBlocks(before, after)
+	c.newTies(before, after)
+	c.newSharedWrites(before, after)
+	c.blockCount(before, after)
+	c.newHubs(before, after)
+	c.newColumns(before, after)
+	c.newRows(before, after)
+	c.newEnvy(before, after)
+	c.newUnused(before, after)
+	return c.notes()
+}
 
-	// Blocks joined: columns that were in separate blocks now share one.
-	was := map[string]string{} // column → its block before
-	for _, b := range before.Blocks {
-		if b.Label == "core" {
-			continue
-		}
-		for _, f := range b.Fields {
-			was[f] = b.Label
-		}
+// comparison gathers Compare's notes, the warnings apart from the rest so
+// that they come first.
+type comparison struct{ warn, info []Note }
+
+// add formats a note and files it with the warnings or the rest.
+func (c *comparison) add(w bool, format string, args ...any) {
+	n := Note{Warn: w, Text: fmt.Sprintf(format, args...)}
+	if w {
+		c.warn = append(c.warn, n)
+	} else {
+		c.info = append(c.info, n)
 	}
+}
+
+// notes returns the warnings, then the rest.
+func (c *comparison) notes() []Note {
+	return append(c.warn, c.info...)
+}
+
+// joinedBlocks warns of blocks joined: columns that were in separate
+// blocks now share one.
+func (c *comparison) joinedBlocks(before, after *Report) {
+	was := blockByColumn(before) // column → its block before
 	for _, b := range after.Blocks {
 		if b.Label == "core" {
 			continue
 		}
-		parts := map[string][]string{} // block before → its columns now in b
-		var order []string
-		for _, f := range b.Fields {
-			if old := was[f]; old != "" {
-				if _, ok := parts[old]; !ok {
-					order = append(order, old)
-				}
-				parts[old] = append(parts[old], f)
-			}
-		}
+		parts, order := formerBlocks(b.Fields, was)
 		if len(order) < 2 {
 			continue
 		}
@@ -73,77 +80,142 @@ func Compare(before, after *Report) []Note {
 				through = append(through, m)
 			}
 		}
-		add(true, "Joins blocks that were apart: %s are now one block, %s%s.", strings.Join(sets, " and "), b.Label, via(through))
+		c.add(true, "Joins blocks that were apart: %s are now one block, %s%s.", strings.Join(sets, " and "), b.Label, via(through))
 	}
+}
 
+// blockByColumn maps each column of r that is in a block other than the
+// core to the block's label.
+func blockByColumn(r *Report) map[string]string {
+	was := map[string]string{}
+	for _, b := range r.Blocks {
+		if b.Label == "core" {
+			continue
+		}
+		for _, f := range b.Fields {
+			was[f] = b.Label
+		}
+	}
+	return was
+}
+
+// formerBlocks groups the columns fs by the block was says each was in,
+// leaving out those in none: the blocks in the order they first come up,
+// and each one's columns.
+func formerBlocks(fs []string, was map[string]string) (map[string][]string, []string) {
+	parts := map[string][]string{} // block before → its columns among fs
+	var order []string
+	for _, f := range fs {
+		old := was[f]
+		if old == "" {
+			continue
+		}
+		if _, ok := parts[old]; !ok {
+			order = append(order, old)
+		}
+		parts[old] = append(parts[old], f)
+	}
+	return parts, order
+}
+
+// newTies warns of rows the change makes span blocks.
+func (c *comparison) newTies(before, after *Report) {
 	oldTies := names(before.Ties, func(t Tie) string { return t.Method })
 	for _, t := range after.Ties {
 		if !slices.Contains(oldTies, t.Method) {
-			add(true, "%s now spans blocks %s: split it with Extract Method until each piece falls in one block, before splitting the type.",
+			c.add(true, "%s now spans blocks %s: split it with Extract Method until each piece falls in one block, before splitting the type.",
 				t.Method, describeBlocks(after, t.Blocks))
 		}
 	}
+}
+
+// newSharedWrites warns of columns the change makes written from two
+// blocks.
+func (c *comparison) newSharedWrites(before, after *Report) {
 	oldShared := names(before.SharedWrites, func(s SharedWrite) string { return s.Field })
 	for _, s := range after.SharedWrites {
 		if !slices.Contains(oldShared, s.Field) {
-			add(true, "%s is now written from blocks %s (%s): ownership follows writes, so let one block own it and the others pass the value in or ask the owner.",
+			c.add(true, "%s is now written from blocks %s (%s): ownership follows writes, so let one block own it and the others pass the value in or ask the owner.",
 				s.Field, strings.Join(s.Blocks, ", "), strings.Join(s.Writers, ", "))
 		}
 	}
+}
 
+// blockCount notes a change in the number of blocks.
+func (c *comparison) blockCount(before, after *Report) {
 	if b, a := realBlocks(before), realBlocks(after); a != b {
-		add(false, "Blocks: %d, was %d. LCOM4 without hubs and bridges: %d, was %d.", a, b, after.LCOM4Split, before.LCOM4Split)
+		c.add(false, "Blocks: %d, was %d. LCOM4 without hubs and bridges: %d, was %d.", a, b, after.LCOM4Split, before.LCOM4Split)
 	}
+}
+
+// newHubs notes the columns that became hubs.
+func (c *comparison) newHubs(before, after *Report) {
 	for _, f := range after.Fields {
 		if f.Hub && !slices.ContainsFunc(before.Fields, func(o Field) bool { return o.Name == f.Name && o.Hub }) {
-			add(false, "%s is now used by most rows: a hub, set aside to see the blocks.", f.Name)
+			c.add(false, "%s is now used by most rows: a hub, set aside to see the blocks.", f.Name)
 		}
 	}
+}
+
+// newColumns notes the new columns and where they go.
+func (c *comparison) newColumns(before, after *Report) {
 	for _, f := range after.Fields {
 		if slices.ContainsFunc(before.Fields, func(o Field) bool { return o.Name == f.Name }) {
 			continue
 		}
 		switch {
 		case f.Role == "unused":
-			add(false, "New field %s is used by no method.", f.Name)
+			c.add(false, "New field %s is used by no method.", f.Name)
 		case f.Block != "" && f.Block != "core":
-			add(false, "New column %s (%s) goes to block %s.", f.Name, roleName(f.Role), f.Block)
+			c.add(false, "New column %s (%s) goes to block %s.", f.Name, roleName(f.Role), f.Block)
 		default:
-			add(false, "New column %s (%s).", f.Name, roleName(f.Role))
+			c.add(false, "New column %s (%s).", f.Name, roleName(f.Role))
 		}
 	}
-	// New rows, those in a block one by one, the others by pattern.
+}
+
+// newRows notes the new rows, those in a block one by one, the others by
+// pattern.
+func (c *comparison) newRows(before, after *Report) {
 	byKind := map[string][]string{}
 	for _, m := range after.Methods {
 		if slices.ContainsFunc(before.Methods, func(o Method) bool { return o.Name == m.Name }) {
 			continue
 		}
 		if m.Kind == "" {
-			add(false, "New method %s goes to block %s %s.", m.Name, m.Block, fieldSet(blockOf(after, m.Block).Fields))
+			c.add(false, "New method %s goes to block %s %s.", m.Name, m.Block, fieldSet(blockOf(after, m.Block).Fields))
 		}
 		byKind[m.Kind] = append(byKind[m.Kind], m.Name)
 	}
 	if ms := byKind["core"]; len(ms) > 0 {
-		add(false, "New %s %s only the hubs.", methodsWord(ms), verb(ms, "uses", "use"))
+		c.add(false, "New %s %s only the hubs.", methodsWord(ms), verb(ms, "uses", "use"))
 	}
 	if ms := byKind["bridge"]; len(ms) > 0 {
-		add(false, "New bridge %s: %s only other methods, orchestration for a thin coordinator rather than any block.", methodsWord(ms), verb(ms, "it calls", "they call"))
+		c.add(false, "New bridge %s: %s only other methods, orchestration for a thin coordinator rather than any block.", methodsWord(ms), verb(ms, "it calls", "they call"))
 	}
 	if ms := byKind["free"]; len(ms) > 0 {
-		add(false, "New %s %s no field: %s, the safest to move out.", methodsWord(ms), verb(ms, "uses", "use"), verb(ms, "a free function", "free functions"))
+		c.add(false, "New %s %s no field: %s, the safest to move out.", methodsWord(ms), verb(ms, "uses", "use"), verb(ms, "a free function", "free functions"))
 	}
+}
+
+// newEnvy notes the columns the change leaves read only through getters.
+func (c *comparison) newEnvy(before, after *Report) {
 	oldEnvy := names(before.Envy, func(e Envy) string { return e.Field })
 	for _, e := range after.Envy {
 		if !slices.Contains(oldEnvy, e.Field) {
-			add(false, "%s is only read through %s: code outside the type works with it and may belong in its block.", e.Field, strings.Join(e.Getters, ", "))
+			c.add(false, "%s is only read through %s: code outside the type works with it and may belong in its block.", e.Field, strings.Join(e.Getters, ", "))
 		}
 	}
+}
+
+// newUnused notes the new public methods that no caller outside the type
+// uses.
+func (c *comparison) newUnused(before, after *Report) {
 	for _, m := range after.Unused {
 		if !slices.Contains(before.Unused, m) && !slices.ContainsFunc(before.Methods, func(o Method) bool { return o.Name == m }) {
-			add(false, "New public method %s has no callers outside the type: make it private or drop it.", m)
+			c.add(false, "New public method %s has no callers outside the type: make it private or drop it.", m)
 		}
 	}
-	return append(warn, info...)
 }
 
 // created describes a type the change adds.

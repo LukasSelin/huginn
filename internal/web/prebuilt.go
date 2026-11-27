@@ -8,6 +8,7 @@ import (
 	"encoding/hex"
 	"io"
 	"io/fs"
+	"iter"
 	"mime"
 	"net/http"
 	"net/http/httptest"
@@ -15,6 +16,7 @@ import (
 	"path"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"huginn/internal/journey"
@@ -31,6 +33,30 @@ type encoded struct {
 	body, gz []byte
 	ctype    string
 	etag     string
+}
+
+// responses is the prebuilt responses by request key (see requestKey): a
+// sync.Map typed so the compiler checks what goes in and comes out. The
+// zero value is empty and ready to use; it must not be copied.
+type responses struct{ m sync.Map }
+
+// Load returns the response for key, if there is one.
+func (rs *responses) Load(key string) (*encoded, bool) {
+	v, ok := rs.m.Load(key)
+	if !ok {
+		return nil, false
+	}
+	return v.(*encoded), true
+}
+
+// Store sets the response for key.
+func (rs *responses) Store(key string, e *encoded) { rs.m.Store(key, e) }
+
+// All yields every response with its key, in no particular order.
+func (rs *responses) All() iter.Seq2[string, *encoded] {
+	return func(yield func(string, *encoded) bool) {
+		rs.m.Range(func(k, v any) bool { return yield(k.(string), v.(*encoded)) })
+	}
 }
 
 func encode(ctype string, body []byte) *encoded {
@@ -96,7 +122,7 @@ func requestKey(r *http.Request) string {
 func prebuilt(fn func(*index, http.ResponseWriter, *http.Request)) func(*index, http.ResponseWriter, *http.Request) {
 	return func(ix *index, w http.ResponseWriter, r *http.Request) {
 		if e, ok := ix.pre.Load(requestKey(r)); ok {
-			e.(*encoded).serve(w, r)
+			e.serve(w, r)
 			return
 		}
 		fn(ix, w, r)

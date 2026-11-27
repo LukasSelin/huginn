@@ -55,26 +55,32 @@ func ParseSource(path string, src []byte) (*File, error) {
 			s.Refs, s.FieldRefs = funcRefs(fset, imports, d)
 			add(s, d)
 		case *goast.GenDecl:
-			for _, spec := range d.Specs {
-				// An ungrouped declaration spans its keyword; a grouped one only its spec.
-				var node goast.Node = spec
-				if !d.Lparen.IsValid() {
-					node = d
-				}
-				switch sp := spec.(type) {
-				case *goast.TypeSpec:
-					s := typeSymbol(sp)
-					s.Members = typeMembers(fset, sp)
-					add(s, node)
-				case *goast.ValueSpec:
-					for _, s := range valueSymbols(d.Tok, sp) {
-						add(s, node)
-					}
-				}
-			}
+			genDeclSymbols(fset, d, add)
 		}
 	}
 	return out, err
+}
+
+// genDeclSymbols passes the symbols of a type, var or const declaration to
+// add, each with the node its lines are taken from.
+func genDeclSymbols(fset *token.FileSet, d *goast.GenDecl, add func(*Symbol, goast.Node)) {
+	for _, spec := range d.Specs {
+		// An ungrouped declaration spans its keyword; a grouped one only its spec.
+		var node goast.Node = spec
+		if !d.Lparen.IsValid() {
+			node = d
+		}
+		switch sp := spec.(type) {
+		case *goast.TypeSpec:
+			s := typeSymbol(sp)
+			s.Members = typeMembers(fset, sp)
+			add(s, node)
+		case *goast.ValueSpec:
+			for _, s := range valueSymbols(d.Tok, sp) {
+				add(s, node)
+			}
+		}
+	}
 }
 
 func funcSymbol(d *goast.FuncDecl) *Symbol {

@@ -10,6 +10,7 @@ package journey
 
 import (
 	"cmp"
+	"maps"
 	"math"
 	"path"
 	"slices"
@@ -149,59 +150,14 @@ func Build(h *lineage.History, m *codemap.Map, step Step, opts Options) *Journey
 		return j
 	}
 
-	type window struct {
-		start, end time.Time
-		sha        string
-		from, to   int // revisions [from, to)
-	}
-	var windows []window
-	n := h.Revisions()
-	if step == Commit {
-		for i := range n {
-			sha, t := h.RevisionAt(i)
-			windows = append(windows, window{start: t, end: t, sha: sha, from: i, to: i + 1})
-		}
-	} else {
-		_, first := h.RevisionAt(0)
-		cur := step.bucket(first)
-		w := window{start: cur, end: step.next(cur)}
-		for i := range n {
-			_, t := h.RevisionAt(i)
-			for !t.Before(w.end) {
-				w.to = i
-				windows = append(windows, w)
-				w = window{start: w.end, end: step.next(w.end), from: i}
-			}
-		}
-		w.to = n
-		windows = append(windows, w)
-	}
-
 	var frames []Frame
 	var now time.Time
-	for _, w := range windows {
+	for _, w := range frameWindows(h, step) {
 		for i := w.from; i < w.to; i++ {
 			r.apply(i)
 		}
 		f := Frame{Start: w.start, End: w.end, SHA: w.sha, Commits: w.to - w.from, Total: w.to, Live: r.total}
-		edits := map[string]codemap.Kinds{}
-		for _, d := range m.Dirs() {
-			var k codemap.Kinds
-			if step == Commit {
-				// Touches are sorted by time, so look in the commit's
-				// second for its own.
-				for t := range d.Touches(w.start, w.start.Add(time.Second), opts.Tests) {
-					if t.Event.SHA == w.sha {
-						k[codemap.KindIndex(t.Kind)]++
-					}
-				}
-			} else {
-				k = d.Window(w.start, w.end, opts.Tests, 0).Edits
-			}
-			if k.Total() > 0 {
-				edits[d.Path] = k
-			}
-		}
+		edits := dirEdits(m, step, w, opts.Tests)
 		// Departures are judged at the frame's end, or at the latest
 		// commit so far when author times run backwards.
 		now = later(now, w.end)
@@ -211,32 +167,94 @@ func Build(h *lineage.History, m *codemap.Map, step Step, opts Options) *Journey
 	}
 
 	// Index packages by path, now that every one is known.
-	paths := slices.Sorted(func(yield func(string) bool) {
-		for p := range r.peak {
-			if !yield(p) {
-				return
-			}
-		}
-	})
 	idx := map[string]int{}
-	for i, p := range paths {
+	for i, p := range slices.Sorted(maps.Keys(r.peak)) {
 		idx[p] = i
 		j.Packages = append(j.Packages, Package{Path: p, Peak: r.peak[p]})
 	}
 	for fi := range frames {
-		f := &frames[fi]
-		for k := range f.Packages {
-			f.Packages[k].Package = idx[r.names[f.Packages[k].Package]]
-		}
-		slices.SortFunc(f.Packages, func(a, b PackageState) int { return cmp.Compare(a.Package, b.Package) })
-		for k := range f.Deps {
-			f.Deps[k].From, f.Deps[k].To = idx[r.names[f.Deps[k].From]], idx[r.names[f.Deps[k].To]]
-		}
-		slices.SortFunc(f.Deps, func(a, b Dep) int { return cmp.Or(cmp.Compare(a.From, b.From), cmp.Compare(a.To, b.To)) })
+		r.renumber(&frames[fi], idx)
 	}
 	j.Frames = frames
 	layout(j, r.coupling(idx))
 	return j
+}
+
+// window is the span of history one frame covers.
+type window struct {
+	start, end time.Time
+	sha        string
+	from, to   int // revisions [from, to)
+}
+
+// frameWindows cuts h's revisions, of which there is at least one, into
+// windows of the given step.
+func frameWindows(h *lineage.History, step Step) []window {
+	var windows []window
+	n := h.Revisions()
+	if step == Commit {
+		for i := range n {
+			sha, t := h.RevisionAt(i)
+			windows = append(windows, window{start: t, end: t, sha: sha, from: i, to: i + 1})
+		}
+		return windows
+	}
+	_, first := h.RevisionAt(0)
+	cur := step.bucket(first)
+	w := window{start: cur, end: step.next(cur)}
+	for i := range n {
+		_, t := h.RevisionAt(i)
+		for !t.Before(w.end) {
+			w.to = i
+			windows = append(windows, w)
+			w = window{start: w.end, end: step.next(w.end), from: i}
+		}
+	}
+	w.to = n
+	return append(windows, w)
+}
+
+// dirEdits returns the edits in window w per directory that has any.
+func dirEdits(m *codemap.Map, step Step, w window, tests bool) map[string]codemap.Kinds {
+	edits := map[string]codemap.Kinds{}
+	for _, d := range m.Dirs() {
+		var k codemap.Kinds
+		if step == Commit {
+			k = commitEdits(d, w, tests)
+		} else {
+			k = d.Window(w.start, w.end, tests, 0).Edits
+		}
+		if k.Total() > 0 {
+			edits[d.Path] = k
+		}
+	}
+	return edits
+}
+
+// commitEdits counts the edits in d of the commit window w.
+func commitEdits(d *codemap.Dir, w window, tests bool) codemap.Kinds {
+	var k codemap.Kinds
+	// Touches are sorted by time, so look in the commit's second for its
+	// own.
+	for t := range d.Touches(w.start, w.start.Add(time.Second), tests) {
+		if t.Event.SHA == w.sha {
+			k[codemap.KindIndex(t.Kind)]++
+		}
+	}
+	return k
+}
+
+// renumber points f's packages and dependencies, numbered by r.id, at
+// their indexes in idx, and sorts them by those.
+func (r *replay) renumber(f *Frame, idx map[string]int) {
+	for k := range f.Packages {
+		f.Packages[k].Package = idx[r.names[f.Packages[k].Package]]
+	}
+	slices.SortFunc(f.Packages, func(a, b PackageState) int { return cmp.Compare(a.Package, b.Package) })
+	for k := range f.Deps {
+		f.Deps[k].From, f.Deps[k].To = idx[r.names[f.Deps[k].From]], idx[r.names[f.Deps[k].To]]
+	}
+	slices.SortFunc(f.Deps, func(a, b Dep) int { return cmp.Or(cmp.Compare(a.From, b.From), cmp.Compare(a.To, b.To)) })
 }
 
 // replay walks a history revision by revision, keeping the live symbols per
