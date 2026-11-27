@@ -66,7 +66,16 @@
 .scrub { flex: 1 1 200px; min-width: 120px; accent-color: var(--accent); }
 
 /* The picked package and the list of layers */
-.pick { display: flex; flex-direction: column; gap: 10px; padding-bottom: 16px; border-bottom: 1px solid var(--line); }
+.pick { display: flex; flex-direction: column; gap: 10px; }
+/* Finding a package by name, under the choice and over the list it narrows. */
+.find { display: flex; flex-direction: column; gap: 6px; margin-top: -8px; padding-bottom: 16px; border-bottom: 1px solid var(--line); }
+.find input {
+  width: 100%; padding: 8px 10px; border-radius: 7px; border: 1px solid var(--line-strong); background: var(--bg); color: var(--text); font: inherit;
+}
+.find input:focus { outline: 2px solid var(--accent); outline-offset: 0; border-color: transparent; }
+.find p { margin: 0; }
+.find p:empty { display: none; }
+.layers mark { background: none; color: var(--accent); font-weight: 600; }
 .pick-head { display: flex; align-items: flex-start; gap: 8px; }
 .pick-head .sel-name { flex: 1; }
 .pick .close { border: 0; background: none; color: var(--muted); font-size: 18px; line-height: 1; cursor: pointer; padding: 0 2px; }

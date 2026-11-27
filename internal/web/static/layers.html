@@ -108,6 +108,10 @@
 
   <aside class="detail" aria-label="Packages by layer">
     <section class="pick" id="pick" aria-live="polite"></section>
+    <div class="find" role="search">
+      <input type="search" id="find" placeholder="Find a package…" title="Find a package by name (/)" aria-label="Find a package" aria-controls="list" aria-describedby="findNote" autocomplete="off" spellcheck="false">
+      <p class="muted small" id="findNote" aria-live="polite"></p>
+    </div>
     <section aria-labelledby="listHead">
       <h2 class="eyebrow" id="listHead">Layers, top first</h2>
       <div class="layers" id="list"></div>
