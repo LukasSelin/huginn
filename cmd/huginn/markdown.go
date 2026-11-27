@@ -82,28 +82,15 @@ func (m *markdown) focus(rv *review.Review) {
 	if len(shown) == 0 {
 		m.printf("Nothing beyond new code: no existing code is edited and no import between packages starts.\n")
 	}
-	for _, f := range shown {
-		name := code(f.Name)
-		if f.Kind == review.FocusDependency {
-			from, to, _ := strings.Cut(f.Name, " → ")
-			name = code(from) + " → " + code(to)
+	for _, r := range shown {
+		if !r.grouped() {
+			m.focusItem(rv, r.items[0], "", false)
+			continue
 		}
-		where := ""
-		if loc := at(f); loc != "" {
-			where = " at " + code(loc)
-		}
-		codeName := func(s string) string { return code(s) }
-		verdict := ""
-		if ps := rv.PathsOf(f.Change); ps != nil {
-			verdict = mdText(ps.Verdict) + " — "
-		}
-		m.printf("- **%s** %s%s: %s%s\n", focusLabel(f.Kind), name, where, verdict, focusDetail(f, rv.Report, codeName))
-		for _, c := range f.Capabilities {
-			text, loc := capabilityText(f, c, codeName)
-			if loc != "" {
-				text += " at " + code(loc)
-			}
-			m.printf("  - %s\n", text)
+		text, loc := exitText(r, codeName)
+		m.printf("- **%s** %s at %s: %s\n", focusLabel(review.FocusExternal), text, code(loc), exitDetail(r))
+		for _, f := range r.items {
+			m.focusItem(rv, f, "  ", true)
 		}
 	}
 	if more := focusMore(moreOutside, moreEdits); more != "" {
@@ -111,6 +98,37 @@ func (m *markdown) focus(rv *review.Review) {
 	}
 	if tracedNothing(rv) {
 		m.printf("\n%s.\n", strings.ToUpper(noneOutside[:1])+noneOutside[1:])
+	}
+}
+
+// focusItem lists a focus item indented by in: its kind, unless it is
+// grouped under the call it leaves the repository's code by, what it does to
+// its paths, what changed and what it reaches, and how it reaches outside
+// the process.
+func (m *markdown) focusItem(rv *review.Review, f review.Focus, in string, grouped bool) {
+	name := code(f.Name)
+	if f.Kind == review.FocusDependency {
+		from, to, _ := strings.Cut(f.Name, " → ")
+		name = code(from) + " → " + code(to)
+	}
+	if !grouped {
+		name = "**" + focusLabel(f.Kind) + "** " + name
+	}
+	where := ""
+	if loc := at(f); loc != "" {
+		where = " at " + code(loc)
+	}
+	verdict := ""
+	if ps := rv.PathsOf(f.Change); ps != nil {
+		verdict = mdText(ps.Verdict) + " — "
+	}
+	m.printf("%s- %s%s: %s%s\n", in, name, where, verdict, focusDetail(f, rv.Report, codeName))
+	for _, c := range f.Capabilities {
+		text, loc := capabilityText(f, c, codeName, grouped)
+		if loc != "" {
+			text += " at " + code(loc)
+		}
+		m.printf("%s  - %s\n", in, text)
 	}
 }
 
@@ -295,3 +313,6 @@ func code(ss ...string) string {
 	}
 	return strings.Join(out, ", ")
 }
+
+// codeName formats a name as inline code.
+func codeName(s string) string { return code(s) }
