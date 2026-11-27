@@ -39,5 +39,11 @@ jobs:
       - name: go vet
         run: go vet ./...
 
+      # Enforces the package layering in .golangci.yml.
+      - name: golangci-lint
+        uses: golangci/golangci-lint-action@v8
+        with:
+          version: v2.13.2
+
       - name: go test
         run: go test ./...
