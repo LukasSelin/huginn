@@ -1,6 +1,7 @@
 package lineage
 
 import (
+	"slices"
 	"strings"
 	"testing"
 
@@ -207,5 +208,41 @@ func TestSubjects(t *testing.T) {
 		if s != c.subject || d != c.detail {
 			t.Errorf("Subjects(%q) = %q, %q; want %q, %q", c.msg, s, d, c.subject, c.detail)
 		}
+	}
+}
+
+func TestLiveFiles(t *testing.T) {
+	h := newHistory(t)
+	h.commit(map[string]string{
+		"a/a.go":      "package a\n\nimport (\n\t\"fmt\"\n\tstr \"strings\"\n)\n\nfunc A() { fmt.Println(str.ToUpper(\"a\")) }\n\nfunc Gone() {}\n",
+		"b/b.go":      "package b\n\nfunc B() {}\n",
+		"a/a_test.go": "package a\n\nfunc TestA() {}\n",
+	})
+	h.commit(map[string]string{
+		"a/a.go": "package a\n\nimport (\n\t\"fmt\"\n\tstr \"strings\"\n)\n\nfunc A() { fmt.Println(str.ToUpper(\"a\")) }\n\nfunc A2() { fmt.Println() }\n",
+	})
+
+	files := h.h.LiveFiles(func(s *ast.Symbol) bool { return !strings.HasSuffix(s.Path, "_test.go") })
+	var got []string
+	for _, f := range files {
+		var names, imports []string
+		for _, s := range f.Symbols {
+			names = append(names, s.Name)
+			if live := h.h.Lookup(s.Path, s.Key); live == nil || live.Latest() != s {
+				t.Errorf("%s is not the history's latest declaration", s.Name)
+			}
+		}
+		for _, im := range f.Imports {
+			imports = append(imports, im.Path)
+		}
+		got = append(got, f.Path+" "+f.Package+" "+strings.Join(names, ",")+" ["+strings.Join(imports, ",")+"]")
+	}
+	slices.Sort(got)
+	want := []string{"a/a.go a A,A2 [fmt,strings]", "b/b.go b B []"}
+	if !slices.Equal(got, want) {
+		t.Errorf("LiveFiles:\n got %q\nwant %q", got, want)
+	}
+	if n := len(h.h.LiveFiles(nil)); n != 3 {
+		t.Errorf("LiveFiles(nil) has %d files, want 3", n)
 	}
 }
