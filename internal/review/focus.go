@@ -88,9 +88,10 @@ type Focus struct {
 }
 
 // Exit returns the call by which a FocusExternal item's first capability
-// leaves the repository's code. Several functions the change adds or edits
-// often reach outside through the same call; the focus lists the items
-// sharing an exit together (see SameExit), so that call is read once.
+// leaves the code the change adds or edits (see Capability.Exit). Several
+// functions the change adds or edits often reach outside through the same
+// changed call; the focus lists the items sharing an exit together (see
+// SameExit), so that call is read once.
 func (f Focus) Exit() (Step, bool) {
 	if len(f.Capabilities) == 0 {
 		return Step{}, false
@@ -131,7 +132,7 @@ func (f Focus) MarshalJSON() ([]byte, error) {
 // depends on the world, which tests rarely bring along. Of it, existing
 // code the change makes reach somewhere new comes first, then new code,
 // then the rest, each the largest edit reaching the most callers first;
-// and the items leaving the repository's code by the same call come
+// and the items leaving the changed code by the same call come
 // together, where the first of them is.
 func focus(r *semdiff.Report, types []TypeReview, caps map[int][]Capability) []Focus {
 	var external, breaking, behavior []Focus

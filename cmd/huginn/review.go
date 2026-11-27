@@ -176,7 +176,7 @@ const noFocus = "nothing beyond new code: no existing code is edited and no impo
 const noneOutside = "traced with capslock: nothing the change adds or edits reaches the network, files or other programs"
 
 // focusRun is a focus item alone, or the FocusExternal items leaving the
-// repository's code by the same call, which the focus lists together:
+// changed code by the same call, which the focus lists together:
 // items are those shown, of total.
 type focusRun struct {
 	items []review.Focus
@@ -184,7 +184,7 @@ type focusRun struct {
 }
 
 // grouped reports whether the run lists items under the call they leave
-// the repository's code by.
+// the changed code by.
 func (r focusRun) grouped() bool { return r.total > 1 }
 
 // focusRuns cuts the focus into runs: each FocusExternal item with those
@@ -252,17 +252,17 @@ func tracedNothing(rv *review.Review) bool {
 // "network (new): payments.Authorize → http.Get → … → net.(*Dialer).Dial",
 // names formatted by name, and where the call leaving the repository's code
 // is made: "payments/payments.go:6", or "". Listed under the call it leaves
-// the repository's code by (grouped), a path leaving by that call stops
-// there, and where it is made is left to the group to say.
+// the changed code by (grouped), a path leaving by that call stops there,
+// and the rest is left to the group to say.
 func capabilityText(f review.Focus, c review.Capability, name func(string) string, grouped bool) (text, where string) {
 	text = c.Label()
 	if c.New {
 		text += " (new)"
 	}
-	steps, elided := c.Path, c.Elided
-	exit, leaves := c.Exit()
-	if shared, ok := f.Exit(); grouped && ok && leaves && exit == shared {
-		steps, elided, leaves = c.Path[:c.Leaves()+1], 0, false
+	steps, elided, at := c.Path, c.Elided, c.Leaves()
+	exit, ok := c.Exit()
+	if shared, sharedOK := f.Exit(); grouped && ok && sharedOK && exit == shared {
+		steps, elided, at = c.Path[:c.LeavesChange()+1], 0, -1
 	}
 	if len(steps) > 0 && steps[0].Name == f.Name {
 		steps = steps[1:] // the item itself, unless the path starts in a function literal of it
@@ -270,26 +270,33 @@ func capabilityText(f review.Focus, c review.Capability, name func(string) strin
 	if len(steps) > 0 {
 		text += ": " + pathText(steps, elided, name)
 	}
-	if leaves {
-		where = fmt.Sprintf("%s:%d", exit.Path, exit.Line)
+	if at >= 0 {
+		where = fmt.Sprintf("%s:%d", c.Path[at].Path, c.Path[at].Line)
 	}
 	return text, where
 }
 
-// exitText says how the items of a run leave the repository's code: by
-// the call they share and what it leads to, "http.Get → … →
+// exitText says how the items of a run leave the changed code: by the call
+// they share and what it leads to, "client.Do → http.Get → … →
 // net.(*Dialer).DialContext", names formatted by name, made at
 // "payments/payments.go:6".
 func exitText(r focusRun, name func(string) string) (text, where string) {
 	c := r.items[0].Capabilities[0]
-	i := c.Leaves()
+	i := c.LeavesChange()
 	return pathText(c.Path[i:], c.Elided, name), fmt.Sprintf("%s:%d", c.Path[i].Path, c.Path[i].Line)
 }
 
-// exitDetail says how many changes leave the repository's code by a run's
-// call.
-func exitDetail(r focusRun) string {
-	return plural(r.total, "change") + " reach outside through this call"
+// exitDetail says how many changes reach outside through a run's call and,
+// when the path leaves the repository's code further on, where, formatted
+// by code: "2 changes reach outside through this call, leaving the
+// repository's code at client/client.go:9".
+func exitDetail(r focusRun, code func(string) string) string {
+	text := plural(r.total, "change") + " reach outside through this call"
+	c := r.items[0].Capabilities[0]
+	if i := c.Leaves(); i != c.LeavesChange() {
+		text += ", leaving the repository's code at " + code(fmt.Sprintf("%s:%d", c.Path[i].Path, c.Path[i].Line))
+	}
+	return text
 }
 
 // pathText joins the names of a path's steps with arrows, names formatted
@@ -402,7 +409,7 @@ func (p *printer) focus(rv *review.Review) {
 		}
 		text, where := exitText(r, plainName)
 		p.printf("  [%s] %s  %s\n", focusLabel(review.FocusExternal), text, where)
-		p.printf("      %s\n", exitDetail(r))
+		p.printf("      %s\n", exitDetail(r, plainName))
 		for _, f := range r.items {
 			p.focusItem(rv, f, "      ", true)
 		}
@@ -416,7 +423,7 @@ func (p *printer) focus(rv *review.Review) {
 }
 
 // focusItem prints a focus item indented by in: its kind, unless it is
-// grouped under the call it leaves the repository's code by, then what it
+// grouped under the call it leaves the changed code by, then what it
 // does to its paths, what changed and what it reaches, and how it reaches
 // outside the process.
 func (p *printer) focusItem(rv *review.Review, f review.Focus, in string, grouped bool) {

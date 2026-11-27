@@ -190,12 +190,14 @@ func TestReviewCapabilities(t *testing.T) {
 }
 
 // TestReviewCapabilitiesGrouped lists the changes reaching outside the
-// process through the same call under it, their paths there stopping at
-// the call, and the change leaving elsewhere on its own.
+// process under the call by which they leave the changed code, Authorize's
+// call to an unchanged client that goes on to the network, their paths
+// stopping at that call; and the change leaving elsewhere on its own.
 func TestReviewCapabilitiesGrouped(t *testing.T) {
-	network := func(steps ...review.Step) review.Capability {
-		return review.Capability{Name: "NETWORK", New: true, Elided: 1, Path: append(steps,
-			review.Step{Name: "http.Get", Path: "payments/payments.go", Line: 6},
+	network := func(lastChanged int, steps ...review.Step) review.Capability {
+		return review.Capability{Name: "NETWORK", New: true, Elided: 1, LastChanged: lastChanged, Path: append(steps,
+			review.Step{Name: "client.Do", Path: "payments/payments.go", Line: 6},
+			review.Step{Name: "http.Get", Path: "client/client.go", Line: 9},
 			review.Step{Name: "net.(*Dialer).DialContext"})}
 	}
 	rv := &review.Review{
@@ -206,11 +208,11 @@ func TestReviewCapabilitiesGrouped(t *testing.T) {
 		Focus: []review.Focus{{
 			Kind: review.FocusExternal, Name: "payments.Authorize", Path: "payments/payments.go", Line: 5, What: "+1 stmt", Change: 0,
 			Reaches:      []semdiff.Caller{{Name: "billing.Charge", Calls: 1}},
-			Capabilities: []review.Capability{network(review.Step{Name: "payments.Authorize"})},
+			Capabilities: []review.Capability{network(0, review.Step{Name: "payments.Authorize"})},
 		}, {
 			Kind: review.FocusExternal, Name: "billing.Charge", Path: "billing/billing.go", Line: 5, What: "+2 stmts", Change: 1,
 			Capabilities: []review.Capability{
-				network(review.Step{Name: "billing.Charge"}, review.Step{Name: "payments.Authorize", Path: "billing/billing.go", Line: 6}),
+				network(1, review.Step{Name: "billing.Charge"}, review.Step{Name: "payments.Authorize", Path: "billing/billing.go", Line: 6}),
 				{Name: "FILES", Path: []review.Step{{Name: "billing.Charge"}, {Name: "os.ReadFile", Path: "billing/billing.go", Line: 8}}},
 			},
 		}, {
@@ -220,14 +222,14 @@ func TestReviewCapabilitiesGrouped(t *testing.T) {
 	}
 	var text, md bytes.Buffer
 	(&printer{w: &text}).focus(rv)
-	want := "  [external] http.Get → … → net.(*Dialer).DialContext  payments/payments.go:6\n" +
-		"      2 changes reach outside through this call\n" +
+	want := "  [external] client.Do → http.Get → … → net.(*Dialer).DialContext  payments/payments.go:6\n" +
+		"      2 changes reach outside through this call, leaving the repository's code at client/client.go:9\n" +
 		"      payments.Authorize  payments/payments.go:5\n" +
 		"          +1 stmt · called by billing.Charge\n" +
-		"          network (new): http.Get\n" +
+		"          network (new): client.Do\n" +
 		"      billing.Charge  billing/billing.go:5\n" +
 		"          +2 stmts · nothing calls it\n" +
-		"          network (new): payments.Authorize → http.Get\n" +
+		"          network (new): payments.Authorize → client.Do\n" +
 		"          files: os.ReadFile  billing/billing.go:8\n" +
 		"  [external] store.Load  store/store.go:4\n" +
 		"      body edited, same size · nothing calls it\n" +
@@ -236,11 +238,12 @@ func TestReviewCapabilitiesGrouped(t *testing.T) {
 		t.Errorf("text:\n%s\nwant\n%s", text.String(), want)
 	}
 	(&markdown{w: &md}).focus(rv)
-	wantMD := "- **external** `http.Get` → … → `net.(*Dialer).DialContext` at `payments/payments.go:6`: 2 changes reach outside through this call\n" +
+	wantMD := "- **external** `client.Do` → `http.Get` → … → `net.(*Dialer).DialContext` at `payments/payments.go:6`: " +
+		"2 changes reach outside through this call, leaving the repository's code at `client/client.go:9`\n" +
 		"  - `payments.Authorize` at `payments/payments.go:5`: +1 stmt · called by `billing.Charge`\n" +
-		"    - network (new): `http.Get`\n" +
+		"    - network (new): `client.Do`\n" +
 		"  - `billing.Charge` at `billing/billing.go:5`: +2 stmts · nothing calls it\n" +
-		"    - network (new): `payments.Authorize` → `http.Get`\n" +
+		"    - network (new): `payments.Authorize` → `client.Do`\n" +
 		"    - files: `os.ReadFile` at `billing/billing.go:8`\n" +
 		"- **external** `store.Load` at `store/store.go:4`: body edited, same size · nothing calls it\n"
 	if !strings.Contains(md.String(), wantMD) {

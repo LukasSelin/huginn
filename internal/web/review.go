@@ -55,8 +55,9 @@ type typeJSON struct {
 // focusJSON is one thing to look at first, as review.Focus has it: kind is
 // "external", "breaking", "behavior", "dependency" or "structure", and
 // change indexes the changes, -1 for none. Exit is the call an "external"
-// item's first capability leaves the repository's code by; the items right
-// after it sharing that exit (review.Focus.SameExit) are listed with it.
+// item's first capability leaves the code the change adds or edits by; the
+// items right after it sharing that exit (review.Focus.SameExit) are
+// listed with it.
 type focusJSON struct {
 	Kind         string           `json:"kind"`
 	Name         string           `json:"name"`
@@ -73,14 +74,16 @@ type focusJSON struct {
 }
 
 // capabilityJSON is a way out of the process, as review.Capability has it:
-// leaves indexes the step leaving the repository's code, -1 for none.
+// leaves indexes the step leaving the repository's code, and leavesChange
+// the one leaving the code the change adds or edits, -1 for none.
 type capabilityJSON struct {
-	Name   string     `json:"name"`
-	Label  string     `json:"label"`
-	New    bool       `json:"new"`
-	Path   []stepJSON `json:"path"`
-	Elided int        `json:"elided"`
-	Leaves int        `json:"leaves"`
+	Name         string     `json:"name"`
+	Label        string     `json:"label"`
+	New          bool       `json:"new"`
+	Path         []stepJSON `json:"path"`
+	Elided       int        `json:"elided"`
+	Leaves       int        `json:"leaves"`
+	LeavesChange int        `json:"leavesChange"`
 }
 
 type stepJSON struct {
@@ -98,7 +101,7 @@ func focusesJSON(fs []review.Focus) []focusJSON {
 			Change: f.Change, Reaches: callersJSON(f.Reaches), Tests: f.Tests, Implementers: f.Implementers,
 		}
 		for _, c := range f.Capabilities {
-			cj := capabilityJSON{Name: c.Name, Label: c.Label(), New: c.New, Elided: c.Elided, Leaves: c.Leaves()}
+			cj := capabilityJSON{Name: c.Name, Label: c.Label(), New: c.New, Elided: c.Elided, Leaves: c.Leaves(), LeavesChange: c.LeavesChange()}
 			for _, s := range c.Path {
 				cj.Path = append(cj.Path, stepJSON{Package: s.Package, Name: s.Name, Path: s.Path, Line: s.Line})
 			}

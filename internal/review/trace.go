@@ -33,6 +33,11 @@ type Capability struct {
 	// function it finds it in, Elided calls after the one that leaves.
 	Path   []Step
 	Elided int
+
+	// LastChanged indexes in Path the last function on it that the change
+	// adds or edits, 0 for the function itself: the code below it, down to
+	// the call leaving the repository's code, is as it was.
+	LastChanged int
 }
 
 // Step is one call on a path out of the process.
@@ -67,10 +72,24 @@ func (c Capability) Leaves() int {
 	return -1
 }
 
-// Exit returns the call that leaves the repository's code, the step
-// Leaves indexes, unless the function itself has the capability.
+// LeavesChange returns the index in Path of the call that leaves the code
+// the change adds or edits: the call the last function on it the change
+// touches (LastChanged) makes, at most the one leaving the repository's
+// code, or -1 when the function itself has the capability.
+func (c Capability) LeavesChange() int {
+	l := c.Leaves()
+	if l < 0 {
+		return -1
+	}
+	return min(c.LastChanged+1, l)
+}
+
+// Exit returns the call that leaves the code the change adds or edits, the
+// step LeavesChange indexes: below a helper the change starts calling, the
+// call to the helper rather than the one deep inside it that leaves the
+// repository's code.
 func (c Capability) Exit() (Step, bool) {
-	i := c.Leaves()
+	i := c.LeavesChange()
 	if i < 0 {
 		return Step{}, false
 	}
@@ -239,9 +258,13 @@ func (t *Tracer) trace(ctx context.Context, repo *git.Repo, rv *Review, in semdi
 	}
 
 	name := packageNames(in.Tree, pkgOf)
+	changed := map[capslock.Func]bool{}
+	for _, tg := range targets {
+		changed[tg.head] = true
+	}
 	out := map[int][]Capability{}
 	for _, tg := range targets {
-		if caps := tg.capabilities(head, base, baseErr == nil, mods, name); len(caps) > 0 {
+		if caps := tg.capabilities(head, base, baseErr == nil, mods, changed, name); len(caps) > 0 {
 			out[tg.change] = caps
 		}
 	}
@@ -274,8 +297,9 @@ func traceTargets(r *semdiff.Report, pkgOf func(path, pkg string) string, mods m
 
 // capabilities returns what tg reaches outside the process at the head,
 // new ones first, then by how far outside they reach. known says the merge
-// base was traced, so that what is new can be told.
-func (tg target) capabilities(head, base map[string]capslock.Result, known bool, mods modules, name func(string) string) []Capability {
+// base was traced, so that what is new can be told, and changed holds the
+// functions the change adds or edits, to tell where a path leaves them.
+func (tg target) capabilities(head, base map[string]capslock.Result, known bool, mods modules, changed map[capslock.Func]bool, name func(string) string) []Capability {
 	var had map[string]bool // at the merge base; nil when unknown
 	if tg.base.Name != "" && known {
 		had = map[string]bool{}
@@ -290,6 +314,7 @@ func (tg target) capabilities(head, base map[string]capslock.Result, known bool,
 		}
 		cp := shorten(c, mods.contains, name)
 		cp.New = tg.base.Name == "" || (had != nil && !had[c.Name])
+		cp.LastChanged = lastChanged(c.Path, mods.contains, changed)
 		caps = append(caps, cp)
 	}
 	slices.SortStableFunc(caps, newFirst)
@@ -346,6 +371,37 @@ func shorten(c capslock.Capability, inRepo func(string) bool, name func(string) 
 		out.Path = append(out.Path, Step{Package: s.Package, Name: name(s.Package) + "." + s.Name, Path: s.Path, Line: s.Line})
 	}
 	return out
+}
+
+// lastChanged returns the index on a capslock path of the last function in
+// changed before the path leaves the repository's code, a function literal
+// counting as the function declaring it, or 0 when none is. shorten keeps
+// those steps where they are, so the index holds for its path too.
+func lastChanged(path []capslock.Call, inRepo func(string) bool, changed map[capslock.Func]bool) int {
+	last := 0
+	for i, c := range path {
+		if !inRepo(c.Package) {
+			break
+		}
+		if changed[declaring(c)] {
+			last = i
+		}
+	}
+	return last
+}
+
+// declaring returns the declared function a step of a capslock path is
+// in: itself, or for a function literal, "Tree.func1" or
+// "Tree.func1.func2", the function declaring it, "Tree".
+func declaring(c capslock.Call) capslock.Func {
+	name := c.Name
+	for {
+		i := strings.LastIndex(name, ".func")
+		if i < 0 || i+len(".func") == len(name) || strings.Trim(name[i+len(".func"):], "0123456789") != "" {
+			return capslock.Func{Package: c.Package, Name: name}
+		}
+		name = name[:i]
+	}
 }
 
 // modules maps the repository directories holding a go.mod, "." for the
