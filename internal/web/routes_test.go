@@ -377,11 +377,12 @@ func TestAPI(t *testing.T) {
 
 	t.Run("ui", func(t *testing.T) {
 		pages := map[string]string{
-			"/":        "<title>huginn · journey",
-			"/journey": "<title>huginn · journey",
-			"/map":     "<title>huginn · code map",
-			"/health":  "<title>huginn · health",
-			"/layers":  "<title>huginn · layers",
+			"/":         "<title>huginn · journey",
+			"/journey":  "<title>huginn · journey",
+			"/map":      "<title>huginn · code map",
+			"/health":   "<title>huginn · health",
+			"/layers":   "<title>huginn · layers",
+			"/affinity": "<title>huginn · affinity",
 		}
 		for page, title := range pages {
 			rec := httptest.NewRecorder()

@@ -61,9 +61,10 @@ indexed 210 live symbols in 249ms (0 commits cached, 4 walked)
 
 ### `huginn serve`
 
-Indexes the history in the background and serves the journey, layers, map
-and health pages at `http://localhost:7878`, opening on the journey; the
-others are at `/layers`, `/map` and `/health`. While indexing, the pages
+Indexes the history in the background and serves the journey, layers, map,
+health and affinity pages at `http://localhost:7878`, opening on the
+journey; the others are at `/layers`, `/map`, `/health` and `/affinity`.
+While indexing, the pages
 show progress. Once the history is indexed, the server encodes and gzips
 the responses the pages open with (the journey and the layers at every
 step, the health report and knowledge silos, the map's preset windows)
@@ -92,6 +93,16 @@ share a layer and the references between them are drawn red. Drag to turn
 the view, scroll to zoom, and point at or pick a package to light up what
 it refers to and what refers to it.
 
+The affinity page shows what `huginn affinity` prints for one type, picked
+from the types that look like they do too much: the methods against the
+fields, shaded where a method uses a field of its own block, with a toggle
+back to the order they were declared in to see the blocks scatter; point at
+a method to light up its fields and the methods it calls. Below come the
+blocks, the findings, the suggested order, the change coupling as a grid
+of the methods that changed together, the clients with the interfaces they
+could declare, and the names. A followed type or method on the journey
+links to it. The report is built when first asked for and kept.
+
 ```
 $ huginn serve
 huginn: serving http://127.0.0.1:7878
@@ -108,6 +119,8 @@ The UI is backed by a small JSON API:
 | `GET /api/silos` | knowledge silos: packages and symbols ranked by concentration × criticality, each with its reasons, everyone's share of the live code, and pairs coupled across knowledge boundaries |
 | `GET /api/silos/leave?author=name` | what would be orphaned or rest on one person if the named authors (repeat `author` for several) left now, ranked as a hand-over list |
 | `GET /api/layers?step=commit\|week\|month` | every frame's live packages with their layer, and the references between them, marking those that run within a cycle; packages carry the journey's map layout |
+| `GET /api/affinity/types?months=n` | the struct types with methods, ranked by how much they seem to do, with edits counted over the last `n` months (12; 0 for all history) |
+| `GET /api/affinity?type=id\|name=dir.Type&months=n` | one type's affinity report, as `huginn affinity -json` prints it: the matrix, blocks, findings, change coupling, clients, names, suggested order and disagreements |
 
 ### `huginn silos`
 

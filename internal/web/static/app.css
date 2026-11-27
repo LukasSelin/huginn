@@ -102,6 +102,11 @@ a.btn:hover { border-color: var(--accent); color: var(--text); }
 .stat strong { font-size: 20px; font-weight: 600; }
 .detail details summary { cursor: pointer; }
 
+@media (max-width: 480px) {
+  .top { padding: 12px 16px; }
+  .views a { padding: 7px 10px; }
+}
+
 @media (max-width: 700px) {
   .stats { grid-template-columns: 1fr 1fr; }
   .outline, .detail { border: 0; border-bottom: 1px solid var(--line); }
