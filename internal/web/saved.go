@@ -77,11 +77,11 @@ func (s *Server) loadSaved(key string) map[string]*encoded {
 	if name == "" || key == "" {
 		return nil
 	}
-	f, err := os.Open(name)
+	f, err := os.Open(name) //nolint:gosec // G304: the server's own cache file, not request input
 	if err != nil {
 		return nil
 	}
-	defer f.Close()
+	defer func() { _ = f.Close() }() // read only: nothing to lose
 	dec := gob.NewDecoder(bufio.NewReader(f))
 	var h savedHeader
 	var rs []savedResponse
@@ -118,7 +118,7 @@ func (s *Server) save(key string, ix *index) (err error) {
 	})
 
 	dir := filepath.Dir(name)
-	if err := os.MkdirAll(dir, 0o755); err != nil {
+	if err = os.MkdirAll(dir, 0o750); err != nil {
 		return err
 	}
 	tmp, err := os.CreateTemp(dir, "responses-*.tmp")
@@ -127,8 +127,9 @@ func (s *Server) save(key string, ix *index) (err error) {
 	}
 	defer func() {
 		if err != nil {
-			tmp.Close()
-			os.Remove(tmp.Name())
+			// Best effort: err already says what went wrong.
+			_ = tmp.Close()
+			_ = os.Remove(tmp.Name())
 		}
 	}()
 	w := bufio.NewWriter(tmp)

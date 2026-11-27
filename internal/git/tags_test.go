@@ -24,7 +24,7 @@ func TestTags(t *testing.T) {
 	r.Git("tag", "-a", "-m", "v0.2.0", "v0.2.0")
 	r.Git("tag", "tree", "HEAD^{tree}") // not a commit: skipped
 
-	repo, err := Open(r.Dir)
+	repo, err := Open(context.Background(), r.Dir)
 	if err != nil {
 		t.Fatal(err)
 	}

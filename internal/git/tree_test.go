@@ -11,7 +11,7 @@ import (
 
 func (r *testRepo) open() *Repo {
 	r.T.Helper()
-	repo, err := Open(r.Dir)
+	repo, err := Open(context.Background(), r.Dir)
 	if err != nil {
 		r.T.Fatal(err)
 	}
@@ -75,8 +75,8 @@ func TestDiff(t *testing.T) {
 	// The generated side is still handed out, but the commit's own diff
 	// treats it as absent.
 	wantChanges := []string{"Distance body", "Kind deleted", "Fresh added", "Legacy deleted"}
-	if got := summary(c.Changes); !slices.Equal(got, wantChanges) {
-		t.Errorf("changes = %q, want %q", got, wantChanges)
+	if gotChanges := summary(c.Changes); !slices.Equal(gotChanges, wantChanges) {
+		t.Errorf("changes = %q, want %q", gotChanges, wantChanges)
 	}
 
 	_, files, err = repo.Diff(context.Background(), root, Options{IncludeGenerated: true})

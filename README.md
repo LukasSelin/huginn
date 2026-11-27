@@ -37,6 +37,7 @@ go test ./...
 huginn symbols [-C dir] [-branch rev] [-tests] [-no-cache] name
 huginn serve [-C dir] [-branch rev] [-tests] [-no-cache] [-addr host:port]
 huginn semdiff [-C dir] [-include-generated] [-callers n] rev
+huginn review [-C dir] [-base rev] [-head rev] [-format text|markdown|json] [-callers n] [folder ...]
 huginn silos [-C dir] [-branch rev] [-no-cache] [-n count] [-leaves name,...]
 huginn affinity [-C dir] [-branch rev] [-tests] [-no-cache] [-months n] [-hub share] [-min-co n] [-n count] [-json] [type]
 ```
@@ -62,11 +63,12 @@ indexed 210 live symbols in 249ms (0 commits cached, 4 walked)
 ### `huginn serve`
 
 Indexes the history in the background and serves the journey, layers, map,
-health and affinity pages at `http://localhost:7878`, opening on the
-journey; the others are at `/layers`, `/map`, `/health` and `/affinity`.
-While indexing, the pages
-show progress. Once the history is indexed, the server encodes and gzips
-the responses the pages open with (the journey and the layers at every
+health, review and affinity pages at `http://localhost:7878`, opening on
+the journey; the others are at `/layers`, `/map`, `/health`, `/review` (see
+[`huginn review`](#huginn-review)) and `/affinity` (see
+[`huginn affinity`](#huginn-affinity)). While indexing, the pages show
+progress. Once the history is indexed, the server encodes and gzips the
+responses the pages open with (the journey and the layers at every
 step, the health report and knowledge silos, the map's preset windows)
 before it reports ready, then the per-directory views in the background, so
 the pages draw from memory.
@@ -121,6 +123,8 @@ The UI is backed by a small JSON API:
 | `GET /api/layers?step=commit\|week\|month` | every frame's live packages with their layer, and the references between them, marking those that run within a cycle; packages carry the journey's map layout |
 | `GET /api/affinity/types?months=n` | the struct types with methods, ranked by how much they seem to do, with edits counted over the last `n` months (12; 0 for all history) |
 | `GET /api/affinity?type=id\|name=dir.Type&months=n` | one type's affinity report, as `huginn affinity -json` prints it: the matrix, blocks, findings, change coupling, clients, names, suggested order and disagreements |
+| `GET /api/review?head=rev&base=rev&path=dir` | a merge request's review, as `huginn review` reports it: `head` defaults to `HEAD`, `base` to the remote's default branch, and `path`, repeated, limits it to folders; works while indexing |
+| `GET /api/review/options?head=rev` | what the review page offers to pick from: the branch checked out, the default target, every branch, and the directories holding Go code at `head` |
 
 ### `huginn silos`
 
@@ -303,6 +307,117 @@ Blast radius
   git.(*walker).parse  internal/git/walk.go:280  ×1
 ```
 
+When the commit starts or stops imports between the repository's packages,
+or references from one package's declarations to another's, a *Relations*
+section lists them, as `huginn review` does.
+
+### `huginn review`
+
+Reviews a merge request: everything its head changes since the merge base
+with the branch it goes into, as one semantic diff. Point it at a folder to
+review only that part of the repository:
+
+```bash
+huginn review services/billing                     # from inside the repository
+huginn review ~/src/backend/services/billing       # the folder says which repository
+huginn review -C ~/src/backend -head origin/feature services/billing
+```
+
+Folders are relative to `-C` (default: the current directory), and the
+repository is the first folder's when `-C` is not given. Several folders, or
+single files, can be given; none means the whole repository. A folder need
+not exist in the working tree, since the merge request may add or remove it.
+
+`-head` is the merge request's branch (default `HEAD`). `-base` is the
+branch it goes into. Without it, huginn takes the target from GitLab's merge
+request pipelines (`CI_MERGE_REQUEST_DIFF_BASE_SHA`, else
+`origin/$CI_MERGE_REQUEST_TARGET_BRANCH_NAME`) or GitHub's pull request
+workflows (`origin/$GITHUB_BASE_REF`), and otherwise the remote's default
+branch (`origin/HEAD`, else `origin/main`, `origin/master`, `main` or
+`master`). Either way the head is compared from the merge base, as the merge
+request's own diff is.
+
+The report puts first what the change reaches, then what it is made of:
+
+- **Impact** is the blast radius: the existing declarations anywhere in the
+  repository that use what changed. With folders, it says how much of that
+  lies outside them, and in which packages; such callers are marked
+  `outside`.
+- **Relations** are the imports between packages that the merge request
+  starts (`+`) and stops (`−`), each with the references along it, from a
+  changed declaration to a declaration of the other package, and then the
+  references it starts and stops along imports that stay. With folders,
+  only relations with one end inside them are kept, and those that cross
+  the boundary say so: *out of the scope* for a new dependency of the
+  folder, *into the scope* for new code elsewhere that depends on it. A
+  reference that follows a symbol the change renames counts as neither
+  started nor stopped. Test files are left out, since nothing imports them;
+  so are packages from outside the repository. References come from
+  function bodies, so a package used only in signatures or type
+  definitions shows the files that import it instead.
+- **Files**, **Changes** and **Noise** are as in `huginn semdiff`.
+
+```
+$ huginn review -base dbe0403 -head 371dfd2 -callers 1 internal/web
+review 371dfd2 into dbe0403
+from merge base dbe0403 · 1 commit
+scope: internal/web
+
++208 −5 lines → 26 semantic changes across 26 symbols
+added 18 · body edit 8
+
+Impact
+  22 call sites (approx.) in 15 declarations, 2 packages
+  outside the scope: 1 call site in 1 declaration, 1 package
+    huginn/cmd/huginn
+  web.TestPrebuilt  internal/web/prebuilt_test.go:17  ×5 (approx., test)
+  web.(*Server).prebuild  internal/web/prebuilt.go:106  ×2
+  web.TestSavedResponses  internal/web/saved_test.go:14  ×2 (approx., test)
+  … and 12 more
+
+Relations
+  + huginn/internal/web → huginn/internal/silos  (out of the scope)
+      web.(*Server).Index → silos.Build  internal/web/server.go:90  ×1
+      … and 3 more
+
+Files
+  internal/web/prebuilt.go       +1 −1       1 symbol: body edit
+…
+```
+
+`-format markdown` writes the same report for a merge request comment,
+with the changes and files folded away; `-format json` writes it for other
+tools. In a GitLab merge request pipeline, a job like this one posts it on
+the merge request. It needs an image with Go, git and `glab`, and a token
+that may comment, here in `GITLAB_TOKEN`; `GIT_DEPTH: 0` fetches enough
+history to reach the merge base.
+
+```yaml
+huginn-review:
+  rules:
+    - if: $CI_PIPELINE_SOURCE == "merge_request_event"
+  variables:
+    GIT_DEPTH: 0
+  script:
+    - git clone --depth 1 https://github.com/LukasSelin/huginn.git /tmp/huginn
+    - (cd /tmp/huginn && go install ./cmd/huginn)
+    - huginn review -format markdown services/billing > review.md
+    - glab mr note "$CI_MERGE_REQUEST_IID" --message "$(cat review.md)"
+```
+
+`huginn serve` has the same review as a page, at `/review`. Pick the
+merge request's branch, the branch it goes into and any folders (each
+field suggests what the repository has), and the page reviews it without
+waiting for the history to be indexed. What it reviews is kept in the
+address, as `/review?head=feature&path=services/billing`, so a review can be
+shared or bookmarked. Under the numbers, a diagram lays the packages out
+in three columns: in the middle what changed (with folders, the packages in
+them), on the left the packages that call into it, and on the right those
+it uses. Its lines are the calls into what changed, weighted by call sites,
+and the imports and references the merge request starts and stops; point
+at a package to trace its lines, and pick it to narrow the callers,
+relations and changes listed below to the ones that involve it.
+
 ## Architecture
 
 ```
@@ -311,8 +426,9 @@ git log / cat-file ──► internal/git ──► internal/ast ──► inter
                                         Diff              ▲   │
                                                           │   ▼
                                                    .git/huginn cache
-                       internal/git ──► internal/ast ──► internal/semdiff ──► huginn semdiff
-                       Diff, Tree                        callers, blast radius
+                       internal/git ──► internal/ast ──► internal/semdiff ──► huginn semdiff, review
+                       Diff, DiffRange,                  callers, blast radius,
+                       Tree                              relations
 ```
 
 - **internal/git** runs one `git log --raw --numstat -z` process that streams
@@ -320,7 +436,9 @@ git log / cat-file ──► internal/git ──► internal/ast ──► inter
   that serves blob contents. Each commit is diffed against its first parent.
   Blobs parsed for one commit are reused for the next, so along a linear
   history most files are read and parsed once. `Repo.Diff` and `Repo.Tree`
-  give a single commit's file pairs and a whole tree for `semdiff`.
+  give a single commit's file pairs and a whole tree for `semdiff`;
+  `Repo.DiffRange` gives the file pairs between any two commits, such as a
+  merge request's merge base and head, for `review`.
 - **internal/ast** turns a Go file into symbols with `ParseSource`: kind,
   qualified name, canonical signature, line span, statement count, cyclomatic
   complexity, a body hash that ignores formatting and comments, and the
@@ -332,8 +450,14 @@ git log / cat-file ──► internal/git ──► internal/ast ──► inter
   `Cache`, it only walks commits it has not seen before (see below).
 - **internal/web** serves the timeline UI (embedded static files) and its
   JSON API from an in-memory index built once at startup.
-- **internal/semdiff** reports one commit: changed symbols, the callers of
-  each across the tree at that commit, and the commit's blast radius.
+- **internal/semdiff** reports one commit, or a merge request's whole
+  range: changed symbols, the callers of each across the tree at the head,
+  the blast radius, and the relations between packages it starts and stops,
+  optionally limited to a scope of folders. The tree before the change is
+  the tree after it with the changed files' old sides put back, so only
+  one tree is read. **internal/review** finds a merge request's target and
+  merge base and builds that report over its range, for `huginn review` and
+  the review page.
 - **internal/knowledge** is the knowledge model: each author's decayed weight
   in each live symbol, and who counts as departed. The journey rolls it up
   per package frame by frame; **internal/silos** reads it at the last
@@ -347,6 +471,21 @@ git log / cat-file ──► internal/git ──► internal/ast ──► inter
   internal/ast, clustered into blocks; its methods' co-changes from the
   lineage; and its callers, from semdiff's index over the live tree (with
   method values, `Index.ValueUses`).
+
+The packages are stacked in layers, and depguard rules in `.golangci.yml`
+keep them that way: foundation (`ast`, `git`, `modpath`), history
+(`lineage`, `knowledge`, `codemap`), analyses (`journey`, `health`,
+`semdiff`), reports (`story`, `silos`, `review`), then `web` and `cmd/huginn`. A
+package may import the layers below its own; analyses don't import each
+other, and neither do reports. Only test files may import
+`internal/gittest`. CI runs `golangci-lint run`, which fails on an import
+that breaks these rules; a new package needs a layer in `.golangci.yml`
+before others can import it.
+
+Side effects stay in place the same way: only `internal/git` runs programs
+(`os/exec`), and only `web` and `cmd/huginn` use the network. Outside
+`cmd/huginn` and tests, code doesn't exit, print to stdout or make a root
+context; it takes a `context.Context` and an `io.Writer` from its caller.
 
 ### Index cache
 

@@ -22,7 +22,7 @@ func commitAs(r *gittest.Repo, who, msg string, files map[string]string) string 
 // build indexes r, tests included, and finds its silos.
 func build(t *testing.T, r *gittest.Repo) *Report {
 	t.Helper()
-	repo, err := git.Open(r.Dir)
+	repo, err := git.Open(context.Background(), r.Dir)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -163,7 +163,7 @@ func TestRiskRanking(t *testing.T) {
 	}
 
 	// util is shared three ways, so no one holds half of it.
-	if _, ok := find(rep.Packages, riskUnit, "util"); ok {
+	if _, found := find(rep.Packages, riskUnit, "util"); found {
 		t.Errorf("util ranked as a silo")
 	}
 	store, ok := find(rep.Packages, riskUnit, "store")

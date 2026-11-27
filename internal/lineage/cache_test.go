@@ -3,6 +3,7 @@ package lineage
 import (
 	"context"
 	"encoding/gob"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -31,7 +32,7 @@ func dump(h *History) []string {
 
 func build(t *testing.T, r *gittest.Repo, opts BuildOptions) *History {
 	t.Helper()
-	repo, err := git.Open(r.Dir)
+	repo, err := git.Open(context.Background(), r.Dir)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -136,8 +137,8 @@ func TestCacheDiscarded(t *testing.T) {
 			if err != nil {
 				return err
 			}
-			defer f.Close()
-			return gob.NewEncoder(f).Encode(cacheHeader{Version: cacheVersion + 1, Shape: cacheShape})
+			err = gob.NewEncoder(f).Encode(cacheHeader{Version: cacheVersion + 1, Shape: cacheShape})
+			return errors.Join(err, f.Close())
 		},
 		// Another branch's build at the same version, with other ast types.
 		"shape": func(path string) error {
@@ -145,8 +146,8 @@ func TestCacheDiscarded(t *testing.T) {
 			if err != nil {
 				return err
 			}
-			defer f.Close()
-			return gob.NewEncoder(f).Encode(cacheHeader{Version: cacheVersion, Shape: "another"})
+			err = gob.NewEncoder(f).Encode(cacheHeader{Version: cacheVersion, Shape: "another"})
+			return errors.Join(err, f.Close())
 		},
 		"truncated": func(path string) error {
 			b, err := os.ReadFile(path)

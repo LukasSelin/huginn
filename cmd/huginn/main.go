@@ -7,8 +7,8 @@
 //
 //	huginn serve [-C dir] [-branch rev] [-tests] [-no-cache] [-addr host:port]
 //
-// indexes the history and serves the map, health and journey pages in a
-// browser.
+// indexes the history and serves the journey, layers, map, health and
+// review pages in a browser.
 //
 //	huginn story [-C dir] [-branch rev] [-tests] [-no-cache] [-moments]
 //
@@ -23,6 +23,14 @@
 //
 // prints the semantic diff of one commit: its changed symbols, their
 // callers, the blast radius and the files that changed only in formatting.
+//
+//	huginn review [-C dir] [-base rev] [-head rev] [-format text|markdown|json] [folder ...]
+//
+// prints what a merge request changes, compared from its merge base with
+// the branch it goes into: the code that depends on what it changed, and
+// the imports and references between packages it starts and stops. Folders
+// limit the report to their code; callers and relations are still found
+// across the whole repository.
 //
 //	huginn silos [-C dir] [-branch rev] [-no-cache] [-n count] [-leaves name,...]
 //
@@ -60,6 +68,7 @@ const usage = `usage:
   huginn serve [-C dir] [-branch rev] [-tests] [-no-cache] [-addr host:port]
   huginn story [-C dir] [-branch rev] [-tests] [-no-cache] [-moments]
   huginn semdiff [-C dir] [-include-generated] [-callers n] rev
+  huginn review [-C dir] [-base rev] [-head rev] [-format text|markdown|json] [-callers n] [folder ...]
   huginn silos [-C dir] [-branch rev] [-no-cache] [-n count] [-leaves name,...]
   huginn affinity [-C dir] [-branch rev] [-tests] [-no-cache] [-months n] [-hub share] [-min-co n] [-n count] [-json] [type]`
 
@@ -68,6 +77,7 @@ func main() {
 		"symbols":  symbols,
 		"serve":    serve,
 		"semdiff":  semanticDiff,
+		"review":   reviewMergeRequest,
 		"story":    tell,
 		"silos":    listSilos,
 		"affinity": showAffinity,
@@ -99,7 +109,7 @@ func symbols(ctx context.Context, stdout, stderr io.Writer, args []string) error
 		return fmt.Errorf("want one symbol name, got %d", fs.NArg())
 	}
 
-	repo, err := git.Open(*dir)
+	repo, err := git.Open(ctx, *dir)
 	if err != nil {
 		return err
 	}
@@ -175,7 +185,7 @@ func serve(ctx context.Context, stdout, stderr io.Writer, args []string) error {
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
-	repo, err := git.Open(*dir)
+	repo, err := git.Open(ctx, *dir)
 	if err != nil {
 		return err
 	}
@@ -203,10 +213,12 @@ func serve(ctx context.Context, stdout, stderr io.Writer, args []string) error {
 		fmt.Fprintf(stderr, "huginn: indexed in %v%s\n", time.Since(start).Round(time.Millisecond), cacheNote(opts.Cache))
 	}()
 
-	hs := &http.Server{Handler: srv.Handler()}
+	// Without a header timeout, a client that opens connections and never
+	// finishes its request headers holds them open indefinitely.
+	hs := &http.Server{Handler: srv.Handler(), ReadHeaderTimeout: 10 * time.Second}
 	go func() {
 		<-ctx.Done()
-		hs.Close()
+		_ = hs.Close() // Serve returns ErrServerClosed either way
 	}()
 	if err := hs.Serve(ln); err != http.ErrServerClosed {
 		return err

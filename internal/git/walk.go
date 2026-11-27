@@ -175,7 +175,7 @@ func (r *Repo) walk(ctx context.Context, opts Options, fn func(*Commit, []fileSi
 	defer func() {
 		if err != nil {
 			cancel()
-			cf.close()
+			_ = cf.close() // err already says what went wrong
 			return
 		}
 		err = cf.close()
@@ -191,7 +191,7 @@ func (r *Repo) walk(ctx context.Context, opts Options, fn func(*Commit, []fileSi
 	if err != nil {
 		return err
 	}
-	if err := cmd.Start(); err != nil {
+	if err = cmd.Start(); err != nil {
 		return err
 	}
 	defer func() {
@@ -200,8 +200,8 @@ func (r *Repo) walk(ctx context.Context, opts Options, fn func(*Commit, []fileSi
 			// the pipe also stops a child git that outlives the killed
 			// process, as with the git.exe launcher on Windows.
 			cancel()
-			stdout.Close()
-			cmd.Wait()
+			_ = stdout.Close()
+			_ = cmd.Wait()
 			return
 		}
 		if werr := cmd.Wait(); werr != nil {
@@ -426,7 +426,7 @@ func (w *walker) read(batches <-chan []*blob, work chan<- *blob) {
 				if b.src, failed = w.cf.readBlob(); failed != nil {
 					// Keep git from blocking on a full pipe while schedule
 					// still writes to it.
-					go io.Copy(io.Discard, w.cf.out)
+					go func() { _, _ = io.Copy(io.Discard, w.cf.out) }()
 				}
 			}
 			if failed != nil {

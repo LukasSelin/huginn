@@ -123,10 +123,13 @@ func (s *Server) Handler() http.Handler {
 	mux.Handle("GET /map", s.file("index.html"))
 	mux.Handle("GET /health", s.file("health.html"))
 	mux.Handle("GET /layers", s.file("layers.html"))
+	mux.Handle("GET /review", s.file("review.html"))
 	mux.Handle("GET /affinity", s.file("affinity.html"))
 	mux.HandleFunc("GET /api/status", s.status)
 	s.indexRoutes(mux, s.index.Load)
 	mux.HandleFunc("GET /api/commit/{rev...}", s.commit)
+	mux.HandleFunc("GET /api/review", s.reviewAPI)
+	mux.HandleFunc("GET /api/review/options", s.reviewOptions)
 	return mux
 }
 
@@ -181,10 +184,17 @@ func ready(load func() *index, fn func(*index, http.ResponseWriter, *http.Reques
 	}
 }
 
+// writeJSON sends v as JSON. It is encoded before anything is written, so a
+// value that can't be encoded gets a 500 rather than an empty 200.
 func writeJSON(w http.ResponseWriter, v any) {
+	body, err := json.Marshal(v)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
 	w.Header().Set("Content-Type", "application/json")
 	w.Header().Set("Cache-Control", "no-store")
-	json.NewEncoder(w).Encode(v)
+	_, _ = w.Write(append(body, '\n')) // a client that went away needs no answer
 }
 
 type statusJSON struct {

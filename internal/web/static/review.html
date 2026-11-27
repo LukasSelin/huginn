@@ -1,0 +1,110 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>huginn · review</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600&amp;family=JetBrains+Mono:wght@400;600&amp;family=Newsreader:opsz,wght@6..72,400;6..72,500&amp;display=swap" rel="stylesheet">
+<link rel="stylesheet" href="app.css">
+<link rel="stylesheet" href="review.css">
+</head>
+<body>
+<header class="top">
+  <div class="brand">
+    <svg width="26" height="26" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 12c3-5 6-7 9-7s6 2 9 7c-3 5-6 7-9 7s-6-2-9-7z"></path><circle cx="12" cy="12" r="3"></circle></svg>
+    <span class="mono">huginn</span>
+    <span class="repo" id="repo"></span>
+  </div>
+  <nav aria-label="Views" class="views">
+    <a href="/">Journey</a>
+    <a href="/layers">Layers</a>
+    <a href="/map">Map</a>
+    <a href="/health">Health</a>
+    <a href="/review" aria-current="page">Review</a>
+    <a href="/affinity">Affinity</a>
+  </nav>
+</header>
+
+<main class="review">
+  <form class="pick panel" id="pick" aria-label="What to review">
+    <label class="field">
+      <span class="eyebrow">Merge request</span>
+      <input id="head" class="mono" list="branches" autocomplete="off" spellcheck="false" placeholder="HEAD">
+    </label>
+    <span class="into muted">into</span>
+    <label class="field">
+      <span class="eyebrow">Target branch</span>
+      <input id="base" class="mono" list="branches" autocomplete="off" spellcheck="false" placeholder="default branch">
+    </label>
+    <div class="field grow">
+      <label class="eyebrow" for="folder">Folders</label>
+      <div class="folders" id="folders">
+        <input id="folder" class="mono" list="dirs" autocomplete="off" spellcheck="false" placeholder="add a folder, or none for the whole repository">
+      </div>
+    </div>
+    <button class="btn primary" type="submit">Review</button>
+    <datalist id="branches"></datalist>
+    <datalist id="dirs"></datalist>
+  </form>
+
+  <div id="loading" class="loading" role="status">Loading…</div>
+
+  <div id="out" class="out" hidden>
+    <section class="summary" aria-label="Summary">
+      <p class="eyebrow" id="what"></p>
+      <h1 class="headline" id="headline"></h1>
+      <div class="kinds" id="kinds"></div>
+      <p class="warn" id="api" hidden></p>
+      <ul class="warnings small muted" id="warnings" hidden></ul>
+    </section>
+
+    <section class="tiles" id="tiles" aria-label="Key numbers"></section>
+
+    <section class="panel graph" aria-labelledby="graphTitle">
+      <div class="titlerow">
+        <h2 class="h2" id="graphTitle">Relations</h2>
+        <span class="muted small">which packages the change reaches, and the imports and references it starts and stops · point at a package to trace it, pick it to filter the lists below</span>
+      </div>
+      <div class="legend" id="legend"></div>
+      <div class="graph-box" id="graphBox"></div>
+      <div class="focus small" id="focus" hidden></div>
+    </section>
+
+    <div class="pair">
+      <section class="panel impact" aria-labelledby="impactTitle">
+        <div class="titlerow">
+          <h2 class="h2" id="impactTitle">Impact</h2>
+          <span class="muted small" id="impactNote"></span>
+          <label class="toggle small" id="outsideToggle" hidden><input type="checkbox" id="outsideOnly"> only outside the scope</label>
+        </div>
+        <div class="scroll"><table class="data" id="callers"></table></div>
+      </section>
+
+      <section class="panel rels" aria-labelledby="relsTitle">
+        <div class="titlerow">
+          <h2 class="h2" id="relsTitle">Imports and references</h2>
+          <span class="muted small">started (+) and stopped (−) between packages</span>
+        </div>
+        <div id="rels"></div>
+      </section>
+    </div>
+
+    <section class="panel changes" aria-labelledby="changesTitle">
+      <div class="titlerow">
+        <h2 class="h2" id="changesTitle">Changes</h2>
+        <div class="chips" id="kindChips" role="group" aria-label="Show changes of kind"></div>
+      </div>
+      <div id="changes"></div>
+    </section>
+
+    <section class="panel files" aria-labelledby="filesTitle">
+      <h2 class="h2" id="filesTitle">Files</h2>
+      <div class="scroll"><table class="data" id="files"></table></div>
+    </section>
+  </div>
+</main>
+<script src="common.js"></script>
+<script src="review.js"></script>
+</body>
+</html>

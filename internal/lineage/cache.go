@@ -126,7 +126,7 @@ func (c *Cache) load(includeGenerated bool) map[string]Revision {
 	if err != nil {
 		return revs
 	}
-	defer f.Close()
+	defer func() { _ = f.Close() }() // read only: nothing to lose
 	dec := gob.NewDecoder(bufio.NewReader(f))
 	var h cacheHeader
 	var b cacheBody
@@ -181,7 +181,7 @@ func (c *Cache) save(includeGenerated bool, revs map[string]Revision) (err error
 		b.Revisions = append(b.Revisions, cr)
 	}
 
-	if err := os.MkdirAll(c.dir, 0o755); err != nil {
+	if err = os.MkdirAll(c.dir, 0o750); err != nil {
 		return err
 	}
 	tmp, err := os.CreateTemp(c.dir, "revisions-*.tmp")
@@ -190,8 +190,9 @@ func (c *Cache) save(includeGenerated bool, revs map[string]Revision) (err error
 	}
 	defer func() {
 		if err != nil {
-			tmp.Close()
-			os.Remove(tmp.Name())
+			// Best effort: err already says what went wrong.
+			_ = tmp.Close()
+			_ = os.Remove(tmp.Name())
 		}
 	}()
 	w := bufio.NewWriter(tmp)

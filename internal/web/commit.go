@@ -27,24 +27,32 @@ type commitJSON struct {
 	Subject string   `json:"subject"`
 	Message string   `json:"message"`
 
-	// Added and Removed count text lines over the Go files touched, which is
-	// what the semantic changes are weighed against. TotalAdded and
-	// TotalRemoved count every file.
-	Added        int    `json:"added"`
-	Removed      int    `json:"removed"`
-	TotalAdded   int    `json:"totalAdded"`
-	TotalRemoved int    `json:"totalRemoved"`
-	Symbols      int    `json:"symbols"`
-	Semantic     int    `json:"semanticChanges"`
-	Headline     string `json:"headline"`
+	// TotalAdded and TotalRemoved count text lines over every file; the
+	// report's Added and Removed count only the Go files touched, which is
+	// what the semantic changes are weighed against.
+	TotalAdded   int `json:"totalAdded"`
+	TotalRemoved int `json:"totalRemoved"`
 
-	Counts   map[string]int    `json:"counts"` // by kind key; kinds without changes are left out
-	Files    []commitFileJSON  `json:"files"`
-	Changes  []changeJSON      `json:"changes"`
-	Blast    blastJSON         `json:"blast"`
-	Noise    []noiseJSON       `json:"noise"`
-	Warnings []string          `json:"warnings,omitempty"`
-	Nav      *commitNavigation `json:"nav"`
+	reportJSON
+	Nav *commitNavigation `json:"nav"`
+}
+
+// reportJSON is a semantic diff report, as the commit view and the review
+// page show it.
+type reportJSON struct {
+	// Added and Removed count text lines over the Go files touched.
+	Added    int    `json:"added"`
+	Removed  int    `json:"removed"`
+	Symbols  int    `json:"symbols"`
+	Semantic int    `json:"semanticChanges"`
+	Headline string `json:"headline"`
+
+	Counts   map[string]int   `json:"counts"` // by kind key; kinds without changes are left out
+	Files    []commitFileJSON `json:"files"`
+	Changes  []changeJSON     `json:"changes"`
+	Blast    blastJSON        `json:"blast"`
+	Noise    []noiseJSON      `json:"noise"`
+	Warnings []string         `json:"warnings,omitempty"`
 }
 
 // commitNavigation links a commit to its neighbors on the indexed line of
@@ -139,6 +147,7 @@ type callerJSON struct {
 	Calls       int    `json:"calls"`
 	Approximate bool   `json:"approximate"`
 	Test        bool   `json:"test"`
+	Outside     bool   `json:"outside,omitempty"` // outside the review's scope
 }
 
 type blastJSON struct {
@@ -189,7 +198,7 @@ func callersJSON(cs []semdiff.Caller) []callerJSON {
 	for i, c := range cs {
 		out[i] = callerJSON{
 			Package: c.Package, Name: c.Name, Path: c.Path, Line: c.Line,
-			Calls: c.Calls, Approximate: c.Approximate, Test: c.Test,
+			Calls: c.Calls, Approximate: c.Approximate, Test: c.Test, Outside: c.Outside,
 		}
 	}
 	return out
@@ -202,13 +211,22 @@ func newCommitJSON(c *git.Commit, r *semdiff.Report, warnings []string) *commitJ
 	out := &commitJSON{
 		SHA: c.Hash, Parents: c.Parents, Author: c.Author, Email: c.Email, T: c.AuthorTime.Unix(),
 		Subject: subject, Message: strings.TrimSpace(c.Message),
-		Added: r.Added, Removed: r.Removed, TotalAdded: c.Added, TotalRemoved: c.Removed,
-		Symbols: r.Symbols, Semantic: r.SemanticChanges, Headline: r.Headline(),
-		Counts: map[string]int{}, Files: []commitFileJSON{}, Changes: []changeJSON{}, Noise: []noiseJSON{},
-		Warnings: warnings,
+		TotalAdded: c.Added, TotalRemoved: c.Removed,
+		reportJSON: newReportJSON(r, warnings),
 	}
 	if out.Parents == nil {
 		out.Parents = []string{}
+	}
+	return out
+}
+
+// newReportJSON converts a report.
+func newReportJSON(r *semdiff.Report, warnings []string) reportJSON {
+	out := reportJSON{
+		Added: r.Added, Removed: r.Removed,
+		Symbols: r.Symbols, Semantic: r.SemanticChanges, Headline: r.Headline(),
+		Counts: map[string]int{}, Files: []commitFileJSON{}, Changes: []changeJSON{}, Noise: []noiseJSON{},
+		Warnings: warnings,
 	}
 	for k, n := range r.Counts {
 		if n > 0 {

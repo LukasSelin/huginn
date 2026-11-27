@@ -5,6 +5,7 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"slices"
 	"strings"
 	"unicode/utf8"
 
@@ -27,7 +28,7 @@ func semanticDiff(ctx context.Context, stdout, stderr io.Writer, args []string) 
 		return fmt.Errorf("want one revision, got %d", fs.NArg())
 	}
 
-	repo, err := git.Open(*dir)
+	repo, err := git.Open(ctx, *dir)
 	if err != nil {
 		return err
 	}
@@ -60,6 +61,7 @@ func semanticDiff(ctx context.Context, stdout, stderr io.Writer, args []string) 
 type printer struct {
 	w          io.Writer
 	maxCallers int
+	scoped     bool // the report was limited to a scope
 	err        error
 }
 
@@ -76,6 +78,16 @@ func (p *printer) report(c *git.Commit, r *semdiff.Report) {
 	p.printf("Date:   %s\n\n", c.AuthorTime.Format("Mon Jan 2 15:04:05 2006 -0700"))
 	p.printf("    %s\n\n", subject)
 
+	p.summary(r)
+	p.files(r)
+	p.changes(r)
+	p.blast("Blast radius", r)
+	p.relations(r.Relations)
+	p.noise(r)
+}
+
+// summary prints the headline and the count of each kind of change.
+func (p *printer) summary(r *semdiff.Report) {
 	p.printf("%s\n", r.Headline())
 	var counts []string
 	for _, k := range semdiff.Kinds {
@@ -86,7 +98,10 @@ func (p *printer) report(c *git.Commit, r *semdiff.Report) {
 	if len(counts) > 0 {
 		p.printf("%s\n", strings.Join(counts, " · "))
 	}
+}
 
+// files lists the files with their line counts and kinds of change.
+func (p *printer) files(r *semdiff.Report) {
 	if len(r.Files) > 0 {
 		p.printf("\nFiles\n")
 		names := make([]string, len(r.Files))
@@ -106,7 +121,10 @@ func (p *printer) report(c *git.Commit, r *semdiff.Report) {
 			p.printf("\n")
 		}
 	}
+}
 
+// changes prints one entry per changed symbol, with its callers.
+func (p *printer) changes(r *semdiff.Report) {
 	if len(r.Changes) > 0 {
 		p.printf("\nChanges\n")
 	}
@@ -138,9 +156,14 @@ func (p *printer) report(c *git.Commit, r *semdiff.Report) {
 		p.printf("    %s\n", impact)
 		p.callers("      ", ch.Callers, p.maxCallers)
 	}
+}
 
+// blast prints the blast radius under title. In a scoped report it also
+// says how much of it lies outside the scope, and lists only those
+// packages.
+func (p *printer) blast(title string, r *semdiff.Report) {
 	b := r.Blast
-	p.printf("\nBlast radius\n")
+	p.printf("\n%s\n", title)
 	if b.CallSites == 0 {
 		p.printf("  no callers outside the change\n")
 	} else {
@@ -149,15 +172,49 @@ func (p *printer) report(c *git.Commit, r *semdiff.Report) {
 			sites += " (approx.)"
 		}
 		p.printf("  %s in %s, %s\n", sites, plural(len(b.Callers), "declaration"), plural(len(b.Packages), "package"))
-		for _, pkg := range b.Packages {
-			p.printf("    %s\n", pkg)
+		if !p.scoped {
+			for _, pkg := range b.Packages {
+				p.printf("    %s\n", pkg)
+			}
+		} else if out := outside(b.Callers); out.decls == 0 {
+			p.printf("  none outside the scope\n")
+		} else {
+			p.printf("  outside the scope: %s in %s, %s\n", plural(out.sites, "call site"),
+				plural(out.decls, "declaration"), plural(len(out.pkgs), "package"))
+			for _, pkg := range out.pkgs {
+				p.printf("    %s\n", pkg)
+			}
 		}
 	}
 	if b.ExportedAPIChanged() {
 		p.printf("  exported API changed: %s\n", strings.Join(b.APIChanges, ", "))
 	}
 	p.callers("  ", b.Callers, 3*p.maxCallers)
+}
 
+// outsideCallers sums up the callers outside a report's scope.
+type outsideCallers struct {
+	sites, decls int
+	pkgs         []string // sorted
+}
+
+func outside(cs []semdiff.Caller) outsideCallers {
+	var out outsideCallers
+	for _, cl := range cs {
+		if cl.Outside {
+			out.sites += cl.Calls
+			out.decls++
+			if !slices.Contains(out.pkgs, cl.Package) {
+				out.pkgs = append(out.pkgs, cl.Package)
+			}
+		}
+	}
+	slices.Sort(out.pkgs)
+	return out
+}
+
+// noise lists the files whose changes do not matter semantically.
+func (p *printer) noise(r *semdiff.Report) {
 	if len(r.Noise) > 0 {
 		p.printf("\nNoise\n")
 		width := 0
@@ -249,6 +306,9 @@ func (p *printer) callers(indent string, cs []semdiff.Caller, limit int) {
 		}
 		if cl.Test {
 			notes = append(notes, "test")
+		}
+		if cl.Outside {
+			notes = append(notes, "outside")
 		}
 		note := ""
 		if len(notes) > 0 {

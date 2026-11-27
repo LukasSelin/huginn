@@ -186,6 +186,8 @@ func buckets(h *lineage.History, intents []Intent, n int) []Bucket {
 			case Revert:
 				bk.Fixes++
 				bk.Reverts++
+			case Other, Merge:
+				// Counted as commits only; merges were skipped above.
 			}
 		}
 		for ; next < len(steps) && steps[next].rev < hi; next++ {
