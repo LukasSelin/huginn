@@ -105,21 +105,27 @@ func (r *Repo) DiffRange(ctx context.Context, base, head string) (_ *Range, err 
 		files = append(files, s)
 		changes = append(changes, fc)
 	}
+	src := map[*blob][]byte{} // parsing lets go of a blob's contents
 	for _, b := range blobs {
 		if b.src, err = cf.blob(b.hash); err != nil {
 			return nil, err
 		}
+		src[b] = b.src
 	}
 	parseAll(blobs)
 
 	for i, s := range files {
 		fd := FileDiff{FileChange: *changes[i]}
 		for _, x := range []struct {
-			b *blob
-			f **ast.File
-		}{{s.old, &fd.Old}, {s.new, &fd.New}} {
+			b   *blob
+			f   **ast.File
+			src *[]byte
+		}{{s.old, &fd.Old, &fd.OldSource}, {s.new, &fd.New, &fd.NewSource}} {
 			p, _ := x.b.result() // the blobs were read above
 			*x.f = p.f
+			if x.b != nil {
+				*x.src = src[x.b]
+			}
 			if p.err != nil {
 				rg.ParseErrors = append(rg.ParseErrors, p.err)
 			}

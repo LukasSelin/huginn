@@ -27,6 +27,7 @@ type reviewJSON struct {
 	Relations relationsJSON `json:"relations"`
 	Types     []typeJSON    `json:"types"`
 	Focus     []focusJSON   `json:"focus"`
+	Paths     []pathsJSON   `json:"paths"`
 
 	// Indexed says the history was indexed, so the types' change coupling
 	// was looked for.
@@ -67,6 +68,69 @@ func focusesJSON(fs []review.Focus) []focusJSON {
 		out[i] = focusJSON{
 			Kind: f.Kind.String(), Name: f.Name, Path: f.Path, Line: f.Line, What: f.What, Why: f.Why,
 			Change: f.Change, Reaches: callersJSON(f.Reaches), Tests: f.Tests, Implementers: f.Implementers,
+		}
+	}
+	return out
+}
+
+// pathsJSON is what a change does to its function's paths, as review.Paths
+// has it, with the steps to show already cut into hunks. Kind is "new",
+// "unchanged", "extracted", "reshaped" or "changed".
+type pathsJSON struct {
+	Change    int        `json:"change"`
+	Kind      string     `json:"kind"`
+	Verdict   string     `json:"verdict"`
+	Decisions int        `json:"decisions"`
+	WaysOut   int        `json:"waysOut"`
+	Hunks     []hunkJSON `json:"hunks"`
+	Exits     []exitJSON `json:"exits"`
+}
+
+type hunkJSON struct {
+	Skipped    int        `json:"skipped"`
+	Breadcrumb []string   `json:"breadcrumb"`
+	Steps      []stepJSON `json:"steps"`
+}
+
+// stepJSON is a step of a compared flow: mark is "same", "renested",
+// "edited", "added", "removed", "moved" or "movedEdited", and kind is
+// "decision", "loop", "exit", "jump", "effect" or "closure".
+type stepJSON struct {
+	Mark  string `json:"mark"`
+	Kind  string `json:"kind"`
+	Depth int    `json:"depth"`
+	Text  string `json:"text"` // with the way out a decision ends in
+	Old   string `json:"old,omitempty"`
+	To    string `json:"to,omitempty"`
+}
+
+// exitJSON is a way out: mark is "same", "new", "gone" or "changed".
+type exitJSON struct {
+	What string   `json:"what"`
+	When []string `json:"when"`
+	Line int      `json:"line"`
+	Mark string   `json:"mark"`
+}
+
+func pathsListJSON(ps []review.Paths) []pathsJSON {
+	out := make([]pathsJSON, len(ps))
+	for i := range ps {
+		p := &ps[i]
+		out[i] = pathsJSON{
+			Change: p.Change, Kind: p.Kind.String(), Verdict: p.Verdict, Decisions: p.Decisions, WaysOut: p.WaysOut,
+			Hunks: []hunkJSON{}, Exits: []exitJSON{},
+		}
+		for _, h := range p.Hunks() {
+			hj := hunkJSON{Skipped: h.Skipped, Breadcrumb: orEmpty(h.Breadcrumb), Steps: []stepJSON{}}
+			for _, s := range h.Steps {
+				hj.Steps = append(hj.Steps, stepJSON{
+					Mark: s.Mark.String(), Kind: s.Kind.String(), Depth: s.Depth, Text: s.String(), Old: s.Old, To: s.To,
+				})
+			}
+			out[i].Hunks = append(out[i].Hunks, hj)
+		}
+		for _, e := range p.Exits {
+			out[i].Exits = append(out[i].Exits, exitJSON{What: e.What, When: orEmpty(e.When), Line: e.Line, Mark: e.Mark.String()})
 		}
 	}
 	return out
@@ -118,6 +182,7 @@ func newReviewJSON(rv *review.Review) *reviewJSON {
 		},
 		Types: typesJSON(rv.Types),
 		Focus: focusesJSON(rv.Focus),
+		Paths: pathsListJSON(rv.Paths),
 	}
 }
 

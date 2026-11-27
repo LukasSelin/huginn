@@ -1,0 +1,144 @@
+# Phase 1 of docs/design/review-paths.md: the review says what an edit does
+# to the paths through a function, so the reviewer need not read its body.
+# internal/ast reduces a function to its flow (decisions, loops, ways out,
+# boundary crossings), and internal/review compares the flows on either side
+# of each change into a verdict, the compared steps cut into hunks, and the
+# ways out. New functions get their flow as an outline.
+Prefix(:=<https://huginn#>)
+Prefix(rdfs:=<http://www.w3.org/2000/01/rdf-schema#>)
+Prefix(xsd:=<http://www.w3.org/2001/XMLSchema#>)
+
+Ontology(<https://huginn/design/review-paths>
+    Declaration(Class(:review.Review))
+
+    # internal/ast: a function's flow.
+
+    Declaration(Class(:ast.StepKind))
+    AnnotationAssertion(rdfs:comment :ast.StepKind "What a step of a function's flow does: decide, loop, leave, jump, cross a boundary or open a closure.")
+
+    Declaration(Class(:ast.Step))
+    AnnotationAssertion(rdfs:comment :ast.Step "One step of a function's flow, with the straight-line code between steps left out.")
+
+    Declaration(ObjectProperty(:ast.Step.Kind))
+    ObjectPropertyDomain(:ast.Step.Kind :ast.Step)
+    ObjectPropertyRange(:ast.Step.Kind :ast.StepKind)
+
+    Declaration(DataProperty(:ast.Step.Depth))
+    DataPropertyDomain(:ast.Step.Depth :ast.Step)
+    DataPropertyRange(:ast.Step.Depth xsd:integer)
+
+    Declaration(DataProperty(:ast.Step.Line))
+    DataPropertyDomain(:ast.Step.Line :ast.Step)
+    DataPropertyRange(:ast.Step.Line xsd:integer)
+
+    Declaration(DataProperty(:ast.Step.Text))
+    DataPropertyDomain(:ast.Step.Text :ast.Step)
+    DataPropertyRange(:ast.Step.Text xsd:string)
+
+    Declaration(DataProperty(:ast.Step.Cond))
+    DataPropertyDomain(:ast.Step.Cond :ast.Step)
+    DataPropertyRange(:ast.Step.Cond xsd:string)
+
+    Declaration(DataProperty(:ast.Step.Then))
+    DataPropertyDomain(:ast.Step.Then :ast.Step)
+    DataPropertyRange(:ast.Step.Then xsd:string)
+
+    Declaration(DataProperty(:ast.Step.Key))
+    DataPropertyDomain(:ast.Step.Key :ast.Step)
+    DataPropertyRange(:ast.Step.Key xsd:string)
+
+    # internal/review: two flows compared.
+
+    Declaration(Class(:review.PathsKind))
+    AnnotationAssertion(rdfs:comment :review.PathsKind "The kind of verdict on what a change does to a function's paths.")
+
+    Declaration(Class(:review.StepMark))
+    AnnotationAssertion(rdfs:comment :review.StepMark "How a step of a compared flow differs from the other side.")
+
+    Declaration(Class(:review.ExitMark))
+    AnnotationAssertion(rdfs:comment :review.ExitMark "How a way out of a function differs from the other side.")
+
+    Declaration(Class(:review.Paths))
+    AnnotationAssertion(rdfs:comment :review.Paths "What a change does to the paths through one function: its flows on either side compared, with a one-line verdict.")
+
+    Declaration(ObjectProperty(:review.Review.Paths))
+    ObjectPropertyDomain(:review.Review.Paths :review.Review)
+    ObjectPropertyRange(:review.Review.Paths :review.Paths)
+
+    Declaration(DataProperty(:review.Paths.Change))
+    DataPropertyDomain(:review.Paths.Change :review.Paths)
+    DataPropertyRange(:review.Paths.Change xsd:integer)
+
+    Declaration(ObjectProperty(:review.Paths.Kind))
+    ObjectPropertyDomain(:review.Paths.Kind :review.Paths)
+    ObjectPropertyRange(:review.Paths.Kind :review.PathsKind)
+
+    Declaration(DataProperty(:review.Paths.Verdict))
+    DataPropertyDomain(:review.Paths.Verdict :review.Paths)
+    DataPropertyRange(:review.Paths.Verdict xsd:string)
+
+    Declaration(ObjectProperty(:review.Paths.Steps))
+    ObjectPropertyDomain(:review.Paths.Steps :review.Paths)
+    ObjectPropertyRange(:review.Paths.Steps :review.PathStep)
+
+    Declaration(ObjectProperty(:review.Paths.Exits))
+    ObjectPropertyDomain(:review.Paths.Exits :review.Paths)
+    ObjectPropertyRange(:review.Paths.Exits :review.Exit)
+
+    Declaration(DataProperty(:review.Paths.Decisions))
+    DataPropertyDomain(:review.Paths.Decisions :review.Paths)
+    DataPropertyRange(:review.Paths.Decisions xsd:integer)
+
+    Declaration(DataProperty(:review.Paths.WaysOut))
+    DataPropertyDomain(:review.Paths.WaysOut :review.Paths)
+    DataPropertyRange(:review.Paths.WaysOut xsd:integer)
+
+    Declaration(DataProperty(:review.Paths.Moved))
+    DataPropertyDomain(:review.Paths.Moved :review.Paths)
+    DataPropertyRange(:review.Paths.Moved xsd:integer)
+
+    Declaration(Class(:review.PathStep))
+    AnnotationAssertion(rdfs:comment :review.PathStep "One step of a compared flow: the step, and how it differs from the other side.")
+
+    Declaration(ObjectProperty(:review.PathStep.Step))
+    ObjectPropertyDomain(:review.PathStep.Step :review.PathStep)
+    ObjectPropertyRange(:review.PathStep.Step :ast.Step)
+
+    Declaration(ObjectProperty(:review.PathStep.Mark))
+    ObjectPropertyDomain(:review.PathStep.Mark :review.PathStep)
+    ObjectPropertyRange(:review.PathStep.Mark :review.StepMark)
+
+    Declaration(DataProperty(:review.PathStep.Old))
+    DataPropertyDomain(:review.PathStep.Old :review.PathStep)
+    DataPropertyRange(:review.PathStep.Old xsd:string)
+
+    Declaration(DataProperty(:review.PathStep.To))
+    DataPropertyDomain(:review.PathStep.To :review.PathStep)
+    DataPropertyRange(:review.PathStep.To xsd:string)
+
+    Declaration(Class(:review.Exit))
+    AnnotationAssertion(rdfs:comment :review.Exit "One way out of a function, with the decisions enclosing it.")
+
+    Declaration(DataProperty(:review.Exit.What))
+    DataPropertyDomain(:review.Exit.What :review.Exit)
+    DataPropertyRange(:review.Exit.What xsd:string)
+
+    Declaration(DataProperty(:review.Exit.Line))
+    DataPropertyDomain(:review.Exit.Line :review.Exit)
+    DataPropertyRange(:review.Exit.Line xsd:integer)
+
+    Declaration(ObjectProperty(:review.Exit.Mark))
+    ObjectPropertyDomain(:review.Exit.Mark :review.Exit)
+    ObjectPropertyRange(:review.Exit.Mark :review.ExitMark)
+
+    Declaration(Class(:review.Hunk))
+    AnnotationAssertion(rdfs:comment :review.Hunk "A run of a compared flow to show: changed steps with one step around them, after the unchanged steps it skips.")
+
+    Declaration(ObjectProperty(:review.Hunk.Steps))
+    ObjectPropertyDomain(:review.Hunk.Steps :review.Hunk)
+    ObjectPropertyRange(:review.Hunk.Steps :review.PathStep)
+
+    Declaration(DataProperty(:review.Hunk.Skipped))
+    DataPropertyDomain(:review.Hunk.Skipped :review.Hunk)
+    DataPropertyRange(:review.Hunk.Skipped xsd:integer)
+)

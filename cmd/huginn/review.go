@@ -137,6 +137,7 @@ func (p *printer) review(rv *review.Review) {
 	}
 	p.printf("\n")
 	r := rv.Report
+	p.paths = rv.PathsOf
 	p.summary(r)
 	p.focus(rv)
 	p.blast("Impact", r)
@@ -246,6 +247,9 @@ func (p *printer) focus(rv *review.Review) {
 	}
 	for _, f := range shown {
 		p.printf("  [%s] %s  %s\n", focusLabel(f.Kind), f.Name, at(f))
+		if ps := rv.PathsOf(f.Change); ps != nil {
+			p.printf("      %s\n", clipText(ps.Verdict))
+		}
 		p.printf("      %s\n", focusDetail(f, rv.Report, func(s string) string { return s }))
 	}
 	if more > 0 {

@@ -49,7 +49,7 @@ func (m *markdown) review(rv *review.Review) {
 	m.impact(r.Blast, len(rv.Scope) > 0)
 	m.relations(r.Relations)
 	m.types(rv.Types)
-	m.changes(r)
+	m.changes(rv)
 }
 
 // types lists what the change does to the affinity matrix of each struct
@@ -92,7 +92,11 @@ func (m *markdown) focus(rv *review.Review) {
 		if loc := at(f); loc != "" {
 			where = " at " + code(loc)
 		}
-		m.printf("- **%s** %s%s: %s\n", focusLabel(f.Kind), name, where, focusDetail(f, rv.Report, func(s string) string { return code(s) }))
+		verdict := ""
+		if ps := rv.PathsOf(f.Change); ps != nil {
+			verdict = mdText(ps.Verdict) + " — "
+		}
+		m.printf("- **%s** %s%s: %s%s\n", focusLabel(f.Kind), name, where, verdict, focusDetail(f, rv.Report, func(s string) string { return code(s) }))
 	}
 	if more > 0 {
 		m.printf("- … and %s of existing code under Changes\n", plural(more, "more edit"))
@@ -213,11 +217,13 @@ func (m *markdown) references(prefix string, refs []semdiff.Reference, limit int
 	}
 }
 
-// changes lists the changed symbols and the files, folded away.
-func (m *markdown) changes(r *semdiff.Report) {
+// changes lists the changed symbols, with what each does to its
+// function's paths, and the files, folded away.
+func (m *markdown) changes(rv *review.Review) {
+	r := rv.Report
 	if len(r.Changes) > 0 {
 		m.printf("\n<details><summary>Changes (%s)</summary>\n\n", plural(r.Symbols, "symbol"))
-		for _, ch := range r.Changes {
+		for i, ch := range r.Changes {
 			impact := ch.Impact
 			if ch.APIChange {
 				impact += " · **API change**"
@@ -233,6 +239,7 @@ func (m *markdown) changes(r *semdiff.Report) {
 			if ch.OldSignature != "" && ch.NewSignature != "" && ch.OldSignature != ch.NewSignature {
 				m.printf("  ```diff\n  - %s\n  + %s\n  ```\n", ch.OldSignature, ch.NewSignature)
 			}
+			m.flow(rv, i)
 		}
 		m.printf("\n</details>\n")
 	}

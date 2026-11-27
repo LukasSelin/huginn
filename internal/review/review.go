@@ -59,6 +59,11 @@ type Review struct {
 	// change does that its diff does not show.
 	Focus []Focus
 
+	// Paths are what the change does to the paths through each production
+	// function it adds or whose body it edits, in the order of the
+	// report's changes.
+	Paths []Paths
+
 	// Warnings are syntax errors that may hide changes or callers.
 	Warnings []string
 }
@@ -111,6 +116,7 @@ func Build(ctx context.Context, repo *git.Repo, opts Options) (*Review, error) {
 	}
 	rv.Types = types(rv.Report, in, opts.History)
 	rv.Focus = focus(rv.Report, rv.Types)
+	rv.Paths = paths(rv.Report, rg.Files)
 	for _, err := range rg.ParseErrors {
 		rv.Warnings = append(rv.Warnings, err.Error())
 	}

@@ -209,10 +209,12 @@ function lookItem(f) {
     name = h('code', {}, f.name);
   }
   const where = f.line ? `${f.path}:${f.line}` : f.path;
+  const p = f.change >= 0 ? pathsOf(f.change) : null;
   return h('li', { class: `look-item l-${f.kind}` },
     h('span', { class: 'look-kind' }, LOOK_KIND[f.kind] || f.kind),
     h('div', { class: 'look-body' },
       h('div', { class: 'look-head' }, name, where ? h('span', { class: 'muted code' }, where) : null),
+      p ? verdictLine(p, 'look-verdict') : null,
       h('div', { class: 'look-what' }, f.what, f.why ? h('span', { class: 'why' }, ` · ${f.why}`) : null),
       reachLine(f, ch)));
 }
@@ -970,10 +972,71 @@ function symbolCounts(xs) {
   return [...n].sort((a, b) => b[1].length - a[1].length).map(([s, ys]) => plural(ys.length, s)).join(', ');
 }
 
-// changeRow is a change in one line, for new code and tests.
+// changeRow is a change in one line, for new code and tests. A new
+// function says how much it decides, and opens on its flow as an outline.
 function changeRow(c, i, where) {
-  return h('div', { class: 'row', id: `ch-${i}` }, mark(c.kind), h('span', { class: 'k' }, c.symbol),
-    h('code', {}, c.name), h('span', { class: 'muted small' }, c.summary), h('span', { class: 'muted code' }, where));
+  const p = pathsOf(i);
+  const line = [mark(c.kind), h('span', { class: 'k' }, c.symbol), h('code', {}, c.name),
+    h('span', { class: 'muted small' }, p ? p.verdict : c.summary), h('span', { class: 'muted code' }, where)];
+  if (!p || !p.hunks.length) return h('div', { class: 'row', id: `ch-${i}` }, ...line);
+  return h('details', { class: 'row flow-outline', id: `ch-${i}` }, h('summary', {}, ...line), flowView(p));
+}
+
+// --- Paths ---------------------------------------------------------------------
+
+// pathsOf returns what the change at index i does to its function's paths,
+// or undefined when it has none.
+function pathsOf(i) {
+  const rv = state.rv;
+  if (!rv.pathsBy) rv.pathsBy = new Map((rv.paths || []).map((p) => [p.change, p]));
+  return rv.pathsBy.get(i);
+}
+
+const STEP_MARK = { same: '', renested: '~', edited: '±', added: '+', removed: '−', moved: '→', movedEdited: '→' };
+const EXIT_MARK = { same: '', new: '+', gone: '−', changed: '~' };
+
+// verdictLine is a change's verdict on its paths, coloured by its kind.
+function verdictLine(p, cls) {
+  return h('div', { class: `verdict v-${p.kind} ${cls || ''}` }, p.verdict);
+}
+
+// pathsView is what an edit does to its function's paths: the verdict, the
+// changed steps cut into hunks, and the ways out when one changed.
+function pathsView(p) {
+  const out = [verdictLine(p)];
+  if (p.hunks.length) out.push(flowView(p));
+  if (p.exits.length) {
+    out.push(h('div', { class: 'exits' }, h('p', { class: 'sub-h' }, 'Ways out'),
+      h('ul', {}, p.exits.map((e) => h('li', { class: `ex e-${e.mark}` },
+        h('span', { class: 'st-mark' }, EXIT_MARK[e.mark]), h('code', {}, e.what),
+        e.when.length ? h('span', { class: 'when' }, ` ⇐ ${e.when.join(' ∧ ')}`) : null)))));
+  }
+  return h('div', { class: 'paths' }, out);
+}
+
+// flowView lists the steps of a compared flow to show, one line each,
+// indented by depth, with a line for the unchanged steps a hunk skips and
+// the decisions enclosing it.
+function flowView(p) {
+  const out = [];
+  for (const hk of p.hunks) {
+    if (hk.skipped) out.push(h('div', { class: 'st st-skip' }, `… ${plural(hk.skipped, 'unchanged step')}`));
+    if (hk.breadcrumb.length) out.push(h('div', { class: 'st st-crumb' }, `in ${hk.breadcrumb.join(' › ')}`));
+    for (const s of hk.steps) out.push(stepLine(s));
+  }
+  return h('div', { class: 'flow' }, out);
+}
+
+function stepLine(s) {
+  let note = null;
+  if (s.mark === 'renested') note = 're-nested';
+  else if (s.mark === 'moved') note = `in ${s.to}`;
+  else if (s.mark === 'movedEdited') note = `in ${s.to}`;
+  const was = s.old ? h('div', { class: 'was' }, h('span', { class: 'muted' }, 'was '), h('code', {}, s.old)) : null;
+  return h('div', { class: `st s-${s.mark} k-${s.kind}` },
+    h('span', { class: 'st-mark' }, STEP_MARK[s.mark] || ''),
+    h('div', { class: 'st-body', style: `margin-left:${s.depth * 16}px` },
+      h('code', { title: s.text }, s.text), note ? h('span', { class: 'st-note' }, ` ${note}`) : null, was));
 }
 
 // changeCard is a change in full: where it is, what changed and whom it
@@ -1001,7 +1064,7 @@ function changeCard(c, i) {
       h('span', { class: 'muted code' }, where)),
     h('div', { class: 'meta' }, c.summary,
       c.apiChange ? h('span', { class: 'api' }, ' · API change') : null),
-    detail, callers);
+    detail, pathsOf(i) ? pathsView(pathsOf(i)) : null, callers);
 }
 
 // membersView lists a type's changed members, each with whose code it
