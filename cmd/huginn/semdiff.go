@@ -11,6 +11,7 @@ import (
 
 	"huginn/internal/ast"
 	"huginn/internal/git"
+	"huginn/internal/review"
 	"huginn/internal/semdiff"
 )
 
@@ -63,6 +64,10 @@ type printer struct {
 	maxCallers int
 	scoped     bool // the report was limited to a scope
 	err        error
+
+	// paths gives what a change does to its function's paths, by the
+	// change's index: set for a review, nil for a commit's semantic diff.
+	paths func(int) *review.Paths
 }
 
 func (p *printer) printf(format string, args ...any) {
@@ -128,7 +133,7 @@ func (p *printer) changes(r *semdiff.Report) {
 	if len(r.Changes) > 0 {
 		p.printf("\nChanges\n")
 	}
-	for _, ch := range r.Changes {
+	for i, ch := range r.Changes {
 		p.printf("\n  [%s] %s %s\n", kinds(ch.Kinds), ch.Symbol, ch.Name)
 		where := fmt.Sprintf("%s:%d", ch.Path, ch.Line)
 		if ch.OldPath != "" && (ch.OldPath != ch.Path || ch.OldName != "") {
@@ -148,6 +153,7 @@ func (p *printer) changes(r *semdiff.Report) {
 		if ch.Summary != "" {
 			p.printf("    %s\n", ch.Summary)
 		}
+		p.flow(i)
 		p.members(ch.Members)
 		impact := ch.Impact
 		if ch.APIChange {

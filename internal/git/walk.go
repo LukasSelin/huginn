@@ -130,6 +130,11 @@ type FileDiff struct {
 	// when that side is absent, is not a regular Go file, or did not parse at
 	// all. Syntax errors are in the commit's ParseErrors.
 	Old, New *ast.File
+
+	// OldSource and NewSource are the contents of Old and New. Only
+	// DiffRange keeps them: a walk would hold every changed file of the
+	// history.
+	OldSource, NewSource []byte
 }
 
 // ResolveCommit returns the full hash of the commit rev names.

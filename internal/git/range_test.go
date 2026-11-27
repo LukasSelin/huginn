@@ -68,6 +68,9 @@ func TestDiffRange(t *testing.T) {
 	if a := rg.Files[0].New; a == nil || len(a.Symbols) != 2 {
 		t.Errorf("a/a.go after = %+v, want A and A2", a)
 	}
+	if fd := rg.Files[0]; !strings.Contains(string(fd.NewSource), "func A2") || strings.Contains(string(fd.OldSource), "func A2") {
+		t.Errorf("a/a.go sources:\nbefore %q\nafter %q", fd.OldSource, fd.NewSource)
+	}
 	if len(rg.ParseErrors) > 0 {
 		t.Errorf("parse errors: %v", rg.ParseErrors)
 	}

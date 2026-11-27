@@ -28,6 +28,11 @@ func TestReviewAPI(t *testing.T) {
 	if len(rv.Changes) != 1 || rv.Changes[0].Name != "util.Min" || rv.Changes[0].Kind != "added" {
 		t.Errorf("changes = %+v", rv.Changes)
 	}
+	// The new function's flow is an outline.
+	if p := rv.Paths; len(p) != 1 || p[0].Kind != "new" || p[0].Verdict != "1 decision · 2 ways out" ||
+		len(p[0].Hunks) != 1 || len(p[0].Hunks[0].Steps) != 2 || p[0].Hunks[0].Steps[0].Text != "if a < b → return a" || p[0].Exits == nil {
+		t.Errorf("paths = %+v", p)
+	}
 	// util has no struct type, so there is no matrix to show, but the
 	// page always gets the list.
 	if rv.Types == nil || len(rv.Types) != 0 {
