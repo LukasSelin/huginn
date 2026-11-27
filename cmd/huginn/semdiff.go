@@ -233,35 +233,11 @@ func (p *printer) noise(r *semdiff.Report) {
 func (p *printer) members(ms []semdiff.MemberChange) {
 	var impls []semdiff.Caller
 	for _, m := range ms {
-		var notes []string
-		if m.Flags.Has(ast.MemberRenamed) {
-			notes = append(notes, "renamed")
-		}
-		if m.Flags.Has(ast.MemberRetyped) {
-			notes = append(notes, "retyped")
-		}
-		if m.Flags.Has(ast.MemberTagChanged) {
-			notes = append(notes, "tag changed")
-		}
-		if m.Breaking {
-			notes = append(notes, "breaks "+m.Breaks)
-		}
-		if m.Uses > 0 {
-			uses := plural(m.Uses, "field use")
-			if m.Approximate {
-				uses += " (approx.)"
-			}
-			notes = append(notes, uses)
-		}
-		if m.Unkeyed > 0 {
-			notes = append(notes, "breaks "+plural(m.Unkeyed, "unkeyed literal"))
-		}
 		if len(m.Implementers) > 0 {
 			impls = m.Implementers // every member shares the one list
-			notes = append(notes, plural(len(m.Implementers), "implementer")+" (approx.)")
 		}
 		note := ""
-		if len(notes) > 0 {
+		if notes := memberNotes(m); len(notes) > 0 {
 			note = "  " + strings.Join(notes, " · ")
 		}
 		switch {
@@ -275,6 +251,38 @@ func (p *printer) members(ms []semdiff.MemberChange) {
 		}
 	}
 	p.implementers("        ", impls, p.maxCallers)
+}
+
+// memberNotes says what a member change did and what it breaks, as members
+// prints them after its line: "renamed", "breaks callers", "4 field uses".
+func memberNotes(m semdiff.MemberChange) []string {
+	var notes []string
+	if m.Flags.Has(ast.MemberRenamed) {
+		notes = append(notes, "renamed")
+	}
+	if m.Flags.Has(ast.MemberRetyped) {
+		notes = append(notes, "retyped")
+	}
+	if m.Flags.Has(ast.MemberTagChanged) {
+		notes = append(notes, "tag changed")
+	}
+	if m.Breaking {
+		notes = append(notes, "breaks "+m.Breaks)
+	}
+	if m.Uses > 0 {
+		uses := plural(m.Uses, "field use")
+		if m.Approximate {
+			uses += " (approx.)"
+		}
+		notes = append(notes, uses)
+	}
+	if m.Unkeyed > 0 {
+		notes = append(notes, "breaks "+plural(m.Unkeyed, "unkeyed literal"))
+	}
+	if len(m.Implementers) > 0 {
+		notes = append(notes, plural(len(m.Implementers), "implementer")+" (approx.)")
+	}
+	return notes
 }
 
 // implementers lists up to limit types implementing a changed interface,
