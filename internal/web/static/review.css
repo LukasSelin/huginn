@@ -48,6 +48,7 @@ code, .code { font-family: 'JetBrains Mono', monospace; font-size: 12px; overflo
 .look-item { display: grid; grid-template-columns: 92px minmax(0, 1fr); gap: 12px; padding: 9px 0; border-top: 1px solid var(--line); }
 .look-item:first-child { border-top: 0; padding-top: 2px; }
 .look-kind { align-self: start; margin-top: 1px; padding: 1px 7px; border: 1px solid var(--line-strong); border-radius: 4px; font-size: 11px; font-weight: 600; text-align: center; white-space: nowrap; }
+.l-external .look-kind { border-color: var(--deleted); color: var(--deleted); }
 .l-breaking .look-kind { border-color: var(--signature); color: var(--signature); }
 .l-behavior .look-kind { border-color: var(--body); color: var(--body); }
 .l-dependency .look-kind { border-color: var(--added); color: var(--added); }
@@ -63,6 +64,22 @@ code, .code { font-family: 'JetBrains Mono', monospace; font-size: 12px; overflo
 .look-reach { color: var(--muted); }
 .look-reach code { color: var(--text-2); }
 .look-empty { padding: 2px 0; }
+/* A path out of the process: where it goes, whether the change makes it,
+   the calls that lead there and where the call leaving the code is. */
+.look-cap { display: flex; flex-wrap: wrap; align-items: baseline; gap: 2px 8px; color: var(--muted); }
+.look-cap .cap { min-width: 64px; color: var(--text-2); font-weight: 600; }
+.look-cap .cap.new { color: var(--deleted); }
+.look-cap .tag { margin-left: 0; }
+.tag.new { border-color: var(--deleted); color: var(--deleted); }
+.look-cap .cap-path code { color: var(--text-2); }
+.look-note { padding: 7px 0; border-top: 1px solid var(--line); }
+.look-note:first-child { border-top: 0; padding-top: 2px; }
+.look-note code { font-size: 12px; }
+.look-error { color: var(--signature); }
+.look-tracing { display: flex; align-items: center; gap: 8px; }
+.spin { width: 11px; height: 11px; border: 2px solid var(--line-strong); border-top-color: var(--deleted); border-radius: 50%; animation: spin 0.9s linear infinite; }
+@keyframes spin { to { transform: rotate(360deg); } }
+@media (prefers-reduced-motion: reduce) { .spin { animation-duration: 3s; } }
 .look-more .more { padding-left: 104px; }
 
 .panel.files { padding: 12px 18px; }

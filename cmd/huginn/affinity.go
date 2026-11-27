@@ -134,78 +134,105 @@ func printMatrix(w *printer, r *affinity.Report) {
 	for _, row := range r.Rows {
 		nameWidth = max(nameWidth, utf8.RuneCountInString(row.Method))
 	}
-	// sep returns what goes before column j: a bar between blocks, a double
-	// one before the hubs, infrastructure and unused fields.
-	sep := func(j int) string {
-		if j == 0 {
-			return ""
-		}
-		prev, cur := r.Columns[j-1], r.Columns[j]
-		switch {
-		case cur.Block < 0 && prev.Block >= 0:
-			return "║ "
-		case cur.Block != prev.Block && cur.Block >= 0:
-			return "│ "
-		}
+	printMatrixHeader(w, r, strings.Repeat(" ", 3+nameWidth+2))
+	for _, row := range r.Rows {
+		printMatrixRow(w, r, row, nameWidth)
+	}
+}
+
+// matrixSep returns what goes before column j: a bar between blocks, a
+// double one before the hubs, infrastructure and unused fields.
+func matrixSep(r *affinity.Report, j int) string {
+	if j == 0 {
 		return ""
 	}
-	indent := strings.Repeat(" ", 3+nameWidth+2)
+	prev, cur := r.Columns[j-1], r.Columns[j]
+	switch {
+	case cur.Block < 0 && prev.Block >= 0:
+		return "║ "
+	case cur.Block != prev.Block && cur.Block >= 0:
+		return "│ "
+	}
+	return ""
+}
+
+// printMatrixHeader draws the staircase of field names, one line per
+// column, with a dotted rule down from each column before it.
+func printMatrixHeader(w *printer, r *affinity.Report, indent string) {
 	for k := range r.Columns {
 		var line strings.Builder
 		line.WriteString(indent)
-		for j := 0; j <= k; j++ {
-			line.WriteString(sep(j))
-			if j < k {
-				line.WriteString("┆  ")
-				continue
-			}
-			c := r.Columns[j]
-			line.WriteString(c.Name)
-			switch {
-			case c.Hub:
-				line.WriteString(" (hub)")
-			case c.Class == affinity.Infra || c.Class == affinity.Unused:
-				line.WriteString(" (" + string(c.Class) + ")")
-			}
+		for j := range k {
+			line.WriteString(matrixSep(r, j))
+			line.WriteString("┆  ")
 		}
+		line.WriteString(matrixSep(r, k))
+		line.WriteString(matrixColumnName(r.Columns[k]))
 		w.printf("%s\n", strings.TrimRight(line.String(), " "))
 	}
-	for _, row := range r.Rows {
-		var line strings.Builder
-		fmt.Fprintf(&line, "%-2s %s  ", rowTag(r, row), pad(row.Method, nameWidth))
-		cells := make([]string, len(r.Columns))
-		for j := range cells {
-			cells[j] = "· "
-		}
-		for _, c := range row.Cells {
-			switch {
-			case c.Read && c.Write:
-				cells[c.Col] = "RW"
-			case c.Write:
-				cells[c.Col] = "W "
-			default:
-				cells[c.Col] = "R "
-			}
-		}
-		for j, c := range cells {
-			line.WriteString(sep(j) + c + " ")
-		}
-		if len(row.Calls) > 0 {
-			var names []string
-			for _, c := range row.Calls {
-				n := r.Rows[c.Row].Method
-				if c.Value {
-					n += " (value)"
-				}
-				names = append(names, n)
-			}
-			if len(names) > 4 {
-				names = append(names[:4], fmt.Sprintf("+%d", len(names)-4))
-			}
-			line.WriteString(" → " + strings.Join(names, ", "))
-		}
-		w.printf("%s\n", strings.TrimRight(line.String(), " "))
+}
+
+// matrixColumnName names a column in the header, marking hubs,
+// infrastructure and unused fields.
+func matrixColumnName(c affinity.Column) string {
+	switch {
+	case c.Hub:
+		return c.Name + " (hub)"
+	case c.Class == affinity.Infra || c.Class == affinity.Unused:
+		return c.Name + " (" + string(c.Class) + ")"
 	}
+	return c.Name
+}
+
+// printMatrixRow draws one method's line: its block, its cells and its
+// calls.
+func printMatrixRow(w *printer, r *affinity.Report, row affinity.Row, nameWidth int) {
+	var line strings.Builder
+	fmt.Fprintf(&line, "%-2s %s  ", rowTag(r, row), pad(row.Method, nameWidth))
+	for j, c := range matrixCells(r, row) {
+		line.WriteString(matrixSep(r, j) + c + " ")
+	}
+	if len(row.Calls) > 0 {
+		line.WriteString(" → " + matrixCalls(r, row))
+	}
+	w.printf("%s\n", strings.TrimRight(line.String(), " "))
+}
+
+// matrixCells returns a row's cell in each column: RW, W or R where the
+// method writes or reads the field, a dot where it does neither.
+func matrixCells(r *affinity.Report, row affinity.Row) []string {
+	cells := make([]string, len(r.Columns))
+	for j := range cells {
+		cells[j] = "· "
+	}
+	for _, c := range row.Cells {
+		switch {
+		case c.Read && c.Write:
+			cells[c.Col] = "RW"
+		case c.Write:
+			cells[c.Col] = "W "
+		default:
+			cells[c.Col] = "R "
+		}
+	}
+	return cells
+}
+
+// matrixCalls names the methods a row calls, marking those it uses as a
+// value, the first four and a count of the rest.
+func matrixCalls(r *affinity.Report, row affinity.Row) string {
+	var names []string
+	for _, c := range row.Calls {
+		n := r.Rows[c.Row].Method
+		if c.Value {
+			n += " (value)"
+		}
+		names = append(names, n)
+	}
+	if len(names) > 4 {
+		names = append(names[:4], fmt.Sprintf("+%d", len(names)-4))
+	}
+	return strings.Join(names, ", ")
 }
 
 func printBlocks(w *printer, r *affinity.Report) {

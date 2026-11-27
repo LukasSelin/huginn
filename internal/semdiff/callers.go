@@ -58,75 +58,92 @@ func newIndex(tree []*ast.File, pkgOf func(path, pkg string) string) *index {
 	}
 	methods := map[string]bool{}
 	for _, f := range tree {
-		pkg := pkgOf(f.Path, f.Package)
-		for _, s := range f.Symbols {
-			switch s.Kind {
-			case ast.KindMethod:
-				methods[symID(pkg, s.Key)] = true
-				id := symID(pkg, s.Recv)
-				if idx.methodSets[id] == nil {
-					idx.methodSets[id] = methodSet{}
-				}
-				idx.methodSets[id][s.Name] = unqualified(s.MethodKey())
-				if fs := idx.methodFiles[id]; len(fs) == 0 || fs[len(fs)-1] != f {
-					idx.methodFiles[id] = append(fs, f)
-				}
-			case ast.KindType:
-				idx.types = append(idx.types, typeSite{sym: s, file: f, pkg: pkg})
-			case ast.KindFunc, ast.KindVar, ast.KindConst:
-				// Only methods and types make up method sets.
-			}
-		}
+		idx.addDecls(f, pkgOf(f.Path, f.Package), methods)
 	}
-
 	for _, f := range tree {
-		pkg := pkgOf(f.Path, f.Package)
-		ims := map[string]bool{}
-		for _, im := range f.Imports {
-			ims[im.Path] = true
-		}
-		idx.imports[f] = ims
-
-		for _, s := range f.Symbols {
-			for _, ref := range s.Refs {
-				st := site{caller: s, file: f, pkg: pkg, uses: ref.Count}
-				switch ref.Kind {
-				case ast.RefLocal:
-					id := symID(pkg, ref.Name)
-					idx.exact[id] = append(idx.exact[id], st)
-				case ast.RefImport:
-					id := symID(ref.Pkg, ref.Name)
-					idx.exact[id] = append(idx.exact[id], st)
-				case ast.RefMethod:
-					// A call on the receiver resolves to the receiver's own
-					// method when it has one; otherwise it may be promoted
-					// from an embedded field or be a func-typed field, and
-					// only the name is known.
-					if id := symID(pkg, ref.Recv+"."+ref.Name); ref.Recv != "" && methods[id] {
-						idx.exact[id] = append(idx.exact[id], st)
-						continue
-					}
-					st.approx = true
-					idx.byMethod[ref.Name] = append(idx.byMethod[ref.Name], st)
-				}
-			}
-			for _, ref := range s.FieldRefs {
-				st := site{caller: s, file: f, pkg: pkg, uses: ref.Count}
-				switch {
-				case ref.Approximate():
-					st.approx = true
-					idx.fieldByName[ref.Name] = append(idx.fieldByName[ref.Name], st)
-				case ref.Pkg != "":
-					id := symID(ref.Pkg, ref.Type+"."+ref.Name)
-					idx.fields[id] = append(idx.fields[id], st)
-				default:
-					id := symID(pkg, ref.Type+"."+ref.Name)
-					idx.fields[id] = append(idx.fields[id], st)
-				}
-			}
-		}
+		idx.addRefs(f, pkgOf(f.Path, f.Package), methods)
 	}
 	return idx
+}
+
+// addDecls indexes the method sets and type declarations of f, a file of
+// package pkg, and adds the symIDs of its methods to methods.
+func (idx *index) addDecls(f *ast.File, pkg string, methods map[string]bool) {
+	for _, s := range f.Symbols {
+		switch s.Kind {
+		case ast.KindMethod:
+			methods[symID(pkg, s.Key)] = true
+			id := symID(pkg, s.Recv)
+			if idx.methodSets[id] == nil {
+				idx.methodSets[id] = methodSet{}
+			}
+			idx.methodSets[id][s.Name] = unqualified(s.MethodKey())
+			if fs := idx.methodFiles[id]; len(fs) == 0 || fs[len(fs)-1] != f {
+				idx.methodFiles[id] = append(fs, f)
+			}
+		case ast.KindType:
+			idx.types = append(idx.types, typeSite{sym: s, file: f, pkg: pkg})
+		case ast.KindFunc, ast.KindVar, ast.KindConst:
+			// Only methods and types make up method sets.
+		}
+	}
+}
+
+// addRefs indexes the imports of f, a file of package pkg, and the
+// references its declarations make. methods holds the symIDs of every
+// method in the tree.
+func (idx *index) addRefs(f *ast.File, pkg string, methods map[string]bool) {
+	ims := map[string]bool{}
+	for _, im := range f.Imports {
+		ims[im.Path] = true
+	}
+	idx.imports[f] = ims
+
+	for _, s := range f.Symbols {
+		for _, ref := range s.Refs {
+			idx.addRef(site{caller: s, file: f, pkg: pkg, uses: ref.Count}, ref, methods)
+		}
+		for _, ref := range s.FieldRefs {
+			idx.addFieldRef(site{caller: s, file: f, pkg: pkg, uses: ref.Count}, ref)
+		}
+	}
+}
+
+// addRef indexes ref, made at st.
+func (idx *index) addRef(st site, ref ast.Ref, methods map[string]bool) {
+	switch ref.Kind {
+	case ast.RefLocal:
+		id := symID(st.pkg, ref.Name)
+		idx.exact[id] = append(idx.exact[id], st)
+	case ast.RefImport:
+		id := symID(ref.Pkg, ref.Name)
+		idx.exact[id] = append(idx.exact[id], st)
+	case ast.RefMethod:
+		// A call on the receiver resolves to the receiver's own method when
+		// it has one; otherwise it may be promoted from an embedded field or
+		// be a func-typed field, and only the name is known.
+		if id := symID(st.pkg, ref.Recv+"."+ref.Name); ref.Recv != "" && methods[id] {
+			idx.exact[id] = append(idx.exact[id], st)
+			return
+		}
+		st.approx = true
+		idx.byMethod[ref.Name] = append(idx.byMethod[ref.Name], st)
+	}
+}
+
+// addFieldRef indexes the field use ref, made at st.
+func (idx *index) addFieldRef(st site, ref ast.FieldRef) {
+	switch {
+	case ref.Approximate():
+		st.approx = true
+		idx.fieldByName[ref.Name] = append(idx.fieldByName[ref.Name], st)
+	case ref.Pkg != "":
+		id := symID(ref.Pkg, ref.Type+"."+ref.Name)
+		idx.fields[id] = append(idx.fields[id], st)
+	default:
+		id := symID(st.pkg, ref.Type+"."+ref.Name)
+		idx.fields[id] = append(idx.fields[id], st)
+	}
 }
 
 // callers returns the declarations referring to s, which lives in package

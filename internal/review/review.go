@@ -38,6 +38,12 @@ type Options struct {
 	// History, if not nil, is the indexed history, from which the review
 	// tells which methods of a type change together.
 	History *lineage.History
+
+	// Tracer, if not nil, traces with capslock which of the functions the
+	// change adds or edits reach outside the process, to look at first. It
+	// checks out the head and the merge base and analyses their packages,
+	// which takes a while.
+	Tracer *Tracer
 }
 
 // Review is a merge request's report, with what it was compared against.
@@ -64,7 +70,13 @@ type Review struct {
 	// report's changes.
 	Paths []Paths
 
-	// Warnings are syntax errors that may hide changes or callers.
+	// Traced says capslock traced the functions the change adds or edits,
+	// so those missing from the focus's FocusExternal items reach nothing
+	// outside the process that capslock can see.
+	Traced bool
+
+	// Warnings are what may hide changes, callers or capabilities: syntax
+	// errors, or a trace that failed.
 	Warnings []string
 }
 
@@ -115,7 +127,21 @@ func Build(ctx context.Context, repo *git.Repo, opts Options) (*Review, error) {
 		Report:    semdiff.Build(in),
 	}
 	rv.Types = types(rv.Report, in, opts.History)
-	rv.Focus = focus(rv.Report, rv.Types)
+	var caps map[int][]Capability
+	if opts.Tracer != nil {
+		var warnings []string
+		caps, warnings, err = opts.Tracer.trace(ctx, repo, rv, in)
+		switch {
+		case ctx.Err() != nil:
+			return nil, ctx.Err()
+		case err != nil:
+			rv.Warnings = append(rv.Warnings, "capslock could not trace the changes: "+err.Error())
+		default:
+			rv.Traced = true
+		}
+		rv.Warnings = append(rv.Warnings, warnings...)
+	}
+	rv.Focus = focus(rv.Report, rv.Types, caps)
 	rv.Paths = paths(rv.Report, rg.Files)
 	for _, err := range rg.ParseErrors {
 		rv.Warnings = append(rv.Warnings, err.Error())

@@ -10,6 +10,8 @@ import (
 	"testing"
 
 	"huginn/internal/gittest"
+	"huginn/internal/review"
+	"huginn/internal/semdiff"
 )
 
 // shop makes a repository whose branch feature, checked out, makes billing
@@ -35,10 +37,13 @@ func shop(t *testing.T) *gittest.Repo {
 	return r
 }
 
+// runReview reviews as huginn review does with args, without capslock: the
+// shop's code reaches nothing outside the process, and tracing it takes
+// seconds. TestReviewCapabilities prints what capslock finds.
 func runReview(t *testing.T, args ...string) string {
 	t.Helper()
 	var out, errOut bytes.Buffer
-	if err := reviewMergeRequest(context.Background(), &out, &errOut, args); err != nil {
+	if err := reviewMergeRequest(context.Background(), &out, &errOut, append([]string{"-caps=false"}, args...)); err != nil {
 		t.Fatalf("review %q: %v\n%s", args, err, errOut.String())
 	}
 	return out.String()
@@ -134,6 +139,53 @@ func TestReviewFormats(t *testing.T) {
 	}
 	if d := rv.Report.Relations.AddedDeps; len(d) != 2 || d[0].Crossing != "outward" || d[1].Crossing != "inward" {
 		t.Errorf("json deps = %+v", d)
+	}
+}
+
+// TestReviewCapabilities prints a change reaching the network, as capslock
+// traced it, and a traced change reaching nothing outside the process.
+func TestReviewCapabilities(t *testing.T) {
+	rv := &review.Review{
+		Report: &semdiff.Report{Changes: []semdiff.Change{{Name: "payments.Authorize", Symbol: "func"}}},
+		Traced: true,
+		Focus: []review.Focus{{
+			Kind: review.FocusExternal, Name: "payments.Authorize", Path: "payments/payments.go", Line: 5, What: "+1 stmt", Change: 0,
+			Reaches: []semdiff.Caller{{Name: "billing.Charge", Calls: 1}},
+			Capabilities: []review.Capability{
+				{Name: "NETWORK", New: true, Elided: 1, Path: []review.Step{
+					{Name: "payments.Authorize"},
+					{Name: "http.Get", Path: "payments/payments.go", Line: 6},
+					{Name: "net.(*Dialer).DialContext"},
+				}},
+				{Name: "MODIFY_SYSTEM_STATE/ENV", Path: []review.Step{
+					{Name: "payments.Authorize.func1"},
+					{Name: "payments.setProxy", Path: "payments/payments.go", Line: 9},
+					{Name: "os.Setenv", Path: "payments/proxy.go", Line: 4},
+				}},
+			},
+		}},
+	}
+	var text, md bytes.Buffer
+	(&printer{w: &text}).focus(rv)
+	want := "  [external] payments.Authorize  payments/payments.go:5\n" +
+		"      +1 stmt · called by billing.Charge\n" +
+		"      network (new): http.Get → … → net.(*Dialer).DialContext  payments/payments.go:6\n" +
+		"      env: payments.Authorize.func1 → payments.setProxy → os.Setenv  payments/proxy.go:4\n"
+	if !strings.Contains(text.String(), want) || strings.Contains(text.String(), "traced with capslock") {
+		t.Errorf("text:\n%s\nwant\n%s", text.String(), want)
+	}
+	(&markdown{w: &md}).focus(rv)
+	wantMD := "- **external** `payments.Authorize` at `payments/payments.go:5`: +1 stmt · called by `billing.Charge`\n" +
+		"  - network (new): `http.Get` → … → `net.(*Dialer).DialContext` at `payments/payments.go:6`\n"
+	if !strings.Contains(md.String(), wantMD) {
+		t.Errorf("markdown:\n%s\nwant\n%s", md.String(), wantMD)
+	}
+
+	rv.Focus = nil
+	text.Reset()
+	(&printer{w: &text}).focus(rv)
+	if !strings.Contains(text.String(), "  "+noneOutside+"\n") {
+		t.Errorf("text without anything outside:\n%s", text.String())
 	}
 }
 

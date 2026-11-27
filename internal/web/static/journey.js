@@ -1349,13 +1349,13 @@
   function zoom(f) {
     if (state.mode === 'arch') {
       if (f) stack.zoomBy(f);
-      else stack.resetZoom();
+      else stack.fit();
     } else if (f) zoomBy(f);
     else zoomTo(d3.zoomIdentity);
   }
 
   // setSpread lays the map and the architecture out again with more or less
-  // room between the packages. Alt and the wheel change it many times a
+  // room between the packages. Ctrl and the wheel change it many times a
   // second, so the map waits for the next frame.
   function setSpread(v) {
     state.spread = v;

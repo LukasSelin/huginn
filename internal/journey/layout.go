@@ -133,71 +133,93 @@ func minSizes(n int) (pkgs, kids int) {
 // subdirectories.
 func tree(pkgs []Package) *node {
 	minGroup, minKids := minSizes(len(pkgs))
-	dirs := map[string]*node{}
-	var dir func(p string) *node
-	dir = func(p string) *node {
-		if d := dirs[p]; d != nil {
-			return d
-		}
-		d := &node{path: p, pkg: -1}
-		dirs[p] = d
-		if p != "." {
-			up := "."
-			if i := strings.LastIndexByte(p, '/'); i >= 0 {
-				up = p[:i]
-			}
-			parent := dir(up)
-			parent.kids = append(parent.kids, d)
-		}
-		return d
-	}
-	root := dir(".")
+	dirs := dirNodes{}
+	root := dirs.get(".")
 	for i, p := range pkgs {
-		d := dir(p.Path)
+		d := dirs.get(p.Path)
 		d.kids = append(d.kids, &node{path: p.Path, pkg: i, r: math.Sqrt(float64(max(p.Peak, 1)))})
 	}
-	// fold returns what d leaves its parent: d itself, or, for a directory
-	// too small to be a group, what is in it. It counts the packages under
-	// d in size.
-	size := map[*node]int{}
-	var fold func(d *node) []*node
-	fold = func(d *node) []*node {
-		if d.pkg >= 0 {
-			size[d] = 1
-			return []*node{d}
-		}
-		var kids []*node
-		for _, k := range d.kids {
-			for _, f := range fold(k) {
-				kids = append(kids, f)
-				size[d] += size[f]
-			}
-		}
-		d.kids = kids
-		if len(kids) == 1 || d != root && (size[d] < minGroup || len(kids) < minKids) {
-			return kids
-		}
-		// The package of the directory itself first, then its
-		// subdirectories by path.
-		own := func(k *node) int {
-			if k.pkg >= 0 && k.path == d.path {
-				return 0
-			}
-			return 1
-		}
-		slices.SortFunc(d.kids, func(a, b *node) int { return cmp.Or(cmp.Compare(own(a), own(b)), cmp.Compare(a.path, b.path)) })
+	f := folder{root: root, minGroup: minGroup, minKids: minKids, size: map[*node]int{}}
+	root = f.fold(root)[0]
+	root.link()
+	return root
+}
+
+// dirNodes holds a node per directory, each hung under its parent's.
+type dirNodes map[string]*node
+
+// get returns the node of directory p, making it and the nodes above it as
+// needed.
+func (dirs dirNodes) get(p string) *node {
+	if d := dirs[p]; d != nil {
+		return d
+	}
+	d := &node{path: p, pkg: -1}
+	dirs[p] = d
+	if p != "." {
+		parent := dirs.get(parentDir(p))
+		parent.kids = append(parent.kids, d)
+	}
+	return d
+}
+
+// parentDir returns the directory above p, "." for a top-level one.
+func parentDir(p string) string {
+	if i := strings.LastIndexByte(p, '/'); i >= 0 {
+		return p[:i]
+	}
+	return "."
+}
+
+// folder folds the directories of a tree that are too small by minSizes
+// into their parent.
+type folder struct {
+	root              *node
+	minGroup, minKids int
+	size              map[*node]int // packages under each node folded so far
+}
+
+// fold returns what d leaves its parent: d itself, or, for a directory
+// too small to be a group, what is in it. It counts the packages under
+// d in size.
+func (f *folder) fold(d *node) []*node {
+	if d.pkg >= 0 {
+		f.size[d] = 1
 		return []*node{d}
 	}
-	root = fold(root)[0]
-	var link func(d *node)
-	link = func(d *node) {
-		for _, k := range d.kids {
-			k.parent, k.depth = d, d.depth+1
-			link(k)
+	var kids []*node
+	for _, k := range d.kids {
+		for _, c := range f.fold(k) {
+			kids = append(kids, c)
+			f.size[d] += f.size[c]
 		}
 	}
-	link(root)
-	return root
+	d.kids = kids
+	if len(kids) == 1 || d != f.root && (f.size[d] < f.minGroup || len(kids) < f.minKids) {
+		return kids
+	}
+	sortKids(d)
+	return []*node{d}
+}
+
+// sortKids puts the package of directory d itself first, then its
+// subdirectories by path.
+func sortKids(d *node) {
+	own := func(k *node) int {
+		if k.pkg >= 0 && k.path == d.path {
+			return 0
+		}
+		return 1
+	}
+	slices.SortFunc(d.kids, func(a, b *node) int { return cmp.Or(cmp.Compare(own(a), own(b)), cmp.Compare(a.path, b.path)) })
+}
+
+// link sets the parent and depth of everything under d.
+func (d *node) link() {
+	for _, k := range d.kids {
+		k.parent, k.depth = d, d.depth+1
+		k.link()
+	}
 }
 
 // leaves appends the packages under d, in tree order.
@@ -373,46 +395,7 @@ func stress(r []float64, mean float64, coupling []spring) (x, y []float64) {
 	for _, s := range coupling {
 		maxW = max(maxW, s.w)
 	}
-
-	// Number the sets by their first circle.
-	set := make([]int, n)
-	for i := range set {
-		set[i] = i
-	}
-	var find func(i int) int
-	find = func(i int) int {
-		if set[i] != i {
-			set[i] = find(set[i])
-		}
-		return set[i]
-	}
-	for _, s := range coupling {
-		a, b := find(s.a), find(s.b)
-		set[max(a, b)] = min(a, b)
-	}
-	var sets [][]int
-	at := map[int]int{}
-	for i := range n {
-		f := find(i)
-		k, ok := at[f]
-		if !ok {
-			k = len(sets)
-			at[f] = k
-			sets = append(sets, nil)
-		}
-		sets[k] = append(sets[k], i)
-	}
-	byMember := make([][]spring, len(sets))
-	local := make([]int, n)
-	for _, m := range sets {
-		for li, i := range m {
-			local[i] = li
-		}
-	}
-	for _, s := range coupling {
-		k := at[find(s.a)]
-		byMember[k] = append(byMember[k], spring{local[s.a], local[s.b], s.w})
-	}
+	sets, byMember := coupledSets(n, coupling)
 
 	x, y = make([]float64, n), make([]float64, n)
 	cr := make([]float64, len(sets))
@@ -441,6 +424,50 @@ func stress(r []float64, mean float64, coupling []spring) (x, y []float64) {
 	return x, y
 }
 
+// coupledSets finds the sets of the n circles that are coupled to one
+// another, directly or not, numbered by their first circle, and hands each
+// set its springs, between the circles' indexes within the set.
+func coupledSets(n int, coupling []spring) (sets [][]int, byMember [][]spring) {
+	set := make([]int, n)
+	for i := range set {
+		set[i] = i
+	}
+	var find func(i int) int
+	find = func(i int) int {
+		if set[i] != i {
+			set[i] = find(set[i])
+		}
+		return set[i]
+	}
+	for _, s := range coupling {
+		a, b := find(s.a), find(s.b)
+		set[max(a, b)] = min(a, b)
+	}
+	at := map[int]int{}
+	for i := range n {
+		f := find(i)
+		k, ok := at[f]
+		if !ok {
+			k = len(sets)
+			at[f] = k
+			sets = append(sets, nil)
+		}
+		sets[k] = append(sets[k], i)
+	}
+	byMember = make([][]spring, len(sets))
+	local := make([]int, n)
+	for _, m := range sets {
+		for li, i := range m {
+			local[i] = li
+		}
+	}
+	for _, s := range coupling {
+		k := at[find(s.a)]
+		byMember[k] = append(byMember[k], spring{local[s.a], local[s.b], s.w})
+	}
+	return sets, byMember
+}
+
 // pack places circles of radii r side by side without overlapping, largest
 // first, each where it is nearest the first among the spots touching one
 // already placed.
@@ -452,38 +479,57 @@ func pack(r []float64, mean float64) (x, y []float64) {
 		order[i] = i
 	}
 	slices.SortStableFunc(order, func(a, b int) int { return cmp.Compare(r[b], r[a]) })
-	room := func(a, b int) float64 { return r[a] + r[b] + 0.5*gap*min(r[a], r[b], mean) }
-	const turns = 24
-	placed := []int{order[0]}
+	p := packing{r: r, x: x, y: y, mean: mean, placed: []int{order[0]}}
 	for _, i := range order[1:] {
-		bx, by, best := 0.0, 0.0, math.Inf(1)
-		// Spots touching the circles placed last, which are the ones on
-		// the edge; the inner ones are long surrounded.
-		anchors := placed[max(0, len(placed)-64):]
-		for _, a := range anchors {
-			for t := range turns {
-				sin, cos := math.Sincos(2 * math.Pi * float64(t) / turns)
-				cx, cy := x[a]+room(a, i)*cos, y[a]+room(a, i)*sin
-				d := math.Hypot(cx, cy)
-				if d >= best {
-					continue
-				}
-				free := true
-				for _, o := range placed {
-					if math.Hypot(cx-x[o], cy-y[o]) < room(o, i)-1e-9 {
-						free = false
-						break
-					}
-				}
-				if free {
-					bx, by, best = cx, cy, d
-				}
-			}
-		}
-		x[i], y[i] = bx, by
-		placed = append(placed, i)
+		x[i], y[i] = p.spot(i)
+		p.placed = append(p.placed, i)
 	}
 	return x, y
+}
+
+// packing is the circles pack has placed so far.
+type packing struct {
+	r, x, y []float64
+	mean    float64
+	placed  []int // in the order they were placed
+}
+
+// room is how far apart the centers of circles a and b must be.
+func (p *packing) room(a, b int) float64 {
+	return p.r[a] + p.r[b] + 0.5*gap*min(p.r[a], p.r[b], p.mean)
+}
+
+// spot returns the free spot for circle i nearest the first circle, among
+// those touching a circle already placed.
+func (p *packing) spot(i int) (bx, by float64) {
+	const turns = 24
+	best := math.Inf(1)
+	// Spots touching the circles placed last, which are the ones on
+	// the edge; the inner ones are long surrounded.
+	anchors := p.placed[max(0, len(p.placed)-64):]
+	for _, a := range anchors {
+		for t := range turns {
+			sin, cos := math.Sincos(2 * math.Pi * float64(t) / turns)
+			cx, cy := p.x[a]+p.room(a, i)*cos, p.y[a]+p.room(a, i)*sin
+			d := math.Hypot(cx, cy)
+			if d >= best || !p.free(i, cx, cy) {
+				continue
+			}
+			bx, by, best = cx, cy, d
+		}
+	}
+	return bx, by
+}
+
+// free reports whether circle i fits at (cx, cy) without overlapping a
+// circle already placed.
+func (p *packing) free(i int, cx, cy float64) bool {
+	for _, o := range p.placed {
+		if math.Hypot(cx-p.x[o], cy-p.y[o]) < p.room(o, i)-1e-9 {
+			return false
+		}
+	}
+	return true
 }
 
 // spread places circles of radii r, all coupled to one another directly or
@@ -497,6 +543,35 @@ func spread(r []float64, mean, maxW float64, coupling []spring) (x, y []float64)
 	if n == 1 {
 		return x, y
 	}
+	d := wantedDistances(r, mean, maxW, coupling)
+
+	// Start on a sunflower spiral in tree order, so siblings start close.
+	const golden = 2.399963229728653 // radians
+	for i := range n {
+		s := 2 * mean * math.Sqrt(float64(i)+0.5)
+		x[i], y[i] = s*math.Cos(float64(i)*golden), s*math.Sin(float64(i)*golden)
+	}
+
+	// Each step moves every circle in turn to where its distances to all
+	// the others, weighted by 1/d², are best met given where the others are
+	// by then. Very large groups take fewer steps.
+	steps := min(300, max(30, int(3e7/float64(n*n))))
+	for range steps {
+		for i := range n {
+			x[i], y[i] = majorize(i, x, y, d)
+		}
+	}
+
+	// Distances are only met on average; push any circles still
+	// overlapping apart.
+	separate(x, y, r, mean, 500)
+	return x, y
+}
+
+// wantedDistances returns the distance spread wants between every two of
+// the circles of radii r.
+func wantedDistances(r []float64, mean, maxW float64, coupling []spring) [][]float64 {
+	n := len(r)
 	// Gaps go by the smaller of two circles, so that a small package keeps
 	// close to a large group rather than a gap the size of the average.
 	unit := func(a, b int) float64 { return min(r[a], r[b], mean) }
@@ -519,44 +594,29 @@ func spread(r []float64, mean, maxW float64, coupling []spring) (x, y []float64)
 			}
 		}
 	}
+	return d
+}
 
-	// Start on a sunflower spiral in tree order, so siblings start close.
-	const golden = 2.399963229728653 // radians
-	for i := range n {
-		s := 2 * mean * math.Sqrt(float64(i)+0.5)
-		x[i], y[i] = s*math.Cos(float64(i)*golden), s*math.Sin(float64(i)*golden)
-	}
-
-	// Each step moves every circle in turn to where its distances to all
-	// the others, weighted by 1/d², are best met given where the others are
-	// by then. Very large groups take fewer steps.
-	steps := min(300, max(30, int(3e7/float64(n*n))))
-	for range steps {
-		for i := range n {
-			sx, sy, sw := 0.0, 0.0, 0.0
-			for k := range n {
-				if k == i {
-					continue
-				}
-				w := 1 / (d[i][k] * d[i][k])
-				dx, dy := x[i]-x[k], y[i]-y[k]
-				l := math.Hypot(dx, dy)
-				if l < 1e-9 {
-					// Coincident: separate along a fixed direction.
-					dx, dy, l = float64(i-k), 1, math.Hypot(float64(i-k), 1)
-				}
-				sx += w * (x[k] + d[i][k]*dx/l)
-				sy += w * (y[k] + d[i][k]*dy/l)
-				sw += w
-			}
-			x[i], y[i] = sx/sw, sy/sw
+// majorize returns where circle i best meets its wanted distances d[i] to
+// all the others, weighted by 1/d², given where they are now.
+func majorize(i int, x, y []float64, d [][]float64) (float64, float64) {
+	sx, sy, sw := 0.0, 0.0, 0.0
+	for k := range x {
+		if k == i {
+			continue
 		}
+		w := 1 / (d[i][k] * d[i][k])
+		dx, dy := x[i]-x[k], y[i]-y[k]
+		l := math.Hypot(dx, dy)
+		if l < 1e-9 {
+			// Coincident: separate along a fixed direction.
+			dx, dy, l = float64(i-k), 1, math.Hypot(float64(i-k), 1)
+		}
+		sx += w * (x[k] + d[i][k]*dx/l)
+		sy += w * (y[k] + d[i][k]*dy/l)
+		sw += w
 	}
-
-	// Distances are only met on average; push any circles still
-	// overlapping apart.
-	separate(x, y, r, mean, 500)
-	return x, y
+	return sx / sw, sy / sw
 }
 
 // separate pushes circles that overlap, or come closer than a sliver of
@@ -568,31 +628,39 @@ func separate(x, y, r []float64, mean float64, rounds int) bool {
 		moved := false
 		for i := range n {
 			for k := i + 1; k < n; k++ {
-				dx, dy := x[k]-x[i], y[k]-y[i]
-				want := r[i] + r[k] + 0.25*gap*min(r[i], r[k], mean)
-				if math.Abs(dx) >= want || math.Abs(dy) >= want {
-					continue
+				if pushApart(x, y, r, mean, i, k) {
+					moved = true
 				}
-				l := math.Hypot(dx, dy)
-				if l >= want {
-					continue
-				}
-				if l < 1e-9 {
-					dx, dy, l = float64(k-i), 1, math.Hypot(float64(k-i), 1)
-				}
-				ai, ak := r[i]*r[i], r[k]*r[k]
-				push := (want - l) / l
-				x[i] -= dx * push * ak / (ai + ak)
-				y[i] -= dy * push * ak / (ai + ak)
-				x[k] += dx * push * ai / (ai + ak)
-				y[k] += dy * push * ai / (ai + ak)
-				moved = true
 			}
 		}
 		if !moved {
 			return false
 		}
 	}
+	return true
+}
+
+// pushApart pushes circles i and k apart if they overlap or come closer
+// than a sliver of room, the smaller the more, and reports whether it did.
+func pushApart(x, y, r []float64, mean float64, i, k int) bool {
+	dx, dy := x[k]-x[i], y[k]-y[i]
+	want := r[i] + r[k] + 0.25*gap*min(r[i], r[k], mean)
+	if math.Abs(dx) >= want || math.Abs(dy) >= want {
+		return false
+	}
+	l := math.Hypot(dx, dy)
+	if l >= want {
+		return false
+	}
+	if l < 1e-9 {
+		dx, dy, l = float64(k-i), 1, math.Hypot(float64(k-i), 1)
+	}
+	ai, ak := r[i]*r[i], r[k]*r[k]
+	push := (want - l) / l
+	x[i] -= dx * push * ak / (ai + ak)
+	y[i] -= dy * push * ak / (ai + ak)
+	x[k] += dx * push * ai / (ai + ak)
+	y[k] += dy * push * ai / (ai + ak)
 	return true
 }
 
@@ -724,10 +792,10 @@ type item struct {
 // queue is a min-heap of items by distance.
 type queue []item
 
-func (q queue) Len() int           { return len(q) }
-func (q queue) Less(i, k int) bool { return q[i].d < q[k].d }
-func (q queue) Swap(i, k int)      { q[i], q[k] = q[k], q[i] }
-func (q *queue) Push(x any)        { *q = append(*q, x.(item)) }
+func (q *queue) Len() int           { return len(*q) }
+func (q *queue) Less(i, k int) bool { return (*q)[i].d < (*q)[k].d }
+func (q *queue) Swap(i, k int)      { (*q)[i], (*q)[k] = (*q)[k], (*q)[i] }
+func (q *queue) Push(x any)         { *q = append(*q, x.(item)) }
 func (q *queue) Pop() any {
 	old := *q
 	it := old[len(old)-1]

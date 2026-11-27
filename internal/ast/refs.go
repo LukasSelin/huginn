@@ -269,10 +269,10 @@ func (r *refCollector) declare(n goast.Node) bool {
 		r.declareFields(x.Params)
 		r.declareFields(x.Results)
 	case *goast.AssignStmt:
+		if x.Tok == token.DEFINE {
+			r.declareIdents(x.Lhs...)
+		}
 		for _, e := range x.Lhs {
-			if id, ok := e.(*goast.Ident); ok && x.Tok == token.DEFINE {
-				r.declared[id.Name] = true
-			}
 			r.write(e)
 		}
 	case *goast.IncDecStmt:
@@ -284,12 +284,12 @@ func (r *refCollector) declare(n goast.Node) bool {
 	case *goast.SendStmt:
 		r.write(x.Chan)
 	case *goast.RangeStmt:
-		for _, e := range []goast.Expr{x.Key, x.Value} {
-			if x.Tok == token.ASSIGN {
-				r.write(e)
-			} else if id, ok := e.(*goast.Ident); ok && x.Tok == token.DEFINE {
-				r.declared[id.Name] = true
-			}
+		if x.Tok == token.ASSIGN {
+			r.write(x.Key)
+			r.write(x.Value)
+		}
+		if x.Tok == token.DEFINE {
+			r.declareIdents(x.Key, x.Value)
 		}
 	case *goast.ValueSpec:
 		for _, id := range x.Names {
@@ -308,41 +308,28 @@ func (r *refCollector) declare(n goast.Node) bool {
 			r.skip[x.Label] = true
 		}
 	case *goast.CompositeLit:
-		// Keys of struct literals are field names. Map keys are expressions,
-		// but the literal's type is only recognizable as a map when spelled out.
-		if _, isMap := x.Type.(*goast.MapType); !isMap {
-			pkg, typ := r.literalType(x.Type)
-			if typ != "" && len(x.Elts) > 0 {
-				if _, keyed := x.Elts[0].(*goast.KeyValueExpr); !keyed {
-					// T{1, "x"}: every field, by position. T may also be
-					// a named slice or array type; it is not known here.
-					r.addField(refKey{pkg: pkg, recv: typ}, x)
-				}
-			}
-			for _, e := range x.Elts {
-				if kv, ok := e.(*goast.KeyValueExpr); ok {
-					if id, ok := kv.Key.(*goast.Ident); ok {
-						r.skip[id] = true
-						r.addField(refKey{pkg: pkg, recv: typ, name: id.Name}, id)
-					}
-				}
-			}
-		}
+		r.declareLiteral(x)
 	case *goast.CallExpr:
-		fn := callee(x.Fun)
-		r.called[fn] = true
-		switch fn := fn.(type) {
-		case *goast.Ident:
-			if (fn.Name == "delete" || fn.Name == "clear" || fn.Name == "close") && len(x.Args) > 0 {
-				r.write(x.Args[0])
-			}
-		case *goast.SelectorExpr:
-			if on, ok := unparen(fn.X).(*goast.SelectorExpr); ok {
-				r.methods[on] = append(r.methods[on], fn.Sel.Name)
-			}
-		}
+		r.declareCall(x)
 	}
 	return true
+}
+
+// declareCall records the callee of a call, the field that delete, clear or
+// close changes, and the method called on a field, x.f.M().
+func (r *refCollector) declareCall(x *goast.CallExpr) {
+	fn := callee(x.Fun)
+	r.called[fn] = true
+	switch fn := fn.(type) {
+	case *goast.Ident:
+		if (fn.Name == "delete" || fn.Name == "clear" || fn.Name == "close") && len(x.Args) > 0 {
+			r.write(x.Args[0])
+		}
+	case *goast.SelectorExpr:
+		if on, ok := unparen(fn.X).(*goast.SelectorExpr); ok {
+			r.methods[on] = append(r.methods[on], fn.Sel.Name)
+		}
+	}
 }
 
 func unparen(e goast.Expr) goast.Expr {
@@ -352,6 +339,43 @@ func unparen(e goast.Expr) goast.Expr {
 			return e
 		}
 		e = p.X
+	}
+}
+
+// declareIdents records each identifier among es as declared. Anything
+// else, such as an absent range key, declares nothing.
+func (r *refCollector) declareIdents(es ...goast.Expr) {
+	for _, e := range es {
+		if id, ok := e.(*goast.Ident); ok {
+			r.declared[id.Name] = true
+		}
+	}
+}
+
+// declareLiteral records the fields a composite literal sets. Keys of struct
+// literals are field names. Map keys are expressions, but the literal's type
+// is only recognizable as a map when spelled out.
+func (r *refCollector) declareLiteral(x *goast.CompositeLit) {
+	if _, isMap := x.Type.(*goast.MapType); isMap {
+		return
+	}
+	pkg, typ := r.literalType(x.Type)
+	if typ != "" && len(x.Elts) > 0 {
+		if _, keyed := x.Elts[0].(*goast.KeyValueExpr); !keyed {
+			// T{1, "x"}: every field, by position. T may also be
+			// a named slice or array type; it is not known here.
+			r.addField(refKey{pkg: pkg, recv: typ}, x)
+		}
+	}
+	for _, e := range x.Elts {
+		kv, ok := e.(*goast.KeyValueExpr)
+		if !ok {
+			continue
+		}
+		if id, ok := kv.Key.(*goast.Ident); ok {
+			r.skip[id] = true
+			r.addField(refKey{pkg: pkg, recv: typ, name: id.Name}, id)
+		}
 	}
 }
 
@@ -380,38 +404,50 @@ func (r *refCollector) skipFieldNames(fl *goast.FieldList) {
 func (r *refCollector) visit(n goast.Node) bool {
 	switch x := n.(type) {
 	case *goast.SelectorExpr:
-		r.skip[x.Sel] = true
-		if id, ok := x.X.(*goast.Ident); ok && !r.declared[id.Name] {
-			if path, ok := r.imports[id.Name]; ok {
-				r.skip[id] = true
-				r.add(refKey{kind: RefImport, pkg: path, name: x.Sel.Name}, x)
-				return true
-			}
-		}
-		if !r.called[x] {
-			key := refKey{name: x.Sel.Name}
-			if id, ok := x.X.(*goast.Ident); ok && id.Name == r.recvName && r.recvName != "" && r.recvName != "_" {
-				key.recv = r.recvType
-			}
-			r.addField(key, x)
-		}
-		if r.called[x] {
-			key := refKey{kind: RefMethod, name: x.Sel.Name}
-			if id, ok := x.X.(*goast.Ident); ok && id.Name == r.recvName && r.recvName != "" && r.recvName != "_" {
-				key.recv = r.recvType
-			}
-			r.add(key, x)
-		}
+		r.visitSelector(x)
 	case *goast.Ident:
-		if r.skip[x] || r.declared[x.Name] || x.Name == "_" {
-			return true
-		}
-		if _, isImport := r.imports[x.Name]; isImport {
-			return true
-		}
-		r.add(refKey{kind: RefLocal, name: x.Name}, x)
+		r.visitIdent(x)
 	}
 	return true
+}
+
+// visitSelector records x.Sel as a reference into an import, a method call
+// or a field use, and marks the identifiers that are not references.
+func (r *refCollector) visitSelector(x *goast.SelectorExpr) {
+	r.skip[x.Sel] = true
+	if id, ok := x.X.(*goast.Ident); ok && !r.declared[id.Name] {
+		if path, ok := r.imports[id.Name]; ok {
+			r.skip[id] = true
+			r.add(refKey{kind: RefImport, pkg: path, name: x.Sel.Name}, x)
+			return
+		}
+	}
+	if r.called[x] {
+		r.add(refKey{kind: RefMethod, recv: r.recvTypeOf(x.X), name: x.Sel.Name}, x)
+	} else {
+		r.addField(refKey{recv: r.recvTypeOf(x.X), name: x.Sel.Name}, x)
+	}
+}
+
+// recvTypeOf returns the receiver's base type when e is the enclosing
+// method's receiver variable, and "" otherwise.
+func (r *refCollector) recvTypeOf(e goast.Expr) string {
+	if id, ok := e.(*goast.Ident); ok && id.Name == r.recvName && r.recvName != "" && r.recvName != "_" {
+		return r.recvType
+	}
+	return ""
+}
+
+// visitIdent records an unqualified identifier as a local reference unless
+// it is declared in the function, blank, an import name or not a reference.
+func (r *refCollector) visitIdent(x *goast.Ident) {
+	if r.skip[x] || r.declared[x.Name] || x.Name == "_" {
+		return
+	}
+	if _, isImport := r.imports[x.Name]; isImport {
+		return
+	}
+	r.add(refKey{kind: RefLocal, name: x.Name}, x)
 }
 
 func (r *refCollector) add(k refKey, n goast.Expr) {

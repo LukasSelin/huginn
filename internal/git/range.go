@@ -43,25 +43,9 @@ func (r *Repo) DiffRange(ctx context.Context, base, head string) (_ *Range, err 
 	if rg.Head, err = r.resolve(ctx, head, "commit"); err != nil {
 		return nil, err
 	}
-
-	cmd := r.command(ctx, "diff", "--raw", "--numstat", "-z", "--no-abbrev", "-M",
-		"--no-color", "--no-relative", "--no-ext-diff", "--no-textconv",
-		"--end-of-options", rg.Base, rg.Head, "--")
-	var stderr bytes.Buffer
-	cmd.Stderr = &stderr
-	out, err := cmd.Output()
-	if err != nil {
-		return nil, gitError(cmd, err, &stderr)
+	if err = r.rangeChanges(ctx, rg); err != nil {
+		return nil, err
 	}
-	lr := newLogReader(bytes.NewReader(out))
-	var c Commit
-	if err = lr.files(&c); err != nil {
-		return nil, fmt.Errorf("git diff: %w", err)
-	}
-	if lr.pending != nil {
-		return nil, fmt.Errorf("git diff: unexpected entry %q", *lr.pending)
-	}
-	rg.Changed, rg.Added, rg.Removed = c.Files, c.Added, c.Removed
 
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
@@ -79,32 +63,7 @@ func (r *Repo) DiffRange(ctx context.Context, base, head string) (_ *Range, err 
 	}()
 
 	// Read every side first, then parse them on all cores.
-	var blobs []*blob
-	side := func(path, mode, hash string) *blob {
-		if !isGoFile(path, mode) {
-			return nil
-		}
-		b := &blob{hash: hash, path: path, done: make(chan struct{})}
-		blobs = append(blobs, b)
-		return b
-	}
-	type sides struct{ old, new *blob }
-	var files []sides
-	var changes []*FileChange
-	for i := range rg.Changed {
-		fc := &rg.Changed[i]
-		var s sides
-		// A copy leaves its source in place, so only the new side counts.
-		if fc.Status != StatusCopied {
-			s.old = side(fc.OldPath, fc.oldMode, fc.oldHash)
-		}
-		s.new = side(fc.NewPath, fc.newMode, fc.newHash)
-		if s.old == nil && s.new == nil {
-			continue
-		}
-		files = append(files, s)
-		changes = append(changes, fc)
-	}
+	files, blobs := rangeSides(rg.Changed)
 	src := map[*blob][]byte{} // parsing lets go of a blob's contents
 	for _, b := range blobs {
 		if b.src, err = cf.blob(b.hash); err != nil {
@@ -114,8 +73,8 @@ func (r *Repo) DiffRange(ctx context.Context, base, head string) (_ *Range, err 
 	}
 	parseAll(blobs)
 
-	for i, s := range files {
-		fd := FileDiff{FileChange: *changes[i]}
+	for _, s := range files {
+		fd := FileDiff{FileChange: *s.fc}
 		for _, x := range []struct {
 			b   *blob
 			f   **ast.File
@@ -133,6 +92,60 @@ func (r *Repo) DiffRange(ctx context.Context, base, head string) (_ *Range, err 
 		rg.Files = append(rg.Files, fd)
 	}
 	return rg, nil
+}
+
+// rangeChanges lists the files that differ between rg.Base and rg.Head into
+// rg.Changed, with the lines added and removed over all of them.
+func (r *Repo) rangeChanges(ctx context.Context, rg *Range) error {
+	cmd := r.command(ctx, "diff", "--raw", "--numstat", "-z", "--no-abbrev", "-M",
+		"--no-color", "--no-relative", "--no-ext-diff", "--no-textconv",
+		"--end-of-options", rg.Base, rg.Head, "--")
+	var stderr bytes.Buffer
+	cmd.Stderr = &stderr
+	out, err := cmd.Output()
+	if err != nil {
+		return gitError(cmd, err, &stderr)
+	}
+	lr := newLogReader(bytes.NewReader(out))
+	var c Commit
+	if err = lr.files(&c); err != nil {
+		return fmt.Errorf("git diff: %w", err)
+	}
+	if lr.pending != nil {
+		return fmt.Errorf("git diff: unexpected entry %q", *lr.pending)
+	}
+	rg.Changed, rg.Added, rg.Removed = c.Files, c.Added, c.Removed
+	return nil
+}
+
+// rangeSides finds both sides of every Go file in changed, and returns them
+// with the blobs still to be read, one per side, in order. Unlike a walk,
+// a range shares no blobs between files.
+func rangeSides(changed []FileChange) ([]pendingSides, []*blob) {
+	var blobs []*blob
+	side := func(path, mode, hash string) *blob {
+		if !isGoFile(path, mode) {
+			return nil
+		}
+		b := &blob{hash: hash, path: path, done: make(chan struct{})}
+		blobs = append(blobs, b)
+		return b
+	}
+	var files []pendingSides
+	for i := range changed {
+		fc := &changed[i]
+		s := pendingSides{fc: fc}
+		// A copy leaves its source in place, so only the new side counts.
+		if fc.Status != StatusCopied {
+			s.old = side(fc.OldPath, fc.oldMode, fc.oldHash)
+		}
+		s.new = side(fc.NewPath, fc.newMode, fc.newHash)
+		if s.old == nil && s.new == nil {
+			continue
+		}
+		files = append(files, s)
+	}
+	return files, blobs
 }
 
 // parseAll parses blobs whose contents have been read, on every core.

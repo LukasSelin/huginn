@@ -53,32 +53,12 @@ func biggestBirth(f Facts) string {
 }
 
 func paragraph(f Facts) string {
-	var s []string
-	from, to := f.From.Format("Jan 2, 2006"), f.To.Format("Jan 2, 2006")
-	if from == to {
-		s = append(s, fmt.Sprintf("On %s, %s landed.", from, plural(f.Commits, "commit")))
-	} else {
-		s = append(s, fmt.Sprintf("Between %s and %s, %s landed.", from, to, plural(f.Commits, "commit")))
-	}
+	s := []string{whenSentence(f)}
 	if t := themeSentence(f); t != "" {
 		s = append(s, t)
 	}
 
-	if f.Edits > 0 {
-		share := percent(f.HottestEdits, f.Edits)
-		lead := fmt.Sprintf("The busiest package was %s, with %d%% of the %s", pkgName(f.Hottest), share, plural(f.Edits, "semantic edit"))
-		if 2*f.HottestEdits > f.Edits {
-			lead = fmt.Sprintf("Most of the %s (%d%%) were in %s", plural(f.Edits, "semantic edit"), share, pkgName(f.Hottest))
-		}
-		if f.Runner != "" {
-			lead += fmt.Sprintf(", followed by %s (%d%%)", pkgName(f.Runner), percent(f.RunnerEdits, f.Edits))
-		}
-		s = append(s, lead+".")
-		s = append(s, fmt.Sprintf("%s %s added and %d removed, leaving %s in %s.",
-			plural(f.Added, "symbol"), pick(f.Added, "was", "were"), f.Removed, plural(f.Live, "live symbol"), plural(f.LivePackages, "package")))
-	} else {
-		s = append(s, "No Go symbols changed.")
-	}
+	s = append(s, editSentences(f)...)
 
 	if len(f.Births) > 0 {
 		s = append(s, pick(len(f.Births), "New package: ", "New packages: ")+names(f.Births)+".")
@@ -92,7 +72,42 @@ func paragraph(f Facts) string {
 	if p := peopleSentence(f); p != "" {
 		s = append(s, p)
 	}
-	// The weightiest moment that has not been said already.
+	if best := unsaid(f); best != nil {
+		s = append(s, best.Text+".")
+	}
+	return strings.Join(s, " ")
+}
+
+// whenSentence says when the chapter's commits landed, and how many.
+func whenSentence(f Facts) string {
+	from, to := f.From.Format("Jan 2, 2006"), f.To.Format("Jan 2, 2006")
+	if from == to {
+		return fmt.Sprintf("On %s, %s landed.", from, plural(f.Commits, "commit"))
+	}
+	return fmt.Sprintf("Between %s and %s, %s landed.", from, to, plural(f.Commits, "commit"))
+}
+
+// editSentences say where the semantic edits went and what they left, or
+// that there were none.
+func editSentences(f Facts) []string {
+	if f.Edits == 0 {
+		return []string{"No Go symbols changed."}
+	}
+	share := percent(f.HottestEdits, f.Edits)
+	lead := fmt.Sprintf("The busiest package was %s, with %d%% of the %s", pkgName(f.Hottest), share, plural(f.Edits, "semantic edit"))
+	if 2*f.HottestEdits > f.Edits {
+		lead = fmt.Sprintf("Most of the %s (%d%%) were in %s", plural(f.Edits, "semantic edit"), share, pkgName(f.Hottest))
+	}
+	if f.Runner != "" {
+		lead += fmt.Sprintf(", followed by %s (%d%%)", pkgName(f.Runner), percent(f.RunnerEdits, f.Edits))
+	}
+	return []string{lead + ".", fmt.Sprintf("%s %s added and %d removed, leaving %s in %s.",
+		plural(f.Added, "symbol"), pick(f.Added, "was", "were"), f.Removed, plural(f.Live, "live symbol"), plural(f.LivePackages, "package"))}
+}
+
+// unsaid returns the weightiest moment that has not been said already, the
+// first among equals; nil if there is none.
+func unsaid(f Facts) *Moment {
 	var best *Moment
 	for i, m := range f.Moments {
 		said := m.Kind == Birth || m.Kind == Death || m.Kind == Tagged && len(f.Releases) > 1 || m.Kind == Newcomer
@@ -100,10 +115,7 @@ func paragraph(f Facts) string {
 			best = &f.Moments[i]
 		}
 	}
-	if best != nil {
-		s = append(s, best.Text+".")
-	}
-	return strings.Join(s, " ")
+	return best
 }
 
 // typeNouns name conventional-commit types as counted things.

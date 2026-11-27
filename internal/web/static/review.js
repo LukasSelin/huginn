@@ -2,11 +2,16 @@
 
 // The review page: what a merge request changes since its merge base with
 // the branch it goes into, optionally limited to folders. It opens on what
-// the diff does not show (the exported API it breaks, the existing code it
-// edits and who runs that code, the imports it starts), then the packages
-// it reaches, the code depending on what it changed, and the changes, the
-// edits of existing code in full and the new code and tests folded away.
-// What is reviewed lives in the URL, so a review can be linked to.
+// the diff does not show (the code it adds or edits that reaches the
+// network, files or other programs, the exported API it breaks, the
+// existing code it edits and who runs that code, the imports it starts),
+// then the packages it reaches, the code depending on what it changed, and
+// the changes, the edits of existing code in full and the new code and
+// tests folded away. What is reviewed lives in the URL, so a review can be
+// linked to.
+//
+// Tracing what reaches outside the process takes capslock a while, so the
+// page shows the review first and asks for the trace after.
 
 const state = {
   rv: null,          // the review on show
@@ -16,12 +21,15 @@ const state = {
   outsideOnly: false,
   withTests: false,  // the impact lists callers in test files too
   showAll: new Set(), // lists expanded past their first rows
-  ctrl: null,        // aborts the review being fetched
+  ctrl: null,        // aborts the review being fetched, and its trace
+  tracing: false,    // capslock is tracing the review on show
+  traceError: '',    // why asking for the trace failed
 };
 
 const LIST_ROWS = 40;
-const LOOK_EDITS = 6; // edits of existing code in "Look here first" before the rest fold away
+const LOOK_EDITS = 6; // edits of existing code, and changes reaching outside, in "Look here first" before the rest fold away
 const REACH_NAMES = 3;
+const PATH_NAMES = 6; // calls named on a path out of the process
 const shortHash = (s) => s.slice(0, 7);
 const sum = (xs, f) => xs.reduce((n, x) => n + f(x), 0);
 
@@ -91,12 +99,13 @@ async function run() {
   loading.hidden = false;
   loading.className = 'loading';
   loading.textContent = 'Reviewing…';
+  const q = query();
   try {
-    const r = await fetch('/api/review?' + query(), { signal: ctrl.signal });
+    const r = await fetch('/api/review?' + q, { signal: ctrl.signal });
     if (!r.ok) throw new Error((await r.text()).trim() || `${r.status}`);
     const rv = await r.json();
     if (ctrl !== state.ctrl) return;
-    Object.assign(state, { rv, focus: null, showAll: new Set() });
+    Object.assign(state, { rv, focus: null, showAll: new Set(), tracing: rv.traceable && !rv.traced, traceError: '' });
     loading.hidden = true;
     $('out').hidden = false;
     render();
@@ -105,7 +114,34 @@ async function run() {
     $('out').hidden = true;
     loading.className = 'loading error';
     loading.textContent = String(e.message || e);
+    return;
   }
+  if (state.tracing) traceOutside(q, ctrl);
+}
+
+// traceOutside asks for the review q again, traced with capslock, and puts
+// what reaches outside the process into "Look here first" and the order of
+// the changes, leaving the rest of the page as the reader left it.
+async function traceOutside(q, ctrl) {
+  const traced = new URLSearchParams(q);
+  traced.set('caps', '1');
+  try {
+    const r = await fetch('/api/review?' + traced, { signal: ctrl.signal });
+    if (!r.ok) throw new Error((await r.text()).trim() || `${r.status}`);
+    const rv = await r.json();
+    if (ctrl !== state.ctrl) return;
+    const cur = state.rv;
+    if (rv.headHash === cur.headHash && rv.mergeBase === cur.mergeBase) {
+      Object.assign(cur, { focus: rv.focus, traced: rv.traced, warnings: rv.warnings });
+    }
+  } catch (e) {
+    if (e.name === 'AbortError' || ctrl !== state.ctrl) return;
+    state.traceError = String(e.message || e);
+  }
+  state.tracing = false;
+  warnings();
+  look();
+  changes();
 }
 
 // --- The report -------------------------------------------------------------
@@ -116,14 +152,19 @@ function render() {
   $('what').textContent = `${rv.headName} into ${rv.target} · merge base ${shortHash(rv.mergeBase)} · ${plural(rv.commits, 'commit')} · ${where}`;
   $('headline').textContent = rv.headline;
   $('kinds').replaceChildren(...KINDS.filter(([k]) => rv.counts[k]).map(([k, label]) => h('span', {}, mark(k), `${label} ${rv.counts[k]}`)));
-  $('warnings').hidden = !(rv.warnings && rv.warnings.length);
-  $('warnings').replaceChildren(...(rv.warnings || []).map((w) => h('li', {}, w)));
+  warnings();
   tiles();
   look();
   legend();
   drawGraph();
   seams();
   lists();
+}
+
+function warnings() {
+  const ws = state.rv.warnings || [];
+  $('warnings').hidden = !ws.length;
+  $('warnings').replaceChildren(...ws.map((w) => h('li', {}, w)));
 }
 
 function lists() {
@@ -166,32 +207,51 @@ function tiles() {
 // --- Look here first ---------------------------------------------------------
 
 const LOOK_KIND = {
-  breaking: 'Breaks API', behavior: 'Edits', dependency: 'New import', structure: 'Blocks',
+  external: 'External', breaking: 'Breaks API', behavior: 'Edits', dependency: 'New import', structure: 'Blocks',
 };
 
 // look lists what the review says to look at first, as review.Focus has it:
-// the exported API the change breaks, the edits of existing code, the
-// largest reaching most first, the imports it starts and the warnings
-// about the types it touches. Edits past the first few fold away.
+// the code the change adds or edits that reaches outside the process, the
+// exported API it breaks, the edits of existing code, the largest reaching
+// most first, the imports it starts and the warnings about the types it
+// touches. Past the first few, the edits and the code reaching outside fold
+// away. Above them it says whether capslock is still tracing, and below
+// them what it found when it found nothing, or how to have it.
 function look() {
   const rv = state.rv, fs = rv.focus || [];
-  if (!fs.length) {
-    $('look').replaceChildren(h('li', { class: 'look-empty muted small' },
-      'Nothing beyond new code: no existing code is edited and no import between packages starts.'));
-    return;
-  }
-  const edits = fs.filter((f) => f.kind === 'behavior');
-  const all = state.showAll.has('look');
-  let shownEdits = 0;
   const items = [];
+  if (state.tracing) {
+    items.push(h('li', { class: 'look-note look-tracing muted small', role: 'status' },
+      h('span', { class: 'spin', 'aria-hidden': 'true' }), 'Tracing with capslock which changes reach the network, files or other programs…'));
+  }
+  const all = state.showAll.has('look');
+  const shown = { external: 0, behavior: 0 };
   for (const f of fs) {
-    if (f.kind === 'behavior' && !all && ++shownEdits > LOOK_EDITS) continue;
+    if (f.kind in shown && !all && ++shown[f.kind] > LOOK_EDITS) continue;
     items.push(lookItem(f));
   }
-  if (!all && edits.length > LOOK_EDITS) {
+  const hidden = (kind) => Math.max(0, fs.filter((f) => f.kind === kind).length - LOOK_EDITS);
+  const left = [
+    hidden('external') ? `${plural(hidden('external'), 'more change')} reaching outside the process` : '',
+    hidden('behavior') ? `${plural(hidden('behavior'), 'more edit')} of existing code` : '',
+  ].filter(Boolean);
+  if (!all && left.length) {
     items.push(h('li', { class: 'look-more' }, h('button', {
       class: 'more', type: 'button', onclick: () => { state.showAll.add('look'); look(); },
-    }, `and ${plural(edits.length - LOOK_EDITS, 'more edit')} of existing code`)));
+    }, `and ${left.join(' and ')}`)));
+  }
+  if (!fs.length) {
+    items.push(h('li', { class: 'look-empty muted small' },
+      'Nothing beyond new code: no existing code is edited and no import between packages starts.'));
+  }
+  if (rv.traced && !fs.some((f) => f.kind === 'external')) {
+    items.push(h('li', { class: 'look-note muted small' },
+      'Traced with capslock: nothing the change adds or edits reaches the network, files or other programs.'));
+  } else if (state.traceError) {
+    items.push(h('li', { class: 'look-note look-error small' }, `Could not trace with capslock: ${state.traceError}`));
+  } else if (!rv.traceable) {
+    items.push(h('li', { class: 'look-note muted small' }, 'To see which changes reach the network, files or other programs, install capslock (',
+      h('code', {}, 'go install github.com/google/capslock/cmd/capslock@latest'), ') and restart huginn serve.'));
   }
   $('look').replaceChildren(...items);
 }
@@ -216,13 +276,34 @@ function lookItem(f) {
       h('div', { class: 'look-head' }, name, where ? h('span', { class: 'muted code' }, where) : null),
       p ? verdictLine(p, 'look-verdict') : null,
       h('div', { class: 'look-what' }, f.what, f.why ? h('span', { class: 'why' }, ` · ${f.why}`) : null),
-      reachLine(f, ch)));
+      reachLine(f, ch),
+      ...(f.capabilities || []).map((c) => capabilityLine(f, c))));
+}
+
+// capabilityLine says how an item reaches outside the process: "network
+// new  http.Get → … → net.(*Dialer).DialContext  payments/payments.go:6",
+// the place being where the call leaving the repository's code is made.
+function capabilityLine(f, c) {
+  let steps = c.path;
+  if (steps.length && steps[0].name === f.name) steps = steps.slice(1); // the item itself, unless a function literal of it
+  let names = [];
+  steps.forEach((s, i) => {
+    if (c.elided > 0 && i === steps.length - 1) names.push('…');
+    names.push(s);
+  });
+  if (names.length > PATH_NAMES) names = [...names.slice(0, 2), '…', ...names.slice(-3)];
+  const leave = c.leaves >= 0 ? c.path[c.leaves] : null;
+  return h('div', { class: 'look-cap small' },
+    h('span', { class: `cap${c.new ? ' new' : ''}`, title: c.name }, c.label),
+    c.new ? h('span', { class: 'tag new', title: 'not reached at the merge base' }, 'new') : null,
+    h('span', { class: 'cap-path' }, ...names.flatMap((s, i) => [i ? ' → ' : '', s === '…' ? '…' : h('code', { title: s.package }, s.name)])),
+    leave ? h('span', { class: 'muted code' }, `${leave.path}:${leave.line}`) : null);
 }
 
 // reachLine says whom an item reaches: "called by a, b and 3 more · 29 in
 // tests", or that nothing does.
 function reachLine(f, ch) {
-  if (f.kind !== 'breaking' && f.kind !== 'behavior') return null;
+  if (f.kind !== 'breaking' && f.kind !== 'behavior' && f.kind !== 'external') return null;
   const verb = f.implementers ? 'implemented by' : ch && (ch.symbol === 'func' || ch.symbol === 'method') ? 'called by' : 'used by';
   const parts = [];
   if (f.reaches.length) {

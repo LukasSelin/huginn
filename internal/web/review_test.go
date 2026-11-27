@@ -6,6 +6,8 @@ import (
 	"slices"
 	"strings"
 	"testing"
+
+	"huginn/internal/review"
 )
 
 func TestReviewAPI(t *testing.T) {
@@ -58,6 +60,30 @@ func TestReviewAPI(t *testing.T) {
 
 	if code := get(t, ts, "/api/review?head=nope", nil); code != http.StatusBadRequest {
 		t.Errorf("unknown head: status %d, want 400", code)
+	}
+
+	// Without capslock, asking for a trace still reviews, untraced.
+	rv = reviewJSON{}
+	if code := get(t, ts, "/api/review?path=util&caps=1", &rv); code != http.StatusOK || rv.Traceable || rv.Traced || len(rv.Changes) != 1 {
+		t.Errorf("caps=1 without capslock: status %d, traceable %v, traced %v, %d changes", code, rv.Traceable, rv.Traced, len(rv.Changes))
+	}
+}
+
+func TestFocusJSON(t *testing.T) {
+	fs := focusesJSON([]review.Focus{{
+		Kind: review.FocusExternal, Name: "payments.Authorize", Change: 0,
+		Capabilities: []review.Capability{{Name: "MODIFY_SYSTEM_STATE/ENV", New: true, Elided: 2, Path: []review.Step{
+			{Package: "example.com/shop/payments", Name: "payments.Authorize"},
+			{Package: "os", Name: "os.Setenv", Path: "payments/payments.go", Line: 7},
+			{Package: "syscall", Name: "syscall.Setenv"},
+		}}},
+	}, {Kind: review.FocusBehavior, Name: "billing.Total", Change: 1}})
+	if fs[0].Kind != "external" || len(fs[0].Capabilities) != 1 || fs[1].Capabilities != nil {
+		t.Fatalf("focus = %+v", fs)
+	}
+	c := fs[0].Capabilities[0]
+	if c.Label != "env" || !c.New || c.Elided != 2 || c.Leaves != 1 || len(c.Path) != 3 || c.Path[1].Name != "os.Setenv" || c.Path[1].Line != 7 {
+		t.Errorf("capability = %+v", c)
 	}
 }
 

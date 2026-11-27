@@ -32,6 +32,12 @@ type reviewJSON struct {
 	// Indexed says the history was indexed, so the types' change coupling
 	// was looked for.
 	Indexed bool `json:"indexed"`
+
+	// Traceable says the server can trace with capslock what the change
+	// reaches outside the process, as it does when asked with ?caps=1;
+	// Traced says this review was traced.
+	Traceable bool `json:"traceable"`
+	Traced    bool `json:"traced"`
 }
 
 // typeJSON is the seams of one struct type the merge request touches.
@@ -47,19 +53,38 @@ type typeJSON struct {
 }
 
 // focusJSON is one thing to look at first, as review.Focus has it: kind is
-// "breaking", "behavior", "dependency" or "structure", and change indexes
-// the changes, -1 for none.
+// "external", "breaking", "behavior", "dependency" or "structure", and
+// change indexes the changes, -1 for none.
 type focusJSON struct {
-	Kind         string       `json:"kind"`
-	Name         string       `json:"name"`
-	Path         string       `json:"path"`
-	Line         int          `json:"line"`
-	What         string       `json:"what"`
-	Why          string       `json:"why,omitempty"`
-	Change       int          `json:"change"`
-	Reaches      []callerJSON `json:"reaches"`
-	Tests        int          `json:"tests"`
-	Implementers bool         `json:"implementers,omitempty"`
+	Kind         string           `json:"kind"`
+	Name         string           `json:"name"`
+	Path         string           `json:"path"`
+	Line         int              `json:"line"`
+	What         string           `json:"what"`
+	Why          string           `json:"why,omitempty"`
+	Change       int              `json:"change"`
+	Reaches      []callerJSON     `json:"reaches"`
+	Tests        int              `json:"tests"`
+	Implementers bool             `json:"implementers,omitempty"`
+	Capabilities []capabilityJSON `json:"capabilities,omitempty"`
+}
+
+// capabilityJSON is a way out of the process, as review.Capability has it:
+// leaves indexes the step leaving the repository's code, -1 for none.
+type capabilityJSON struct {
+	Name   string     `json:"name"`
+	Label  string     `json:"label"`
+	New    bool       `json:"new"`
+	Path   []stepJSON `json:"path"`
+	Elided int        `json:"elided"`
+	Leaves int        `json:"leaves"`
+}
+
+type stepJSON struct {
+	Package string `json:"package"`
+	Name    string `json:"name"`
+	Path    string `json:"path,omitempty"`
+	Line    int    `json:"line,omitempty"`
 }
 
 func focusesJSON(fs []review.Focus) []focusJSON {
@@ -68,6 +93,13 @@ func focusesJSON(fs []review.Focus) []focusJSON {
 		out[i] = focusJSON{
 			Kind: f.Kind.String(), Name: f.Name, Path: f.Path, Line: f.Line, What: f.What, Why: f.Why,
 			Change: f.Change, Reaches: callersJSON(f.Reaches), Tests: f.Tests, Implementers: f.Implementers,
+		}
+		for _, c := range f.Capabilities {
+			cj := capabilityJSON{Name: c.Name, Label: c.Label(), New: c.New, Elided: c.Elided, Leaves: c.Leaves()}
+			for _, s := range c.Path {
+				cj.Path = append(cj.Path, stepJSON{Package: s.Package, Name: s.Name, Path: s.Path, Line: s.Line})
+			}
+			out[i].Capabilities = append(out[i].Capabilities, cj)
 		}
 	}
 	return out
@@ -87,15 +119,15 @@ type pathsJSON struct {
 }
 
 type hunkJSON struct {
-	Skipped    int        `json:"skipped"`
-	Breadcrumb []string   `json:"breadcrumb"`
-	Steps      []stepJSON `json:"steps"`
+	Skipped    int            `json:"skipped"`
+	Breadcrumb []string       `json:"breadcrumb"`
+	Steps      []flowStepJSON `json:"steps"`
 }
 
-// stepJSON is a step of a compared flow: mark is "same", "renested",
+// flowStepJSON is a step of a compared flow: mark is "same", "renested",
 // "edited", "added", "removed", "moved" or "movedEdited", and kind is
 // "decision", "loop", "exit", "jump", "effect" or "closure".
-type stepJSON struct {
+type flowStepJSON struct {
 	Mark  string `json:"mark"`
 	Kind  string `json:"kind"`
 	Depth int    `json:"depth"`
@@ -121,9 +153,9 @@ func pathsListJSON(ps []review.Paths) []pathsJSON {
 			Hunks: []hunkJSON{}, Exits: []exitJSON{},
 		}
 		for _, h := range p.Hunks() {
-			hj := hunkJSON{Skipped: h.Skipped, Breadcrumb: orEmpty(h.Breadcrumb), Steps: []stepJSON{}}
+			hj := hunkJSON{Skipped: h.Skipped, Breadcrumb: orEmpty(h.Breadcrumb), Steps: []flowStepJSON{}}
 			for _, s := range h.Steps {
-				hj.Steps = append(hj.Steps, stepJSON{
+				hj.Steps = append(hj.Steps, flowStepJSON{
 					Mark: s.Mark.String(), Kind: s.Kind.String(), Depth: s.Depth, Text: s.String(), Old: s.Old, To: s.To,
 				})
 			}
@@ -230,7 +262,10 @@ func refsJSON(rs []semdiff.Reference) []refJSON {
 // reviewAPI serves the review of the merge request from ?head= (default
 // HEAD) into ?base= (default the remote's default branch), limited to the
 // repository paths in ?path=, repeated. It does not need the index; once
-// load returns one, the types it touches get their change coupling.
+// load returns one, the types it touches get their change coupling. With
+// ?caps=1, and capslock to trace with, it also traces what the change
+// reaches outside the process, which takes a while: the page asks for it
+// once it shows the review.
 func (a *repoAPI) reviewAPI(load func() *index) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		q := r.URL.Query()
@@ -250,6 +285,9 @@ func (a *repoAPI) reviewAPI(load func() *index) http.HandlerFunc {
 		if ix != nil {
 			opts.History = ix.h
 		}
+		if q.Get("caps") == "1" {
+			opts.Tracer = a.tracer
+		}
 		rv, err := review.Build(r.Context(), a.repo, opts)
 		if err != nil {
 			if errors.Is(err, context.Canceled) {
@@ -260,6 +298,7 @@ func (a *repoAPI) reviewAPI(load func() *index) http.HandlerFunc {
 		}
 		out := newReviewJSON(rv)
 		out.Indexed = ix != nil
+		out.Traceable, out.Traced = a.tracer != nil, rv.Traced
 		writeJSON(w, out)
 	}
 }
