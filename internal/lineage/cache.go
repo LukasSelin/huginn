@@ -3,8 +3,12 @@ package lineage
 import (
 	"bufio"
 	"encoding/gob"
+	"fmt"
+	"hash/fnv"
 	"os"
 	"path/filepath"
+	"reflect"
+	"strings"
 	"time"
 
 	"huginn/internal/ast"
@@ -14,7 +18,44 @@ import (
 // changes, or the ast or git packages start producing different changes or
 // symbols for the same commit, so that stale caches are discarded rather than
 // trusted.
-const cacheVersion = 4
+//
+// Worktrees share the cache, and two branches may bump the version to the
+// same number for different changes, so the header also carries the shape of
+// the encoded types: a cache from a build whose ast types differ is discarded
+// even when its version matches. Version 4 was used that way by two
+// branches; this one skips it.
+const cacheVersion = 5
+
+// cacheShape fingerprints the encoded types, field by field.
+var cacheShape = func() string {
+	h := fnv.New64a()
+	h.Write([]byte(typeShape(reflect.TypeOf(cacheBody{}), map[reflect.Type]bool{})))
+	return fmt.Sprintf("%016x", h.Sum64())
+}()
+
+// typeShape describes a type by the names and shapes of its exported
+// fields, as gob encodes them.
+func typeShape(t reflect.Type, seen map[reflect.Type]bool) string {
+	switch t.Kind() {
+	case reflect.Pointer, reflect.Slice, reflect.Array:
+		return t.Kind().String() + "(" + typeShape(t.Elem(), seen) + ")"
+	case reflect.Map:
+		return "map(" + typeShape(t.Key(), seen) + "," + typeShape(t.Elem(), seen) + ")"
+	case reflect.Struct:
+		if seen[t] {
+			return t.String()
+		}
+		seen[t] = true
+		var fields []string
+		for i := range t.NumField() {
+			if f := t.Field(i); f.IsExported() {
+				fields = append(fields, f.Name+" "+typeShape(f.Type, seen))
+			}
+		}
+		return t.String() + "{" + strings.Join(fields, "; ") + "}"
+	}
+	return t.String()
+}
 
 // Cache keeps walked revisions on disk, keyed by commit hash, so that a later
 // Build only walks the commits it has not seen. A revision depends only on
@@ -43,6 +84,7 @@ func (c *Cache) Dir() string { return c.dir }
 type cacheHeader struct {
 	Version          int
 	IncludeGenerated bool
+	Shape            string // cacheShape
 }
 
 // cacheBody stores each distinct symbol once: along a linear history the new
@@ -88,7 +130,7 @@ func (c *Cache) load(includeGenerated bool) map[string]Revision {
 	dec := gob.NewDecoder(bufio.NewReader(f))
 	var h cacheHeader
 	var b cacheBody
-	if dec.Decode(&h) != nil || h != (cacheHeader{cacheVersion, includeGenerated}) || dec.Decode(&b) != nil {
+	if dec.Decode(&h) != nil || h != (cacheHeader{cacheVersion, includeGenerated, cacheShape}) || dec.Decode(&b) != nil {
 		return revs
 	}
 	sym := func(i int) (*ast.Symbol, bool) {
@@ -154,7 +196,7 @@ func (c *Cache) save(includeGenerated bool, revs map[string]Revision) (err error
 	}()
 	w := bufio.NewWriter(tmp)
 	enc := gob.NewEncoder(w)
-	if err := enc.Encode(cacheHeader{cacheVersion, includeGenerated}); err != nil {
+	if err := enc.Encode(cacheHeader{cacheVersion, includeGenerated, cacheShape}); err != nil {
 		return err
 	}
 	if err := enc.Encode(b); err != nil {
