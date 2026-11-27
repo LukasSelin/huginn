@@ -68,3 +68,56 @@ function fail(err) {
   $('loading').hidden = false;
   $('loading').textContent = String(err);
 }
+
+// The spread is how much room the journey map and the layers leave between
+// packages, against SPREAD_ROOM: at 2 twice as much, at ½ half. Both pages
+// share it, kept in this browser. It goes up and down by SPREAD_STEP, at
+// most SPREAD_STEPS steps either way.
+const SPREAD_ROOM = 0.3; // the room between two packages at spread 1, against their radii together
+const SPREAD_STEP = 1.25, SPREAD_STEPS = 7;
+const SPREAD_KEY = 'huginn.spread';
+
+// spreadControl lets the viewer spread the packages out or draw them
+// together: with the more and less buttons, with Ctrl and the scroll wheel
+// over stage (the wheel alone zooms), and through by(steps), for the page's own keys. It calls
+// onChange with each new spread, and returns the one to start from as value.
+function spreadControl({ stage, more, less, onChange }) {
+  const lo = SPREAD_STEP ** -SPREAD_STEPS, hi = SPREAD_STEP ** SPREAD_STEPS;
+  let value = 1;
+  try {
+    const v = Number(localStorage.getItem(SPREAD_KEY));
+    if (v >= lo && v <= hi) value = v;
+  } catch { /* no storage: start from 1 */ }
+  const set = (v) => {
+    v = Math.min(hi, Math.max(lo, v));
+    more.disabled = v >= hi * (1 - 1e-9);
+    less.disabled = v <= lo * (1 + 1e-9);
+    if (v === value) return;
+    value = v;
+    try { localStorage.setItem(SPREAD_KEY, String(v)); } catch { /* kept for this page only */ }
+    onChange(v);
+  };
+  // A step lands on a whole number of steps, so stepping back returns to
+  // where it was.
+  const by = (steps) => set(SPREAD_STEP ** (Math.round(Math.log(value) / Math.log(SPREAD_STEP)) + steps));
+  more.addEventListener('click', () => by(1));
+  less.addEventListener('click', () => by(-1));
+  // A touchpad pinch also arrives as the wheel with Ctrl, and should still
+  // zoom. It comes with no Ctrl key pressed, and in small steps, where a
+  // mouse wheel's steps are large; so the wheel with Ctrl spreads when the
+  // key is held down or the step is a mouse wheel's.
+  let ctrlDown = false;
+  addEventListener('keydown', (e) => { if (e.key === 'Control') ctrlDown = true; }, true);
+  addEventListener('keyup', (e) => { if (e.key === 'Control') ctrlDown = false; }, true);
+  addEventListener('blur', () => { ctrlDown = false; });
+  // Caught on the way down, before the stage zooms with the wheel.
+  stage.addEventListener('wheel', (e) => {
+    if (!e.ctrlKey) ctrlDown = false; // let go outside the page
+    if (!e.ctrlKey || !(ctrlDown || e.deltaMode || Math.abs(e.deltaY) >= 50)) return;
+    e.preventDefault();
+    e.stopImmediatePropagation();
+    set(value * Math.exp(-e.deltaY * (e.deltaMode === 1 ? 0.05 : e.deltaMode ? 1 : 0.0015)));
+  }, { capture: true, passive: false });
+  set(value);
+  return { get value() { return value; }, by };
+}

@@ -28,7 +28,6 @@
   const OPEN = 60; // how wide on screen a group grows before it opens to show its packages
   const SPREAD = 0.85; // a bubble's scale on the map, against the shorter side its packages spread over
   const TIE_HOME = 1; // how strongly a package keeps to its spread place, against the strongest dependency's pull
-  const TIE_ROOM = 1.12; // how far apart two bubbles are kept at least, against their radii together
   // Where a bubble d pixels wide on screen is named: inside it if its name
   // fits there, else beneath it once it is NAME_UNDER wide, else not at
   // all. A closed group is always named beneath.
@@ -86,6 +85,8 @@
     chains: [], // each package's groups, innermost first
     gchains: [], // each group's enclosing groups, innermost first
     unit: 0, // a bubble's radius per square root of a symbol, in the unit square
+    spread: 1, // the room between bubbles, against SPREAD_ROOM: see spreadControl
+    spreading: 0, // the animation frame that lays the map out again for a new spread
     open: new Set(), // the groups opened at the last render
     instant: false, // render without tweens, as when zooming opens a group
     hover: null, // the package under the pointer
@@ -505,10 +506,12 @@
   // over the stage, every package moves away from the others, including the
   // ones it depends on. So each package is pulled back towards the packages
   // it shares a dependency with, until each such pair is about as far apart
-  // as on the layout, measured against the bubbles: the more references a
-  // dependency carries, the harder it pulls. A pull back to its spread
-  // place keeps the map spread. Afterwards no two bubbles overlap,
-  // and each package stays inside its group.
+  // as on the layout, measured against the bubbles, with the room between
+  // them grown or shrunk by the spread: the more references a dependency
+  // carries, the harder it pulls. A pull back to its spread place keeps the
+  // map spread. Afterwards no two bubbles come closer than the spread's
+  // room, where their group leaves space for it, and each package stays
+  // inside its group.
   function tighten() {
     const { packages, groups } = state.data;
     const { sx, sy, rs } = state.geom;
@@ -522,11 +525,28 @@
     const most = state.ties.reduce((m, t) => Math.max(m, t[2]), 1);
     for (const [a, b, refs] of state.ties) {
       const pa = packages[a], pb = packages[b];
-      const len = rs * Math.hypot(pa.x - pb.x, pa.y - pb.y), w = Math.sqrt(refs / most);
+      const touch = r[a] + r[b];
+      const len = touch + state.spread * Math.max(0, rs * Math.hypot(pa.x - pb.x, pa.y - pb.y) - touch);
+      const w = Math.sqrt(refs / most);
       adj[a].push([b, len, w]);
       adj[b].push([a, len, w]);
     }
+    const room = 1 + SPREAD_ROOM * state.spread;
     const maxR = r.reduce((m, v) => Math.max(m, v), 1e-9);
+    // inside keeps each package inside its group's outline, by its bubble's
+    // radius.
+    const inside = () => {
+      for (let i = 0; i < n; i++) {
+        const g = groups[packages[i].group];
+        if (!g) continue;
+        const ax = Math.max(1e-9, g.r * sx - r[i]), ay = Math.max(1e-9, g.r * sy - r[i]);
+        const q = Math.hypot((x[i] - g.x * sx) / ax, (y[i] - g.y * sy) / ay);
+        if (q > 1) {
+          x[i] = g.x * sx + (x[i] - g.x * sx) / q;
+          y[i] = g.y * sy + (y[i] - g.y * sy) / q;
+        }
+      }
+    };
     for (let round = 0; round < 60; round++) {
       for (let i = 0; i < n; i++) {
         if (!adj[i].length) continue;
@@ -543,27 +563,23 @@
         x[i] += 0.5 * (tx / w - x[i]);
         y[i] += 0.5 * (ty / w - y[i]);
       }
-      apart(x, y, r, maxR);
-      for (let i = 0; i < n; i++) {
-        // Inside the group's outline, by the bubble's radius.
-        const g = groups[packages[i].group];
-        if (!g) continue;
-        const ax = Math.max(1e-9, g.r * sx - r[i]), ay = Math.max(1e-9, g.r * sy - r[i]);
-        const q = Math.hypot((x[i] - g.x * sx) / ax, (y[i] - g.y * sy) / ay);
-        if (q > 1) {
-          x[i] = g.x * sx + (x[i] - g.x * sx) / q;
-          y[i] = g.y * sy + (y[i] - g.y * sy) / q;
-        }
-      }
+      apart(x, y, r, maxR, room);
+      inside();
     }
+    // Each pass apart moves bubbles into others, so one per round leaves
+    // some too close: settle them, a pass at a time, until none move or
+    // their group has no more space for the room.
+    for (let pass = 0; pass < 100 && apart(x, y, r, maxR, room); pass++) inside();
     return packages.map((p, i) => ({ x: x[i] / sx, y: y[i] / sy }));
   }
 
-  // apart pushes bubbles at x, y of radii r that come closer than a sliver
-  // of room apart, the smaller moving the more. Only neighbours on a grid as
-  // wide as the largest bubble are compared.
-  function apart(x, y, r, maxR) {
-    const cell = 2 * TIE_ROOM * maxR, grid = new Map();
+  // apart pushes bubbles at x, y of radii r apart where they come closer
+  // than room times their radii together, the smaller moving the more, and
+  // reports whether any moved. Only neighbours on a grid as wide as the
+  // largest bubble are compared.
+  function apart(x, y, r, maxR, room) {
+    const cell = 2 * room * maxR, grid = new Map();
+    let moved = false;
     x.forEach((_, i) => {
       if (r[i] <= 0) return;
       const cx = Math.floor(x[i] / cell), cy = Math.floor(y[i] / cell), k = `${cx},${cy}`;
@@ -578,7 +594,7 @@
           for (const i of at) {
             for (const j of other.at) {
               if (j <= i) continue;
-              const want = TIE_ROOM * (r[i] + r[j]);
+              const want = room * (r[i] + r[j]);
               const dx = x[j] - x[i], dy = y[j] - y[i];
               const d = Math.hypot(dx, dy);
               if (d >= want) continue;
@@ -586,11 +602,13 @@
               const ai = r[i] * r[i], aj = r[j] * r[j], push = want - d;
               x[i] -= ux * push * aj / (ai + aj); y[i] -= uy * push * aj / (ai + aj);
               x[j] += ux * push * ai / (ai + aj); y[j] += uy * push * ai / (ai + aj);
+              if (push > 0.01) moved = true; // in pixels
             }
           }
         }
       }
     }
+    return moved;
   }
 
   // A node is a package, by index, or a group, numbered after the packages.
@@ -743,7 +761,8 @@
     const r = live.map((s) => packages[s.p].r * Math.min(1, boost * grown(s)));
     // Distances go by where the packages are drawn, against the bubbles.
     const { sx, sy, rs } = state.geom;
-    let room = MAX_GROW;
+    const keep = 1 + SPREAD_ROOM * state.spread;
+    let room = MAX_GROW, fit = Infinity;
     for (let i = 0; i < live.length; i++) {
       // No wider than a fifth of the stage.
       room = Math.min(room, 0.1 / (r[i] * z));
@@ -751,12 +770,15 @@
       // Nor out of its group.
       const g = state.data.groups[packages[live[i].p].group];
       if (g) room = Math.min(room, (g.r - Math.hypot(a.x - g.x, a.y - g.y)) / r[i]);
+      // Nor closer to another than the spread's room.
       for (let j = i + 1; j < live.length; j++) {
         const b = state.drawn[live[j].p];
-        room = Math.min(room, (0.92 * Math.hypot((a.x - b.x) * sx, (a.y - b.y) * sy)) / (rs * (r[i] + r[j])));
+        fit = Math.min(fit, Math.hypot((a.x - b.x) * sx, (a.y - b.y) * sy) / (keep * rs * (r[i] + r[j])));
       }
     }
-    const k = Math.max(1, room);
+    // Where a crowded group left no space for that room, every bubble
+    // shrinks until it is kept.
+    const k = Math.min(Math.max(1, Math.min(room, fit)), fit);
     return (s) => k * Math.min(1, boost * grown(s));
   }
 
@@ -814,8 +836,11 @@
       t.pkgs++;
       sums.set(front[s.p], t);
     }
+    // It leaves the spread's room inside its outline, as a package's bubble
+    // does around itself.
+    const most = 1 / (1 + SPREAD_ROOM * state.spread);
     let fill = MAX_GROW;
-    for (const [id, t] of sums) fill = Math.min(fill, (0.85 * groupOf(id).r) / (state.unit * Math.sqrt(t.live)));
+    for (const [id, t] of sums) fill = Math.min(fill, (most * groupOf(id).r) / (state.unit * Math.sqrt(t.live)));
     fill = Math.max(1, fill);
     state.data.groups.forEach((g, gi) => {
       const id = n + gi, el = state.bubbles[id], t = sums.get(id);
@@ -1327,6 +1352,19 @@
       else stack.resetZoom();
     } else if (f) zoomBy(f);
     else zoomTo(d3.zoomIdentity);
+  }
+
+  // setSpread lays the map and the architecture out again with more or less
+  // room between the packages. Ctrl and the wheel change it many times a
+  // second, so the map waits for the next frame.
+  function setSpread(v) {
+    state.spread = v;
+    stack.setSpread(v);
+    if (state.spreading) return;
+    state.spreading = requestAnimationFrame(() => {
+      state.spreading = 0;
+      place();
+    });
   }
 
   // relabel names the bubbles and symbols big enough on screen to hold a name.
@@ -3018,6 +3056,9 @@
     $('zoomIn').addEventListener('click', () => zoom(1.6));
     $('zoomOut').addEventListener('click', () => zoom(1 / 1.6));
     $('zoomReset').addEventListener('click', () => zoom(0));
+    const spread = spreadControl({ stage: $('stage'), more: $('spreadMore'), less: $('spreadLess'), onChange: setSpread });
+    state.spread = spread.value;
+    stack.setSpread(state.spread);
     if (!('speechSynthesis' in window)) {
       $('narrate').disabled = true;
       $('narrate').title = 'This browser cannot speak';
@@ -3069,6 +3110,12 @@
           break;
         case '0':
           zoom(0);
+          break;
+        case '>':
+          spread.by(1);
+          break;
+        case '<':
+          spread.by(-1);
           break;
         case 'm':
         case 'M':

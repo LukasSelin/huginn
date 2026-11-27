@@ -55,6 +55,10 @@ type Review struct {
 	// and after it, the largest first.
 	Types []TypeReview
 
+	// Focus is what to look at first, most important first: what the
+	// change does that its diff does not show.
+	Focus []Focus
+
 	// Warnings are syntax errors that may hide changes or callers.
 	Warnings []string
 }
@@ -106,6 +110,7 @@ func Build(ctx context.Context, repo *git.Repo, opts Options) (*Review, error) {
 		Report:    semdiff.Build(in),
 	}
 	rv.Types = types(rv.Report, in, opts.History)
+	rv.Focus = focus(rv.Report, rv.Types)
 	for _, err := range rg.ParseErrors {
 		rv.Warnings = append(rv.Warnings, err.Error())
 	}

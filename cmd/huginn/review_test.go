@@ -53,6 +53,11 @@ func TestReview(t *testing.T) {
 		"· 1 commit\n",
 		"scope: billing\n",
 		"→ 1 semantic change across 1 symbol\n",
+		"Look here first\n" +
+			"  [edit] billing.Charge  billing/billing.go:5\n" +
+			"      +2 stmts · cyclomatic 1 → 2 · called by web.Serve\n",
+		"  [import] example.com/shop/billing → example.com/shop/payments  billing/billing.go:6\n" +
+			"      new import · 1 reference · out of the scope\n",
 		"Impact\n  1 call site in 1 declaration, 1 package\n  outside the scope: 1 call site in 1 declaration, 1 package\n    example.com/shop/web\n",
 		"  web.Serve  web/web.go:5  ×1 (outside)\n",
 		"  + example.com/shop/billing → example.com/shop/payments  (out of the scope)\n" +
@@ -77,6 +82,7 @@ func TestReviewFormats(t *testing.T) {
 	md := runReview(t, "-C", r.Dir, "-format", "markdown", "billing")
 	for _, want := range []string{
 		"### huginn review of `billing`\n",
+		"#### Look here first\n\n- **edit** `billing.Charge` at `billing/billing.go:5`: +2 stmts · cyclomatic 1 → 2 · called by `web.Serve`\n",
 		"**Outside the scope: 1 call site in 1 declaration, 1 package** (`example.com/shop/web`).",
 		"| `web.Serve` | `web/web.go:5` | ×1 **outside** |",
 		"- **+** `example.com/shop/billing` → `example.com/shop/payments` (new import, **out of the scope**)\n",
@@ -122,6 +128,29 @@ func TestReviewWholeRepository(t *testing.T) {
 	}
 	if strings.Contains(out, "scope") {
 		t.Errorf("unscoped review mentions a scope:\n%s", out)
+	}
+}
+
+// The impact counts production code first and the tests apart, and lists
+// the production callers before the tests, though the test calls more.
+func TestReviewImpactCountsTestsApart(t *testing.T) {
+	r := shop(t)
+	r.Commit("test", map[string]string{
+		"billing/billing_test.go": "package billing\n\nimport \"testing\"\n\nfunc TestCharge(t *testing.T) { Charge(1); Charge(2); Charge(3) }\n",
+	})
+	out := runReview(t, "-C", r.Dir, "billing")
+	for _, want := range []string{
+		"Impact\n  1 call site in 1 declaration, 1 package · 3 more in tests\n",
+		"  web.Serve  web/web.go:5  ×1 (outside)\n  billing.TestCharge  billing/billing_test.go:5  ×3 (test)\n",
+		"      +2 stmts · cyclomatic 1 → 2 · called by web.Serve · 1 in tests\n",
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("output lacks %q:\n%s", want, out)
+		}
+	}
+	md := runReview(t, "-C", r.Dir, "-format", "markdown", "billing")
+	if want := "1 call site in 1 declaration, 1 package. 3 more in tests."; !strings.Contains(md, want) {
+		t.Errorf("markdown lacks %q:\n%s", want, md)
 	}
 }
 

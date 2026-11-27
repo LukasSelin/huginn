@@ -44,10 +44,8 @@ func (m *markdown) review(rv *review.Review) {
 		m.printf("  \n%s", strings.Join(counts, " · "))
 	}
 	m.printf("\n")
-	if r.Blast.ExportedAPIChanged() {
-		m.printf("\n**Exported API changed:** %s\n", code(r.Blast.APIChanges...))
-	}
 
+	m.focus(rv)
 	m.impact(r.Blast, len(rv.Scope) > 0)
 	m.relations(r.Relations)
 	m.types(rv.Types)
@@ -76,17 +74,50 @@ func (m *markdown) types(ts []review.TypeReview) {
 	}
 }
 
-func (m *markdown) impact(b semdiff.BlastRadius, scoped bool) {
-	m.printf("\n#### Impact\n\n")
-	if b.CallSites == 0 {
-		m.printf("No callers outside the change.\n")
+// focus lists what to look at first, exported API it breaks first.
+func (m *markdown) focus(rv *review.Review) {
+	m.printf("\n#### Look here first\n\n")
+	shown, more := shownFocus(rv.Focus)
+	if len(shown) == 0 {
+		m.printf("Nothing beyond new code: no existing code is edited and no import between packages starts.\n")
 		return
 	}
-	sites := plural(b.CallSites, "call site")
-	if b.Approximate {
+	for _, f := range shown {
+		name := code(f.Name)
+		if f.Kind == review.FocusDependency {
+			from, to, _ := strings.Cut(f.Name, " → ")
+			name = code(from) + " → " + code(to)
+		}
+		where := ""
+		if loc := at(f); loc != "" {
+			where = " at " + code(loc)
+		}
+		m.printf("- **%s** %s%s: %s\n", focusLabel(f.Kind), name, where, focusDetail(f, rv.Report, func(s string) string { return code(s) }))
+	}
+	if more > 0 {
+		m.printf("- … and %s of existing code under Changes\n", plural(more, "more edit"))
+	}
+}
+
+func (m *markdown) impact(b semdiff.BlastRadius, scoped bool) {
+	m.printf("\n#### Impact\n\n")
+	prod, tests := sumCallers(b.Callers, isProduction), sumCallers(b.Callers, isTest)
+	if prod.decls == 0 {
+		if tests.decls == 0 {
+			m.printf("No callers outside the change.\n")
+		} else {
+			m.printf("No callers outside tests; %s in tests.\n", plural(tests.sites, "call site"))
+		}
+		return
+	}
+	sites := plural(prod.sites, "call site")
+	if prod.approx {
 		sites += " (approx.)"
 	}
-	m.printf("%s in %s, %s.", sites, plural(len(b.Callers), "declaration"), plural(len(b.Packages), "package"))
+	m.printf("%s in %s, %s.", sites, plural(prod.decls, "declaration"), plural(len(prod.pkgs), "package"))
+	if tests.decls > 0 {
+		m.printf(" %d more in tests.", tests.sites)
+	}
 	if scoped {
 		if out := outside(b.Callers); out.decls == 0 {
 			m.printf(" None outside the scope.")
@@ -97,7 +128,7 @@ func (m *markdown) impact(b semdiff.BlastRadius, scoped bool) {
 	}
 	m.printf("\n\n| Caller | Where | Uses |\n| --- | --- | --- |\n")
 	limit := 3 * m.maxCallers
-	for i, cl := range b.Callers {
+	for i, cl := range productionFirst(b.Callers) {
 		if limit > 0 && i == limit {
 			m.printf("| … and %d more | | |\n", len(b.Callers)-limit)
 			break

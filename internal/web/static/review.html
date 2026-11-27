@@ -55,11 +55,18 @@
       <p class="eyebrow" id="what"></p>
       <h1 class="headline" id="headline"></h1>
       <div class="kinds" id="kinds"></div>
-      <p class="warn" id="api" hidden></p>
       <ul class="warnings small muted" id="warnings" hidden></ul>
     </section>
 
     <section class="tiles" id="tiles" aria-label="Key numbers"></section>
+
+    <section class="panel look" aria-labelledby="lookTitle">
+      <div class="titlerow">
+        <h2 class="h2" id="lookTitle">Look here first</h2>
+        <span class="muted small">what the diff does not show: exported API it breaks, the existing code it edits and who runs it, the imports it starts</span>
+      </div>
+      <ol class="look-list" id="look"></ol>
+    </section>
 
     <section class="panel graph" aria-labelledby="graphTitle">
       <div class="titlerow">
@@ -71,20 +78,15 @@
       <div class="focus small" id="focus" hidden></div>
     </section>
 
-    <section class="panel types" aria-labelledby="typesTitle" id="typesPanel" hidden>
-      <div class="titlerow">
-        <h2 class="h2" id="typesTitle">Affinity matrix of the types it touches</h2>
-        <span class="muted small">for each struct type the change touches: which fields and methods already form blocks, the candidate types, what holds the blocks together, and what the change does to them</span>
-      </div>
-      <div id="types"></div>
-    </section>
-
     <div class="pair">
       <section class="panel impact" aria-labelledby="impactTitle">
         <div class="titlerow">
           <h2 class="h2" id="impactTitle">Impact</h2>
           <span class="muted small" id="impactNote"></span>
-          <label class="toggle small" id="outsideToggle" hidden><input type="checkbox" id="outsideOnly"> only outside the scope</label>
+          <span class="toggles">
+            <label class="toggle small" id="outsideToggle" hidden><input type="checkbox" id="outsideOnly"> only outside the scope</label>
+            <label class="toggle small" id="testsToggle" hidden><input type="checkbox" id="withTests"> <span id="testsLabel">with tests</span></label>
+          </span>
         </div>
         <div class="scroll"><table class="data" id="callers"></table></div>
       </section>
@@ -101,15 +103,23 @@
     <section class="panel changes" aria-labelledby="changesTitle">
       <div class="titlerow">
         <h2 class="h2" id="changesTitle">Changes</h2>
-        <div class="chips" id="kindChips" role="group" aria-label="Show changes of kind"></div>
+        <span class="muted small">the existing code it edits in full; new code by file and the tests folded away, since the diff shows them</span>
       </div>
       <div id="changes"></div>
     </section>
 
-    <section class="panel files" aria-labelledby="filesTitle">
-      <h2 class="h2" id="filesTitle">Files</h2>
-      <div class="scroll"><table class="data" id="files"></table></div>
+    <section class="panel types" aria-labelledby="typesTitle" id="typesPanel" hidden>
+      <div class="titlerow">
+        <h2 class="h2" id="typesTitle">Types it touches</h2>
+        <span class="muted small">what the change does to the blocks of fields and methods in each struct type it touches; open the affinity reading for the matrix and where to split</span>
+      </div>
+      <div id="types"></div>
     </section>
+
+    <details class="panel files">
+      <summary><h2 class="h2" id="filesTitle">Files</h2> <span class="muted small" id="filesNote"></span></summary>
+      <div class="scroll"><table class="data" id="files"></table></div>
+    </details>
   </div>
 </main>
 <script src="common.js"></script>
