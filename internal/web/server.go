@@ -41,10 +41,9 @@ type Server struct {
 	done  atomic.Int64 // commits applied so far while indexing
 	err   atomic.Pointer[error]
 
-	settled   chan struct{} // closed once the index is published or failed
-	settle    sync.Once
-	ui        fs.FS
-	uiEncoded map[string]*encoded // the static files, compressed
+	settled chan struct{} // closed once the index is published or failed
+	settle  sync.Once
+	ui      assets // the pages and their scripts
 
 	api   *repoAPI     // commit reports and reviews, which need no index
 	saved responseFile // where the prebuilt responses are kept between runs
@@ -70,11 +69,8 @@ type index struct {
 
 // New returns a server for repo. name labels it in the UI.
 func New(repo *git.Repo, name string, opts lineage.BuildOptions) *Server {
-	s := &Server{repo: repo, name: name, opts: opts, settled: make(chan struct{}),
+	return &Server{repo: repo, name: name, opts: opts, settled: make(chan struct{}), ui: newAssets(),
 		api: newRepoAPI(repo, opts.IncludeGenerated), saved: savedFile(opts.Cache)}
-	s.ui, _ = fs.Sub(static, "static")
-	s.uiEncoded = staticFiles(s.ui)
-	return s
 }
 
 // Index builds the history and the responses the pages ask for, then
@@ -125,14 +121,14 @@ func (s *Server) Index(ctx context.Context) error {
 // Handler returns the UI and API routes.
 func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
-	mux.Handle("GET /", s.file(""))
-	mux.Handle("GET /{$}", s.file("journey.html"))
-	mux.Handle("GET /journey", s.file("journey.html"))
-	mux.Handle("GET /map", s.file("index.html"))
-	mux.Handle("GET /health", s.file("health.html"))
-	mux.Handle("GET /layers", s.file("layers.html"))
-	mux.Handle("GET /review", s.file("review.html"))
-	mux.Handle("GET /affinity", s.file("affinity.html"))
+	mux.Handle("GET /", s.ui.file(""))
+	mux.Handle("GET /{$}", s.ui.file("journey.html"))
+	mux.Handle("GET /journey", s.ui.file("journey.html"))
+	mux.Handle("GET /map", s.ui.file("index.html"))
+	mux.Handle("GET /health", s.ui.file("health.html"))
+	mux.Handle("GET /layers", s.ui.file("layers.html"))
+	mux.Handle("GET /review", s.ui.file("review.html"))
+	mux.Handle("GET /affinity", s.ui.file("affinity.html"))
 	mux.HandleFunc("GET /api/status", s.status)
 	indexRoutes(mux, s.index.Load)
 	mux.HandleFunc("GET /api/commit/{rev...}", s.api.commit(s.index.Load))
@@ -161,10 +157,22 @@ func indexRoutes(mux *http.ServeMux, load func() *index) {
 	mux.HandleFunc("GET /api/affinity", ready((*index).affinityAPI))
 }
 
+// assets are the UI's static files, embedded, with the compressed copies
+// they are served from.
+type assets struct {
+	files   fs.FS
+	encoded map[string]*encoded // by path under static
+}
+
+func newAssets() assets {
+	files, _ := fs.Sub(static, "static")
+	return assets{files: files, encoded: staticFiles(files)}
+}
+
 // file serves the static file name, or the one the request names when name
 // is empty, from its compressed copy.
-func (s *Server) file(name string) http.Handler {
-	files := http.FileServerFS(s.ui)
+func (a assets) file(name string) http.Handler {
+	files := http.FileServerFS(a.files)
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		p := name
 		if p == "" {
@@ -173,7 +181,7 @@ func (s *Server) file(name string) http.Handler {
 				p += "index.html"
 			}
 		}
-		if e := s.uiEncoded[p]; e != nil {
+		if e := a.encoded[p]; e != nil {
 			e.serve(w, r)
 			return
 		}
