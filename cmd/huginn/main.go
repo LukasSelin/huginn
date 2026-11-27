@@ -24,6 +24,14 @@
 // prints the semantic diff of one commit: its changed symbols, their
 // callers, the blast radius and the files that changed only in formatting.
 //
+//	huginn review [-C dir] [-base rev] [-head rev] [-format text|markdown|json] [folder ...]
+//
+// prints what a merge request changes, compared from its merge base with
+// the branch it goes into: the code that depends on what it changed, and
+// the imports and references between packages it starts and stops. Folders
+// limit the report to their code; callers and relations are still found
+// across the whole repository.
+//
 //	huginn silos [-C dir] [-branch rev] [-no-cache] [-n count] [-leaves name,...]
 //
 // ranks the packages and symbols few people know that much depends on, and
@@ -53,6 +61,7 @@ const usage = `usage:
   huginn serve [-C dir] [-branch rev] [-tests] [-no-cache] [-addr host:port]
   huginn story [-C dir] [-branch rev] [-tests] [-no-cache] [-moments]
   huginn semdiff [-C dir] [-include-generated] [-callers n] rev
+  huginn review [-C dir] [-base rev] [-head rev] [-format text|markdown|json] [-callers n] [folder ...]
   huginn silos [-C dir] [-branch rev] [-no-cache] [-n count] [-leaves name,...]`
 
 func main() {
@@ -60,6 +69,7 @@ func main() {
 		"symbols": symbols,
 		"serve":   serve,
 		"semdiff": semanticDiff,
+		"review":  review,
 		"story":   tell,
 		"silos":   listSilos,
 	}

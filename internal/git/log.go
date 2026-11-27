@@ -85,42 +85,49 @@ func (lr *logReader) next() (*Commit, error) {
 	if c.CommitTime, err = time.Parse(time.RFC3339, f[4]); err != nil {
 		return nil, fmt.Errorf("git log: commit %s: %w", hash, err)
 	}
+	if err := lr.files(c); err != nil {
+		return nil, fmt.Errorf("git log: commit %s: %w", hash, err)
+	}
+	return c, nil
+}
 
-	// Raw entries come first, then one numstat entry per raw entry in the
-	// same order. Anything else starts the next commit.
+// files reads the entries of one diff into c's Files, Added and Removed:
+// raw entries first, then one numstat entry per raw entry in the same order.
+// It stops at the end of the stream or at a token that starts something
+// else, such as the next commit, which is kept for the next read.
+func (lr *logReader) files(c *Commit) error {
 	stats := 0
 	for {
 		tok, err := lr.token()
 		if err == io.EOF {
-			break
+			return nil
 		}
 		if err != nil {
-			return nil, err
+			return err
 		}
 		tok = strings.TrimPrefix(tok, "\n") // git separates the header from the diff with a newline
 		switch {
 		case strings.HasPrefix(tok, ":"):
 			fc, err := lr.raw(tok)
 			if err != nil {
-				return nil, fmt.Errorf("git log: commit %s: %w", hash, err)
+				return err
 			}
 			c.Files = append(c.Files, fc)
 		case tok != "" && (tok[0] == '-' || '0' <= tok[0] && tok[0] <= '9'):
 			if stats >= len(c.Files) {
-				return nil, fmt.Errorf("git log: commit %s: numstat entry without raw entry", hash)
+				return errors.New("numstat entry without raw entry")
 			}
 			if err := lr.numstat(tok, &c.Files[stats]); err != nil {
-				return nil, fmt.Errorf("git log: commit %s: %w", hash, err)
+				return err
 			}
 			c.Added += c.Files[stats].Added
 			c.Removed += c.Files[stats].Removed
 			stats++
 		default:
 			lr.pending = &tok
-			return c, nil
+			return nil
 		}
 	}
-	return c, nil
 }
 
 // raw parses ":oldmode newmode oldhash newhash status" and its paths.

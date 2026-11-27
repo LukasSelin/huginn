@@ -37,6 +37,7 @@ go test ./...
 huginn symbols [-C dir] [-branch rev] [-tests] [-no-cache] name
 huginn serve [-C dir] [-branch rev] [-tests] [-no-cache] [-addr host:port]
 huginn semdiff [-C dir] [-include-generated] [-callers n] rev
+huginn review [-C dir] [-base rev] [-head rev] [-format text|markdown|json] [-callers n] [folder ...]
 huginn silos [-C dir] [-branch rev] [-no-cache] [-n count] [-leaves name,...]
 ```
 
@@ -196,6 +197,104 @@ Blast radius
   git.(*walker).parse  internal/git/walk.go:280  ×1
 ```
 
+When the commit starts or stops imports between the repository's packages,
+or references from one package's declarations to another's, a *Relations*
+section lists them, as `huginn review` does.
+
+### `huginn review`
+
+Reviews a merge request: everything its head changes since the merge base
+with the branch it goes into, as one semantic diff. Point it at a folder to
+review only that part of the repository:
+
+```bash
+huginn review services/billing                     # from inside the repository
+huginn review ~/src/backend/services/billing       # the folder says which repository
+huginn review -C ~/src/backend -head origin/feature services/billing
+```
+
+Folders are relative to `-C` (default: the current directory), and the
+repository is the first folder's when `-C` is not given. Several folders, or
+single files, can be given; none means the whole repository. A folder need
+not exist in the working tree, since the merge request may add or remove it.
+
+`-head` is the merge request's branch (default `HEAD`). `-base` is the
+branch it goes into. Without it, huginn takes the target from GitLab's merge
+request pipelines (`CI_MERGE_REQUEST_DIFF_BASE_SHA`, else
+`origin/$CI_MERGE_REQUEST_TARGET_BRANCH_NAME`) or GitHub's pull request
+workflows (`origin/$GITHUB_BASE_REF`), and otherwise the remote's default
+branch (`origin/HEAD`, else `origin/main`, `origin/master`, `main` or
+`master`). Either way the head is compared from the merge base, as the merge
+request's own diff is.
+
+The report puts first what the change reaches, then what it is made of:
+
+- **Impact** is the blast radius: the existing declarations anywhere in the
+  repository that use what changed. With folders, it says how much of that
+  lies outside them, and in which packages; such callers are marked
+  `outside`.
+- **Relations** are the imports between packages that the merge request
+  starts (`+`) and stops (`−`), each with the references along it, from a
+  changed declaration to a declaration of the other package, and then the
+  references it starts and stops along imports that stay. With folders,
+  only relations with one end inside them are kept, and those that cross
+  the boundary say so: *out of the scope* for a new dependency of the
+  folder, *into the scope* for new code elsewhere that depends on it. A
+  reference that follows a symbol the change renames counts as neither
+  started nor stopped. Test files are left out, since nothing imports them;
+  so are packages from outside the repository. References come from
+  function bodies, so a package used only in signatures or type
+  definitions shows the files that import it instead.
+- **Files**, **Changes** and **Noise** are as in `huginn semdiff`.
+
+```
+$ huginn review -base dbe0403 -head 371dfd2 -callers 1 internal/web
+review 371dfd2 into dbe0403
+from merge base dbe0403 · 1 commit
+scope: internal/web
+
++208 −5 lines → 26 semantic changes across 26 symbols
+added 18 · body edit 8
+
+Impact
+  22 call sites (approx.) in 15 declarations, 2 packages
+  outside the scope: 1 call site in 1 declaration, 1 package
+    huginn/cmd/huginn
+  web.TestPrebuilt  internal/web/prebuilt_test.go:17  ×5 (approx., test)
+  web.(*Server).prebuild  internal/web/prebuilt.go:106  ×2
+  web.TestSavedResponses  internal/web/saved_test.go:14  ×2 (approx., test)
+  … and 12 more
+
+Relations
+  + huginn/internal/web → huginn/internal/silos  (out of the scope)
+      web.(*Server).Index → silos.Build  internal/web/server.go:90  ×1
+      … and 3 more
+
+Files
+  internal/web/prebuilt.go       +1 −1       1 symbol: body edit
+…
+```
+
+`-format markdown` writes the same report for a merge request comment,
+with the changes and files folded away; `-format json` writes it for other
+tools. In a GitLab merge request pipeline, a job like this one posts it on
+the merge request. It needs an image with Go, git and `glab`, and a token
+that may comment, here in `GITLAB_TOKEN`; `GIT_DEPTH: 0` fetches enough
+history to reach the merge base.
+
+```yaml
+huginn-review:
+  rules:
+    - if: $CI_PIPELINE_SOURCE == "merge_request_event"
+  variables:
+    GIT_DEPTH: 0
+  script:
+    - git clone --depth 1 https://github.com/LukasSelin/huginn.git /tmp/huginn
+    - (cd /tmp/huginn && go install ./cmd/huginn)
+    - huginn review -format markdown services/billing > review.md
+    - glab mr note "$CI_MERGE_REQUEST_IID" --message "$(cat review.md)"
+```
+
 ## Architecture
 
 ```
@@ -204,8 +303,9 @@ git log / cat-file ──► internal/git ──► internal/ast ──► inter
                                         Diff              ▲   │
                                                           │   ▼
                                                    .git/huginn cache
-                       internal/git ──► internal/ast ──► internal/semdiff ──► huginn semdiff
-                       Diff, Tree                        callers, blast radius
+                       internal/git ──► internal/ast ──► internal/semdiff ──► huginn semdiff, review
+                       Diff, DiffRange,                  callers, blast radius,
+                       Tree                              relations
 ```
 
 - **internal/git** runs one `git log --raw --numstat -z` process that streams
@@ -213,7 +313,9 @@ git log / cat-file ──► internal/git ──► internal/ast ──► inter
   that serves blob contents. Each commit is diffed against its first parent.
   Blobs parsed for one commit are reused for the next, so along a linear
   history most files are read and parsed once. `Repo.Diff` and `Repo.Tree`
-  give a single commit's file pairs and a whole tree for `semdiff`.
+  give a single commit's file pairs and a whole tree for `semdiff`;
+  `Repo.DiffRange` gives the file pairs between any two commits, such as a
+  merge request's merge base and head, for `review`.
 - **internal/ast** turns a Go file into symbols with `ParseSource`: kind,
   qualified name, canonical signature, line span, statement count, cyclomatic
   complexity, a body hash that ignores formatting and comments, and the
@@ -225,8 +327,12 @@ git log / cat-file ──► internal/git ──► internal/ast ──► inter
   `Cache`, it only walks commits it has not seen before (see below).
 - **internal/web** serves the timeline UI (embedded static files) and its
   JSON API from an in-memory index built once at startup.
-- **internal/semdiff** reports one commit: changed symbols, the callers of
-  each across the tree at that commit, and the commit's blast radius.
+- **internal/semdiff** reports one commit, or a merge request's whole
+  range: changed symbols, the callers of each across the tree at the head,
+  the blast radius, and the relations between packages it starts and stops,
+  optionally limited to a scope of folders. The tree before the change is
+  the tree after it with the changed files' old sides put back, so only
+  one tree is read.
 - **internal/knowledge** is the knowledge model: each author's decayed weight
   in each live symbol, and who counts as departed. The journey rolls it up
   per package frame by frame; **internal/silos** reads it at the last

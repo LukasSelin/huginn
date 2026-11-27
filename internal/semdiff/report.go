@@ -48,6 +48,9 @@ func (k Kind) String() string {
 	return "unknown"
 }
 
+// MarshalText encodes a kind by its name.
+func (k Kind) MarshalText() ([]byte, error) { return []byte(k.String()), nil }
+
 // kindsOf returns the kinds a change carries, in display order.
 func kindsOf(f ast.ChangeFlags) []Kind {
 	switch {
@@ -123,6 +126,14 @@ type Input struct {
 	// default a generated side of a file is treated as absent, as the git
 	// walker does, and a generated file without other changes is noise.
 	IncludeGenerated bool
+
+	// Scope, if not empty, limits the report to the files under these
+	// slash-separated repository directories, or to these files: only
+	// their symbols' changes are reported and only their lines counted.
+	// Callers and relations are still found across the whole tree; callers
+	// outside the scope are marked, and relations are kept when they touch
+	// the scope at one end at least.
+	Scope []string
 }
 
 // Report is the semantic diff of one commit.
@@ -137,10 +148,11 @@ type Report struct {
 	SemanticChanges int
 	Counts          map[Kind]int
 
-	Files   []FileSummary // files with semantic changes or non-noise edits, by path
-	Changes []Change      // ordered by file and line
-	Blast   BlastRadius
-	Noise   []NoiseFile // files whose changes do not matter semantically, by path
+	Files     []FileSummary // files with semantic changes or non-noise edits, by path
+	Changes   []Change      // ordered by file and line
+	Blast     BlastRadius
+	Relations Relations
+	Noise     []NoiseFile // files whose changes do not matter semantically, by path
 }
 
 // Headline summarizes the report in one line:
@@ -229,6 +241,7 @@ type Caller struct {
 	// only, without knowing the receiver's type.
 	Approximate bool
 	Test        bool // declared in a _test.go file
+	Outside     bool // declared outside Input.Scope; never set without a scope
 }
 
 // BlastRadius is what the commit's changes reach outside themselves. Added
@@ -258,6 +271,12 @@ func Build(in Input) *Report {
 		return p
 	}
 
+	inScope := newScope(in.Scope)
+	scoped := inScope != nil
+	if !scoped {
+		inScope = func(string) bool { return true }
+	}
+
 	side := func(f *ast.File) *ast.File {
 		if f == nil || f.Generated && !in.IncludeGenerated {
 			return nil
@@ -272,10 +291,17 @@ func Build(in Input) *Report {
 
 	r := &Report{Counts: map[Kind]int{}}
 	idx := newIndex(in.Tree, pkgOf)
+	if scoped {
+		idx.outside = func(p string) bool { return !inScope(p) }
+	}
 	blast := map[callerID]*Caller{}
 	pkgs := map[string]bool{}
 
-	for _, c := range ast.Diff(olds, news) {
+	changes := ast.Diff(olds, news)
+	for _, c := range changes {
+		if !(c.New != nil && inScope(c.New.Path) || c.Old != nil && inScope(c.Old.Path)) {
+			continue
+		}
 		rc := newChange(c, pkgOf)
 		rc.Members = memberChanges(c, pkgOf, idx)
 		for _, m := range rc.Members {
@@ -313,7 +339,8 @@ func Build(in Input) *Report {
 	}
 	slices.Sort(r.Blast.Packages)
 
-	r.summarizeFiles(in)
+	r.Relations = relations(changes, treeBefore(in.Tree, in.Files), in.Tree, pkgOf, inScope)
+	r.summarizeFiles(in, inScope)
 	return r
 }
 
@@ -465,8 +492,9 @@ func impact(c Change) string {
 	return sites
 }
 
-// summarizeFiles fills in the line counts, the file list and the noise list.
-func (r *Report) summarizeFiles(in Input) {
+// summarizeFiles fills in the line counts, the file list and the noise list,
+// for the files in scope.
+func (r *Report) summarizeFiles(in Input, inScope func(string) bool) {
 	type touch struct {
 		kinds   map[Kind]bool
 		changes int
@@ -492,6 +520,9 @@ func (r *Report) summarizeFiles(in Input) {
 	}
 
 	for _, fd := range in.Files {
+		if !(fd.New != nil && inScope(fd.New.Path) || fd.Old != nil && inScope(fd.Old.Path)) {
+			continue
+		}
 		r.Added += fd.Added
 		r.Removed += fd.Removed
 
