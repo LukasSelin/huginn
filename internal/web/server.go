@@ -34,19 +34,36 @@ var static embed.FS
 
 // Server indexes one repository and serves it.
 type Server struct {
-	repo  *git.Repo
-	opts  lineage.BuildOptions
-	name  string
-	index atomic.Pointer[index]
-	done  atomic.Int64 // commits applied so far while indexing
-	err   atomic.Pointer[error]
-
-	settled chan struct{} // closed once the index is published or failed
-	settle  sync.Once
-	ui      assets // the pages and their scripts
+	repo     *git.Repo
+	opts     lineage.BuildOptions
+	name     string
+	index    atomic.Pointer[index]
+	progress *progress
+	ui       assets // the pages and their scripts
 
 	api   *repoAPI     // commit reports and reviews, which need no index
 	saved responseFile // where the prebuilt responses are kept between runs
+}
+
+// progress is how far indexing has got, as /api/status reports it.
+type progress struct {
+	commits atomic.Int64 // applied so far
+	err     atomic.Pointer[error]
+	settled chan struct{} // closed once the index is published or indexing failed
+	once    sync.Once
+}
+
+func newProgress() *progress { return &progress{settled: make(chan struct{})} }
+
+// settle marks indexing as over, failed with err unless it is nil. Only
+// the first call counts.
+func (p *progress) settle(err error) {
+	p.once.Do(func() {
+		if err != nil {
+			p.err.Store(&err)
+		}
+		close(p.settled)
+	})
 }
 
 // index is the read-only view the API serves once indexing is done, with
@@ -69,7 +86,7 @@ type index struct {
 
 // New returns a server for repo. name labels it in the UI.
 func New(repo *git.Repo, name string, opts lineage.BuildOptions) *Server {
-	return &Server{repo: repo, name: name, opts: opts, settled: make(chan struct{}), ui: newAssets(),
+	return &Server{repo: repo, name: name, opts: opts, progress: newProgress(), ui: newAssets(),
 		api: newRepoAPI(repo, opts.IncludeGenerated), saved: savedFile(opts.Cache)}
 }
 
@@ -79,14 +96,13 @@ func New(repo *git.Repo, name string, opts lineage.BuildOptions) *Server {
 // blocks until all are done; run it in a goroutine to serve progress
 // meanwhile.
 func (s *Server) Index(ctx context.Context) error {
-	defer s.settle.Do(func() { close(s.settled) })
+	defer s.progress.settle(nil)
 	start := time.Now()
 	opts := s.opts
-	opts.Progress = func(n int) { s.done.Store(int64(n)) }
+	opts.Progress = func(n int) { s.progress.commits.Store(int64(n)) }
 	h, err := lineage.Build(ctx, s.repo, opts)
 	if err != nil {
-		s.err.Store(&err)
-		s.settle.Do(func() { close(s.settled) })
+		s.progress.settle(err)
 		return err
 	}
 	ix := &index{h: h, cmap: codemap.Build(h), health: health.Build(h, health.Options{}), silos: silos.Build(h, silos.Options{}),
@@ -104,7 +120,7 @@ func (s *Server) Index(ctx context.Context) error {
 	ix.prebuild(ctx, ix.pageURLs())
 	ix.took = time.Since(start)
 	s.index.Store(ix)
-	s.settle.Do(func() { close(s.settled) })
+	s.progress.settle(nil)
 	if len(saved) > 0 {
 		return nil
 	}
@@ -232,14 +248,14 @@ const statusWait = 2 * time.Second
 func (s *Server) status(w http.ResponseWriter, r *http.Request) {
 	if r.URL.Query().Get("wait") == "1" {
 		select {
-		case <-s.settled:
+		case <-s.progress.settled:
 		case <-time.After(statusWait):
 		case <-r.Context().Done():
 			return
 		}
 	}
-	st := statusJSON{Repo: s.name, Commits: s.done.Load()}
-	if err := s.err.Load(); err != nil {
+	st := statusJSON{Repo: s.name, Commits: s.progress.commits.Load()}
+	if err := s.progress.err.Load(); err != nil {
 		st.Error = (*err).Error()
 	}
 	if ix := s.index.Load(); ix != nil {
