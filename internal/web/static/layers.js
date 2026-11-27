@@ -21,6 +21,8 @@
     hover: -1, // package under the pointer or a list entry
     pick: -1, // package picked by a click, kept across frames
     tipFor: -1, // the package the hover card describes
+    find: '', // the search over package names, lower case
+    found: [], // the packages it finds in the current frame, in list order
   };
 
   const stage = $('stage');
@@ -157,22 +159,49 @@
     ].filter(Boolean));
   }
 
+  // label is package p's name with the search marked in it, or null when
+  // the search doesn't find it.
+  function label(p) {
+    const n = name(state.data.packages[p].path);
+    const q = state.find;
+    if (!q) return n;
+    const i = n.toLowerCase().indexOf(q);
+    return i < 0 ? null : [n.slice(0, i), h('mark', null, n.slice(i, i + q.length)), n.slice(i + q.length)];
+  }
+
   function list() {
     const byLayer = [];
     for (const [p, at] of state.cur.at) (byLayer[at.layer] ||= []).push(p);
     const paths = state.data.packages;
+    const q = state.find;
     const out = [];
+    state.found = [];
     for (let l = byLayer.length - 1; l >= 0; l--) {
-      const ps = (byLayer[l] || []).sort((a, b) => paths[a].path.localeCompare(paths[b].path));
+      const all = (byLayer[l] || []).sort((a, b) => paths[a].path.localeCompare(paths[b].path));
+      const rows = all.map((p) => [p, label(p)]).filter(([, lb]) => lb);
+      if (q && !rows.length) continue;
+      state.found.push(...rows.map(([p]) => p));
       out.push(h('section', { class: 'layer' },
-        h('h3', { class: 'eyebrow' }, h('span', null, `Layer ${l}`), h('span', { class: 'muted' }, plural(ps.length, 'package'))),
-        h('ul', null, ps.map((p) => h('li', null, h('button', {
+        h('h3', { class: 'eyebrow' }, h('span', null, `Layer ${l}`),
+          h('span', { class: 'muted' }, q ? `${rows.length} of ${plural(all.length, 'package')}` : plural(all.length, 'package'))),
+        h('ul', null, rows.map(([p, lb]) => h('li', null, h('button', {
           type: 'button', 'data-p': p, class: state.cur.inCycle.has(p) ? 'cyc' : null, 'aria-pressed': String(p === state.pick),
           onclick: () => pick(p === state.pick ? -1 : p), onmouseenter: () => light(p), onmouseleave: () => light(-1),
           onfocus: () => light(p), onblur: () => light(-1),
-        }, h('span', null, name(paths[p].path)), h('span', { class: 'n' }, state.cur.at.get(p).live.toLocaleString())))))));
+        }, h('span', null, lb), h('span', { class: 'n' }, state.cur.at.get(p).live.toLocaleString())))))));
     }
     $('list').replaceChildren(...out);
+    findNote();
+  }
+
+  function findNote() {
+    const n = state.found.length, all = state.cur.at.size;
+    const note = !state.find ? ''
+      : n === 0 ? `No package matches “${$('find').value.trim()}”.`
+        : n === 1 ? `1 of ${plural(all, 'package')} matches · Enter picks it`
+          : `${n} of ${plural(all, 'package')} match · Enter picks the first`;
+    // Set only on a change, so playing the frames doesn't keep announcing it.
+    if ($('findNote').textContent !== note) $('findNote').textContent = note;
   }
 
   function light(p) {
@@ -217,6 +246,19 @@
   $('prev').addEventListener('click', () => { play(false); setFrame(state.frame - 1); });
   $('next').addEventListener('click', () => { play(false); setFrame(state.frame + 1); });
   $('play').addEventListener('click', () => play(!state.playing));
+  const find = $('find');
+  const setFind = (v) => {
+    state.find = v.trim().toLowerCase();
+    if (state.cur) list();
+  };
+  find.addEventListener('input', () => setFind(find.value));
+  find.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter' && state.found.length) pick(state.found[0]);
+    else if (e.key === 'Escape' && find.value) { find.value = ''; setFind(''); }
+    else if (e.key === 'Escape') find.blur();
+    else return;
+    e.preventDefault();
+  });
   document.addEventListener('keydown', (e) => {
     if (!state.data || e.target.closest?.('input, select, textarea') || e.metaKey || e.ctrlKey || e.altKey) return;
     if (e.key === 'Escape') pick(-1);
@@ -226,6 +268,7 @@
     else if (e.key === '-') stack.zoomBy(0.8);
     else if (e.key === '>') spread.by(1);
     else if (e.key === '<') spread.by(-1);
+    else if (e.key === '/') find.focus();
     else return;
     e.preventDefault();
   });
