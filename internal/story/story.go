@@ -53,38 +53,27 @@ const (
 	Orphaned                         // most of what is known of a package is held by departed authors
 )
 
+var momentNames = [...]string{
+	Birth:      "birth",
+	Death:      "death",
+	Rename:     "rename",
+	Move:       "move",
+	Signature:  "signature",
+	Quiet:      "quiet",
+	Busiest:    "busiest",
+	Tagged:     "release",
+	Newcomer:   "newcomer",
+	DepAdded:   "dep-added",
+	DepRemoved: "dep-removed",
+	CycleIn:    "cycle",
+	CycleOut:   "cycle-gone",
+	Handoff:    "handoff",
+	Orphaned:   "orphaned",
+}
+
 func (k MomentKind) String() string {
-	switch k {
-	case Birth:
-		return "birth"
-	case Death:
-		return "death"
-	case Rename:
-		return "rename"
-	case Move:
-		return "move"
-	case Signature:
-		return "signature"
-	case Quiet:
-		return "quiet"
-	case Busiest:
-		return "busiest"
-	case Tagged:
-		return "release"
-	case Newcomer:
-		return "newcomer"
-	case DepAdded:
-		return "dep-added"
-	case DepRemoved:
-		return "dep-removed"
-	case CycleIn:
-		return "cycle"
-	case CycleOut:
-		return "cycle-gone"
-	case Handoff:
-		return "handoff"
-	case Orphaned:
-		return "orphaned"
+	if int(k) < len(momentNames) && momentNames[k] != "" {
+		return momentNames[k]
 	}
 	return "unknown"
 }

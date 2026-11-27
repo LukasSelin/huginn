@@ -372,23 +372,35 @@ const minHubMethods = 5
 // classify gives each column its type and finds the hubs.
 func (a *analysis) classify() {
 	for i := range a.fields {
-		f := &a.fields[i]
-		switch {
-		case isInfrastructure(f.Name, f.Type):
-			f.Role = "infrastructure"
-		case f.Readers+f.Writers == 0:
-			f.Role = "unused"
-		case f.Writers > 0:
-			f.Role = "entity"
-			if op := a.operation(i); op != "" {
-				f.Role, f.Operation = "temporary", op
-			}
-		case isCollaborator(f.Name, f.Type):
-			f.Role = "collaborator"
-		default:
-			f.Role = "policy"
-		}
+		a.assignRole(i)
 	}
+	a.markHubs()
+}
+
+// assignRole gives column i its role: infrastructure, unused, entity (or
+// temporary, when one operation owns it), collaborator or policy.
+func (a *analysis) assignRole(i int) {
+	f := &a.fields[i]
+	switch {
+	case isInfrastructure(f.Name, f.Type):
+		f.Role = "infrastructure"
+	case f.Readers+f.Writers == 0:
+		f.Role = "unused"
+	case f.Writers > 0:
+		f.Role = "entity"
+		if op := a.operation(i); op != "" {
+			f.Role, f.Operation = "temporary", op
+		}
+	case isCollaborator(f.Name, f.Type):
+		f.Role = "collaborator"
+	default:
+		f.Role = "policy"
+	}
+}
+
+// markHubs marks the hub columns, once the columns have their roles, and
+// sets aside the hubs, infrastructure and unused columns.
+func (a *analysis) markHubs() {
 	users := make([]int, len(a.fields))
 	marking := 0
 	for _, m := range a.methods {

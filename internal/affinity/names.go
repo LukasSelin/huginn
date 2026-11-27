@@ -191,6 +191,19 @@ func uniq(ws []string) []string {
 // words splits an identifier into lower-case words, minus plural s and
 // stop words: "detailURLs" → detail, url; "HTTPServer" → http, server.
 func words(name string) []string {
+	var out []string
+	for _, p := range identParts(name) {
+		w := singular(strings.ToLower(p))
+		if w != "" && !stopWords[w] {
+			out = append(out, w)
+		}
+	}
+	return out
+}
+
+// identParts cuts an identifier at underscores, digits and changes of case,
+// keeping the case: "detailURLs" → detail, URLs; "HTTPServer" → HTTP, Server.
+func identParts(name string) []string {
 	rs := []rune(name)
 	var parts []string
 	start := 0
@@ -208,21 +221,29 @@ func words(name string) []string {
 			start = i + 1
 		case i > 0 && unicode.IsUpper(c) && unicode.IsLower(rs[i-1]):
 			cut(i)
-		case i > 0 && unicode.IsUpper(c) && unicode.IsUpper(rs[i-1]) && i+1 < len(rs) && unicode.IsLower(rs[i+1]) &&
-			(rs[i+1] != 's' || i+2 < len(rs) && unicode.IsLower(rs[i+2])):
-			cut(i) // the end of an acronym: HTTP|Server, but URLs stays whole
+		case acronymEnds(rs, i):
+			cut(i)
 		}
 	}
 	cut(len(rs))
-	var out []string
-	for _, p := range parts {
-		w := strings.ToLower(p)
-		if len(w) > 3 && strings.HasSuffix(w, "s") && !strings.HasSuffix(w, "ss") && !strings.HasSuffix(w, "us") && !strings.HasSuffix(w, "is") {
-			w = w[:len(w)-1]
-		}
-		if w != "" && !stopWords[w] {
-			out = append(out, w)
-		}
+	return parts
+}
+
+// acronymEnds reports whether rs[i] starts a word that follows an acronym:
+// the S of HTTPServer. A lone lower-case s after an acronym is its plural,
+// so URLs stays whole.
+func acronymEnds(rs []rune, i int) bool {
+	if i == 0 || i+1 >= len(rs) || !unicode.IsUpper(rs[i]) || !unicode.IsUpper(rs[i-1]) || !unicode.IsLower(rs[i+1]) {
+		return false
 	}
-	return out
+	return rs[i+1] != 's' || i+2 < len(rs) && unicode.IsLower(rs[i+2])
+}
+
+// singular drops the plural s of a word longer than three letters, but not
+// an s ending -ss, -us or -is: urls → url, while class, status and axis stay.
+func singular(w string) string {
+	if len(w) > 3 && strings.HasSuffix(w, "s") && !strings.HasSuffix(w, "ss") && !strings.HasSuffix(w, "us") && !strings.HasSuffix(w, "is") {
+		return w[:len(w)-1]
+	}
+	return w
 }

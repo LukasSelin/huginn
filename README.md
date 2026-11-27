@@ -701,6 +701,19 @@ Side effects stay in place the same way: only `internal/git` runs programs
 `cmd/huginn` and tests, code doesn't exit, print to stdout or make a root
 context; it takes a `context.Context` and an `io.Writer` from its caller.
 
+Functions and packages have size budgets. golangci-lint holds each function
+to a cognitive complexity of 20 (`gocognit`) and a cyclomatic complexity of
+15 (`gocyclo`), and a test in `internal/limits` holds each package to 80
+functions and methods, exported or not, test files aside. The packages that
+were already bigger when the budget came in are frozen at that size: they
+may shrink, and the test asks for the number to come down when they do, but
+not grow. The two kinds of budget close each other's way out: splitting a
+function into helpers grows its package, and folding helpers back grows the
+function, so code that keeps growing has to move into a package of its own.
+When Claude Code works in this repository, a hook (`.claude/hooks/limits.sh`)
+runs these checks after each edit to a Go file and sends Claude back to
+rework a change that breaks one.
+
 ### Index cache
 
 `symbols` and `serve` store each walked commit's symbol changes in
