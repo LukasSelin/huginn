@@ -46,8 +46,8 @@ type Server struct {
 	ui        fs.FS
 	uiEncoded map[string]*encoded // the static files, compressed
 
-	reports *reportCache                                       // commit reports by hash
-	build   func(context.Context, string) (*commitJSON, error) // buildReport, or a test's stand-in
+	api   *repoAPI     // commit reports and reviews, which need no index
+	saved responseFile // where the prebuilt responses are kept between runs
 }
 
 // index is the read-only view the API serves once indexing is done, with
@@ -70,8 +70,8 @@ type index struct {
 
 // New returns a server for repo. name labels it in the UI.
 func New(repo *git.Repo, name string, opts lineage.BuildOptions) *Server {
-	s := &Server{repo: repo, name: name, opts: opts, reports: newReportCache(reportCacheSize), settled: make(chan struct{})}
-	s.build = s.buildReport
+	s := &Server{repo: repo, name: name, opts: opts, settled: make(chan struct{}),
+		api: newRepoAPI(repo, opts.IncludeGenerated), saved: savedFile(opts.Cache)}
 	s.ui, _ = fs.Sub(static, "static")
 	s.uiEncoded = staticFiles(s.ui)
 	return s
@@ -100,8 +100,8 @@ func (s *Server) Index(ctx context.Context) error {
 	// The responses saved for this history are loaded rather than built
 	// again. They were saved once all were built, the detail ones too.
 	// Without a key they are neither loaded nor saved.
-	key, _ := s.historyKey(ctx)
-	saved := s.loadSaved(key)
+	key, _ := historyKey(ctx, s.repo, s.opts)
+	saved := s.saved.load(key)
 	for k, e := range saved {
 		ix.pre.Store(k, e)
 	}
@@ -116,7 +116,7 @@ func (s *Server) Index(ctx context.Context) error {
 	if ctx.Err() != nil {
 		return ctx.Err()
 	}
-	if err := s.save(key, ix); err != nil {
+	if err := s.saved.save(key, ix); err != nil {
 		return fmt.Errorf("save responses: %w", err)
 	}
 	return nil
@@ -135,9 +135,9 @@ func (s *Server) Handler() http.Handler {
 	mux.Handle("GET /affinity", s.file("affinity.html"))
 	mux.HandleFunc("GET /api/status", s.status)
 	indexRoutes(mux, s.index.Load)
-	mux.HandleFunc("GET /api/commit/{rev...}", s.commit)
-	mux.HandleFunc("GET /api/review", s.reviewAPI)
-	mux.HandleFunc("GET /api/review/options", s.reviewOptions)
+	mux.HandleFunc("GET /api/commit/{rev...}", s.api.commit(s.index.Load))
+	mux.HandleFunc("GET /api/review", s.api.reviewAPI)
+	mux.HandleFunc("GET /api/review/options", s.api.reviewOptions)
 	return mux
 }
 

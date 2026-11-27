@@ -370,10 +370,10 @@ func TestCommitReportIsCached(t *testing.T) {
 	s, ts := hs.server(t, true)
 
 	var builds atomic.Int32
-	s.reports = newReportCache(2)
-	s.build = func(ctx context.Context, sha string) (*commitJSON, error) {
+	s.api.reports = newReportCache(2)
+	s.api.build = func(ctx context.Context, sha string) (*commitJSON, error) {
 		builds.Add(1)
-		return s.buildReport(ctx, sha)
+		return s.api.buildReport(ctx, sha)
 	}
 
 	var c commitJSON

@@ -269,14 +269,31 @@ func newReportJSON(r *semdiff.Report, warnings []string) reportJSON {
 	return out
 }
 
+// repoAPI serves what is read from the repository itself rather than from
+// the indexed history: commit reports and merge-request reviews. It needs
+// no index, so it answers while indexing runs.
+type repoAPI struct {
+	repo      *git.Repo
+	generated bool // include generated files, as the history does
+
+	reports *reportCache                                       // commit reports by hash
+	build   func(context.Context, string) (*commitJSON, error) // buildReport, or a test's stand-in
+}
+
+func newRepoAPI(repo *git.Repo, generated bool) *repoAPI {
+	a := &repoAPI{repo: repo, generated: generated, reports: newReportCache(reportCacheSize)}
+	a.build = a.buildReport
+	return a
+}
+
 // buildReport computes the report of the commit with the given full hash.
-func (s *Server) buildReport(ctx context.Context, sha string) (*commitJSON, error) {
-	gen := s.opts.IncludeGenerated
-	c, files, err := s.repo.Diff(ctx, sha, git.Options{IncludeGenerated: gen})
+func (a *repoAPI) buildReport(ctx context.Context, sha string) (*commitJSON, error) {
+	gen := a.generated
+	c, files, err := a.repo.Diff(ctx, sha, git.Options{IncludeGenerated: gen})
 	if err != nil {
 		return nil, err
 	}
-	tree, err := s.repo.Tree(ctx, c.Hash)
+	tree, err := a.repo.Tree(ctx, c.Hash)
 	if err != nil {
 		return nil, err
 	}
@@ -354,25 +371,28 @@ func (c *reportCache) get(ctx context.Context, sha string, build func(context.Co
 }
 
 // commit serves the semantic diff report of one commit. It does not need the
-// index, so it works while indexing is still running.
-func (s *Server) commit(w http.ResponseWriter, r *http.Request) {
-	sha, err := s.repo.ResolveCommit(r.Context(), r.PathValue("rev"))
-	if err != nil {
-		http.Error(w, err.Error(), http.StatusNotFound)
-		return
+// index, so it works while indexing is still running; once load returns
+// one, the report links to the indexed commits around it.
+func (a *repoAPI) commit(load func() *index) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		sha, err := a.repo.ResolveCommit(r.Context(), r.PathValue("rev"))
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusNotFound)
+			return
+		}
+		rep, err := a.reports.get(r.Context(), sha, a.build)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		out := *rep
+		out.Nav = &commitNavigation{}
+		if ix := load(); ix != nil {
+			out.Nav.Prev, out.Nav.Next, out.Nav.Indexed = ix.h.Neighbors(sha)
+		}
+		if !out.Nav.Indexed && len(rep.Parents) > 0 {
+			out.Nav.Prev = rep.Parents[0]
+		}
+		writeJSON(w, out)
 	}
-	rep, err := s.reports.get(r.Context(), sha, s.build)
-	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
-		return
-	}
-	out := *rep
-	out.Nav = &commitNavigation{}
-	if ix := s.index.Load(); ix != nil {
-		out.Nav.Prev, out.Nav.Next, out.Nav.Indexed = ix.h.Neighbors(sha)
-	}
-	if !out.Nav.Indexed && len(rep.Parents) > 0 {
-		out.Nav.Prev = rep.Parents[0]
-	}
-	writeJSON(w, out)
 }

@@ -39,11 +39,11 @@ func TestSavedResponses(t *testing.T) {
 	const marked = `["saved"]`
 	mark := func(srv *Server) {
 		t.Helper()
-		key, err := srv.historyKey(context.Background())
+		key, err := historyKey(context.Background(), srv.repo, srv.opts)
 		if err != nil {
 			t.Fatal(err)
 		}
-		saved := srv.loadSaved(key)
+		saved := srv.saved.load(key)
 		if len(saved) == 0 {
 			t.Fatal("nothing saved")
 		}
@@ -52,7 +52,7 @@ func TestSavedResponses(t *testing.T) {
 			ix.pre.Store(k, e)
 		}
 		ix.pre.Store("/api/health", encode("application/json", []byte(marked)))
-		if err := srv.save(key, ix); err != nil {
+		if err := srv.saved.save(key, ix); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -91,7 +91,7 @@ func TestSavedResponses(t *testing.T) {
 	}
 
 	// Without a cache nothing is saved or loaded.
-	if f := New(repo, "demo", lineage.BuildOptions{}).savedFile(); f != "" {
+	if f := New(repo, "demo", lineage.BuildOptions{}).saved; f != "" {
 		t.Errorf("savedFile without a cache = %q", f)
 	}
 }

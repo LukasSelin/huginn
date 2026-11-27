@@ -9,6 +9,9 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+
+	"huginn/internal/git"
+	"huginn/internal/lineage"
 )
 
 // The prebuilt responses are saved next to the revision cache, keyed on the
@@ -37,30 +40,35 @@ type savedResponse struct {
 	Ctype, ETag string
 }
 
-// savedFile is where the responses are saved, or "" when the server has no
-// cache to keep them in.
-func (s *Server) savedFile() string {
-	if s.opts.Cache == nil {
+// responseFile is the file the prebuilt responses are saved in; "" when
+// there is no cache to keep them in, and nothing is loaded or saved.
+type responseFile string
+
+// savedFile returns where the responses are saved next to cache c, which
+// may be nil.
+func savedFile(c *lineage.Cache) responseFile {
+	if c == nil {
 		return ""
 	}
-	return filepath.Join(s.opts.Cache.Dir(), "responses.gob")
+	return responseFile(filepath.Join(c.Dir(), "responses.gob"))
 }
 
 // historyKey names everything the prebuilt responses depend on: the commits
-// indexed, the tags the story reads, and the options that filter them.
-func (s *Server) historyKey(ctx context.Context) (string, error) {
-	walk := s.opts.Options
+// indexed with opts, the tags the story reads, and the options that filter
+// them.
+func historyKey(ctx context.Context, repo *git.Repo, opts lineage.BuildOptions) (string, error) {
+	walk := opts.Options
 	walk.FirstParent = true
-	hashes, err := s.repo.Commits(ctx, walk)
+	hashes, err := repo.Commits(ctx, walk)
 	if err != nil {
 		return "", err
 	}
-	tags, err := s.repo.Tags(ctx, walk)
+	tags, err := repo.Tags(ctx, walk)
 	if err != nil {
 		return "", err
 	}
 	sum := sha256.New()
-	fmt.Fprintf(sum, "v%d tests=%t generated=%t\n", savedVersion, s.opts.Tests, walk.IncludeGenerated)
+	fmt.Fprintf(sum, "v%d tests=%t generated=%t\n", savedVersion, opts.Tests, walk.IncludeGenerated)
 	for _, h := range hashes {
 		fmt.Fprintln(sum, h)
 	}
@@ -70,10 +78,10 @@ func (s *Server) historyKey(ctx context.Context) (string, error) {
 	return hex.EncodeToString(sum.Sum(nil)), nil
 }
 
-// loadSaved returns the responses saved for the history named key. A
-// missing, unreadable or outdated file holds none.
-func (s *Server) loadSaved(key string) map[string]*encoded {
-	name := s.savedFile()
+// load returns the responses saved for the history named key. A missing,
+// unreadable or outdated file holds none.
+func (rf responseFile) load(key string) map[string]*encoded {
+	name := string(rf)
 	if name == "" || key == "" {
 		return nil
 	}
@@ -101,8 +109,8 @@ func (s *Server) loadSaved(key string) map[string]*encoded {
 // save replaces the saved responses with those prebuilt in ix, for the
 // history named key. The file is written aside and renamed into place, so a
 // concurrent reader sees the old file or the new one.
-func (s *Server) save(key string, ix *index) (err error) {
-	name := s.savedFile()
+func (rf responseFile) save(key string, ix *index) (err error) {
+	name := string(rf)
 	if name == "" || key == "" {
 		return nil
 	}
