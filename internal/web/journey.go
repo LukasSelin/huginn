@@ -207,44 +207,61 @@ func (ix *index) journeyAPI(w http.ResponseWriter, r *http.Request) {
 		out.Groups = append(out.Groups, groupJSON{Path: g.Path, Parent: g.Parent, X: g.X, Y: g.Y, R: g.R})
 	}
 	for _, f := range j.Frames {
-		fj := frameJSON{T: f.Start.Unix(), SHA: f.SHA, Commits: f.Commits, Total: f.Total, Live: f.Live, Pkgs: []pkgJSON{}, Deps: [][3]int{}}
-		if step != journey.Commit {
-			fj.End = f.End.Unix()
-		}
-		for _, p := range f.Packages {
-			pj := pkgJSON{P: p.Package, Live: p.Live}
-			if p.Edits.Total() > 0 {
-				pj.Kinds = kindsJSON(p.Edits)
-			}
-			for _, k := range p.Knowers {
-				gone := 0.0
-				if k.Departed {
-					gone = 1
-				}
-				pj.Knowers = append(pj.Knowers, [3]float64{float64(k.Author), round3(k.Share), gone})
-			}
-			pj.Orphaned, pj.Bus = round3(p.Orphaned), p.BusFactor
-			fj.Pkgs = append(fj.Pkgs, pj)
-		}
-		for _, d := range f.Deps {
-			fj.Deps = append(fj.Deps, [3]int{d.From, d.To, d.Refs})
-		}
-		out.Frames = append(out.Frames, fj)
+		out.Frames = append(out.Frames, frameOf(step, f))
 	}
 	for _, c := range st.Chapters {
-		out.Chapters = append(out.Chapters, chapterJSON{
-			Title: c.Title, Text: c.Text, From: c.From.Unix(), To: c.To.Unix(), FirstRev: c.FirstRev, LastRev: c.LastRev,
-			Commits: c.Commits, Added: c.Added, Removed: c.Removed, Hottest: c.Hottest, HotEdits: c.HottestEdits,
-			Births: nonNil(c.Births), Deaths: nonNil(c.Deaths), Moments: momentsJSON(c.Moments),
-			Live: c.Live, LivePkgs: c.LivePackages, EditCount: c.Edits,
-			Releases: nonNil(c.Releases), Themes: themesOf(c.Themes), Authors: c.Authors, People: []personJSON{}, Newcomers: nonNil(c.Newcomers),
-		})
-		cj := &out.Chapters[len(out.Chapters)-1]
-		for _, p := range c.Contributors {
-			cj.People = append(cj.People, personJSON{p.Name, p.Commits, p.Edits})
-		}
+		out.Chapters = append(out.Chapters, chapterOf(c))
 	}
 	writeJSON(w, out)
+}
+
+// frameOf is one frame of a journey cut by step, as /api/journey sends it.
+// Its packages and deps are never nil.
+func frameOf(step journey.Step, f journey.Frame) frameJSON {
+	fj := frameJSON{T: f.Start.Unix(), SHA: f.SHA, Commits: f.Commits, Total: f.Total, Live: f.Live, Pkgs: []pkgJSON{}, Deps: [][3]int{}}
+	if step != journey.Commit {
+		fj.End = f.End.Unix()
+	}
+	for _, p := range f.Packages {
+		fj.Pkgs = append(fj.Pkgs, pkgOf(p))
+	}
+	for _, d := range f.Deps {
+		fj.Deps = append(fj.Deps, [3]int{d.From, d.To, d.Refs})
+	}
+	return fj
+}
+
+// pkgOf is one package in a frame, with its edits and who knows it.
+func pkgOf(p journey.PackageState) pkgJSON {
+	pj := pkgJSON{P: p.Package, Live: p.Live}
+	if p.Edits.Total() > 0 {
+		pj.Kinds = kindsJSON(p.Edits)
+	}
+	for _, k := range p.Knowers {
+		gone := 0.0
+		if k.Departed {
+			gone = 1
+		}
+		pj.Knowers = append(pj.Knowers, [3]float64{float64(k.Author), round3(k.Share), gone})
+	}
+	pj.Orphaned, pj.Bus = round3(p.Orphaned), p.BusFactor
+	return pj
+}
+
+// chapterOf is one narrated chapter, as /api/journey sends it. Its lists
+// are never nil.
+func chapterOf(c story.Chapter) chapterJSON {
+	cj := chapterJSON{
+		Title: c.Title, Text: c.Text, From: c.From.Unix(), To: c.To.Unix(), FirstRev: c.FirstRev, LastRev: c.LastRev,
+		Commits: c.Commits, Added: c.Added, Removed: c.Removed, Hottest: c.Hottest, HotEdits: c.HottestEdits,
+		Births: nonNil(c.Births), Deaths: nonNil(c.Deaths), Moments: momentsJSON(c.Moments),
+		Live: c.Live, LivePkgs: c.LivePackages, EditCount: c.Edits,
+		Releases: nonNil(c.Releases), Themes: themesOf(c.Themes), Authors: c.Authors, People: []personJSON{}, Newcomers: nonNil(c.Newcomers),
+	}
+	for _, p := range c.Contributors {
+		cj.People = append(cj.People, personJSON{p.Name, p.Commits, p.Edits})
+	}
+	return cj
 }
 
 // packagesJSON lists packages with their place on the map, never nil.
