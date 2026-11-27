@@ -12,6 +12,7 @@ import (
 	"strings"
 	"testing"
 
+	"huginn/internal/affinity"
 	"huginn/internal/git"
 	"huginn/internal/gittest"
 	"huginn/internal/lineage"
@@ -71,7 +72,7 @@ func TestBeforeIndex(t *testing.T) {
 	if st.Ready || st.Repo != "demo" {
 		t.Errorf("status = %+v, want not ready for demo", st)
 	}
-	for _, url := range []string{"/api/symbol/1", "/api/health", "/api/silos", "/api/journey", "/api/layers"} {
+	for _, url := range []string{"/api/symbol/1", "/api/health", "/api/silos", "/api/journey", "/api/layers", "/api/affinity/types", "/api/affinity?name=geo.Point"} {
 		getJSON(t, h, url, http.StatusServiceUnavailable, nil)
 	}
 }
@@ -331,6 +332,46 @@ func TestAPI(t *testing.T) {
 		getJSON(t, h, "/api/journey/symbols?q=", http.StatusOK, &hits)
 		if len(hits) != 0 {
 			t.Errorf("hits for nothing = %+v", hits)
+		}
+	})
+
+	t.Run("affinity", func(t *testing.T) {
+		var types []affinity.Candidate
+		getJSON(t, h, "/api/affinity/types", http.StatusOK, &types)
+		if len(types) != 1 || types[0].Name != "Point" || types[0].Methods != 1 || types[0].Fields != 2 || types[0].Split != 1 {
+			t.Fatalf("types = %+v, want Point", types)
+		}
+		check := func(url string) {
+			t.Helper()
+			var rep affinity.Report
+			getJSON(t, h, url, http.StatusOK, &rep)
+			if len(rep.Rows) != 1 || rep.Rows[0].Method != "Move" || rep.Rows[0].Edits != 1 {
+				t.Fatalf("%s rows = %+v, want Move edited once", url, rep.Rows)
+			}
+			var cells []string
+			for _, c := range rep.Rows[0].Cells {
+				cells = append(cells, fmt.Sprintf("%s:%v", rep.Columns[c.Col].Name, c.Write))
+			}
+			if !slices.Equal(cells, []string{"X:true", "Y:true"}) {
+				t.Errorf("%s cells %q, want X and Y written", url, cells)
+			}
+		}
+		check("/api/affinity?name=geo.Point")
+		check(fmt.Sprintf("/api/affinity?type=%d&months=0", types[0].ID))
+
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/api/affinity?name=geo.Point", nil))
+		if body := rec.Body.String(); strings.Contains(body, ":null") {
+			t.Errorf("null in %s", body)
+		}
+
+		var hits []symHitJSON
+		getJSON(t, h, "/api/journey/symbols?q=(*Point).Move", http.StatusOK, &hits)
+		getJSON(t, h, "/api/affinity?name=Nope", http.StatusNotFound, nil)
+		getJSON(t, h, fmt.Sprintf("/api/affinity?type=%d", hits[0].ID), http.StatusNotFound, nil)
+		for _, url := range []string{"/api/affinity", "/api/affinity?type=abc", "/api/affinity?name=geo.Point&months=-1",
+			"/api/affinity?type=1&name=geo.Point", "/api/affinity/types?months=x"} {
+			getJSON(t, h, url, http.StatusBadRequest, nil)
 		}
 	})
 

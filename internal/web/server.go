@@ -58,8 +58,9 @@ type index struct {
 	silos  *silos.Report
 	took   time.Duration
 
-	journeys journeys // built with the prebuilt responses, or on first request
-	pre      sync.Map // request key → *encoded, see prebuilt.go
+	journeys journeys      // built with the prebuilt responses, or on first request
+	affinity affinityState // reports made on request
+	pre      sync.Map      // request key → *encoded, see prebuilt.go
 }
 
 // New returns a server for repo. name labels it in the UI.
@@ -144,6 +145,8 @@ func (s *Server) indexRoutes(mux *http.ServeMux, load func() *index) {
 	mux.HandleFunc("GET /api/journey/links/{dir...}", ready(s.journeyLinks))
 	mux.HandleFunc("GET /api/journey/symbols", ready(s.journeySymbols))
 	mux.HandleFunc("GET /api/layers", ready(prebuilt(s.layersAPI)))
+	mux.HandleFunc("GET /api/affinity/types", ready(s.affinityTypes))
+	mux.HandleFunc("GET /api/affinity", ready(s.affinityAPI))
 }
 
 // file serves the static file name, or the one the request names when name
