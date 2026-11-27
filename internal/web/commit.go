@@ -106,7 +106,31 @@ type changeJSON struct {
 	Approximate bool         `json:"approximate"`
 	Similarity  float64      `json:"similarity"`
 	Callers     []callerJSON `json:"callers"`
+	Callees     []calleeJSON `json:"callees"`
 	Members     []memberJSON `json:"members,omitempty"`
+}
+
+// calleeJSON is a function or method a change starts or stops referring
+// to, as semdiff.Callee has it.
+type calleeJSON struct {
+	Package     string `json:"package"`
+	Name        string `json:"name"`
+	Path        string `json:"path"`
+	Line        int    `json:"line"`
+	Uses        int    `json:"uses"`
+	Approximate bool   `json:"approximate"`
+	Started     bool   `json:"started"`
+}
+
+func calleesJSON(cs []semdiff.Callee) []calleeJSON {
+	out := make([]calleeJSON, len(cs))
+	for i, c := range cs {
+		out[i] = calleeJSON{
+			Package: c.Package, Name: c.Name, Path: c.Path, Line: c.Line,
+			Uses: c.Uses, Approximate: c.Approximate, Started: c.Started,
+		}
+	}
+	return out
 }
 
 // memberJSON is one changed field, method, embedded type or type term of a
@@ -250,7 +274,7 @@ func newReportJSON(r *semdiff.Report, warnings []string) reportJSON {
 			ComplexityBefore: ch.ComplexityBefore, ComplexityAfter: ch.ComplexityAfter, ComplexityDelta: ch.ComplexityAfter - ch.ComplexityBefore,
 			Summary: ch.Summary, Impact: ch.Impact, Exported: ch.Exported, APIChange: ch.APIChange,
 			CallSites: ch.CallSites, Approximate: ch.Approximate, Similarity: ch.Similarity,
-			Callers: callersJSON(ch.Callers), Members: membersJSON(ch.Members),
+			Callers: callersJSON(ch.Callers), Callees: calleesJSON(ch.Callees), Members: membersJSON(ch.Members),
 		})
 	}
 	b := r.Blast

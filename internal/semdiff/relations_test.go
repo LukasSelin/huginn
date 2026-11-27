@@ -238,3 +238,93 @@ func TestRootScopeIsEverything(t *testing.T) {
 		}
 	}
 }
+
+func calleeLines(cs []Callee) []string {
+	out := []string{}
+	for _, c := range cs {
+		sign := "-"
+		if c.Started {
+			sign = "+"
+		}
+		s := fmt.Sprintf("%s %s %s:%d ×%d", sign, c.Name, c.Path, c.Line, c.Uses)
+		if c.Approximate {
+			s += " approx"
+		}
+		out = append(out, s)
+	}
+	return out
+}
+
+// calleesOf returns the callees of the change named name, as calleeLines
+// formats them.
+func calleesOf(t *testing.T, r *Report, name string) []string {
+	t.Helper()
+	for _, c := range r.Changes {
+		if c.Name == name {
+			return calleeLines(c.Callees)
+		}
+	}
+	t.Fatalf("no change named %s", name)
+	return nil
+}
+
+func TestCallees(t *testing.T) {
+	r := Build(mergeRequest(t))
+
+	// g.Authorize() is matched by name, as for the relations; a call that
+	// follows store.Open's rename to Connect starts and stops nothing.
+	check(t, "billing.Charge", calleesOf(t, r, "billing.Charge"), []string{
+		"+ payments.(*Gateway).Authorize payments/payments.go:7 ×1 approx",
+		"+ payments.New payments/payments.go:5 ×1",
+		"- legacy.Bill legacy/legacy.go:3 ×1",
+	})
+	check(t, "api.Load", calleesOf(t, r, "api.Load"), []string{})
+	check(t, "web.Serve", calleesOf(t, r, "web.Serve"), []string{"+ billing.Charge billing/billing.go:8 ×1"})
+	// Callees in its own package count too, and a type is no callee.
+	check(t, "payments.(*Gateway).Authorize", calleesOf(t, r, "payments.(*Gateway).Authorize"), []string{
+		"+ payments.(*Gateway).check payments/payments.go:9 ×1",
+	})
+	check(t, "payments.New", calleesOf(t, r, "payments.New"), []string{})
+	check(t, "billing.TestCharge", calleesOf(t, r, "billing.TestCharge"), []string{})
+}
+
+func TestCalleesInOwnPackage(t *testing.T) {
+	const rest = `
+func (c *Cart) log() {}
+
+func price(n int) int { return n }
+
+func discount(n int) int { return n }
+`
+	before := parse(t, "shop/shop.go", `package shop
+
+type Cart struct{ n int }
+
+func (c *Cart) Total() int { return price(c.n) }
+`+rest)
+	after := parse(t, "shop/shop.go", `package shop
+
+type Cart struct{ n int }
+
+func (c *Cart) Total() int { c.log(); return discount(c.n) }
+
+func walk(n int) {
+	if n > 0 {
+		walk(n - 1)
+	}
+	price(n)
+}
+`+rest)
+	r := Build(Input{
+		Files: []FileDiff{{Old: before, New: after, Added: 7, Removed: 1}},
+		Tree:  []*ast.File{after},
+		GoMod: goMod,
+	})
+	check(t, "Total", calleesOf(t, r, "shop.(*Cart).Total"), []string{
+		"+ shop.(*Cart).log shop/shop.go:14 ×1",
+		"+ shop.discount shop/shop.go:18 ×1",
+		"- shop.price shop/shop.go:9 ×1",
+	})
+	// A function calling itself is no callee of its own.
+	check(t, "walk", calleesOf(t, r, "shop.walk"), []string{"+ shop.price shop/shop.go:16 ×1"})
+}

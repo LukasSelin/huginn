@@ -70,6 +70,10 @@ type Review struct {
 	// report's changes.
 	Paths []Paths
 
+	// Parts split the functions and methods the change touches into groups
+	// to read one at a time, in reading order.
+	Parts []Part
+
 	// Traced says capslock traced the functions the change adds or edits,
 	// so those missing from the focus's FocusExternal items reach nothing
 	// outside the process that capslock can see.
@@ -143,6 +147,7 @@ func Build(ctx context.Context, repo *git.Repo, opts Options) (*Review, error) {
 	}
 	rv.Focus = focus(rv.Report, rv.Types, caps)
 	rv.Paths = paths(rv.Report, rg.Files)
+	rv.Parts = parts(rv.Report)
 	for _, err := range rg.ParseErrors {
 		rv.Warnings = append(rv.Warnings, err.Error())
 	}

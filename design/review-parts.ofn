@@ -1,0 +1,42 @@
+# A review of 500 to 700 lines changes dozens of functions, too many to read
+# as one graph. The review splits them into parts, each read on its own: the
+# functions of one package that call one another, with the small groups they
+# alone link to. The page shows the whole change in parts, then one part,
+# then one function.
+Prefix(:=<https://huginn#>)
+Prefix(rdfs:=<http://www.w3.org/2000/01/rdf-schema#>)
+Prefix(xsd:=<http://www.w3.org/2001/XMLSchema#>)
+
+Ontology(<https://huginn/design/review-parts>
+    Declaration(Class(:review.Review))
+
+    Declaration(Class(:review.Part))
+    AnnotationAssertion(rdfs:comment :review.Part "A group of the changed functions to read together: those of one package that call one another, with the functions linked to them alone.")
+
+    Declaration(Class(:review.PartFunction))
+    AnnotationAssertion(rdfs:comment :review.PartFunction "One function of a part, where it comes in the part's reading order.")
+
+    Declaration(ObjectProperty(:review.Review.Parts))
+    ObjectPropertyDomain(:review.Review.Parts :review.Review)
+    ObjectPropertyRange(:review.Review.Parts :review.Part)
+
+    Declaration(ObjectProperty(:review.Part.Functions))
+    ObjectPropertyDomain(:review.Part.Functions :review.Part)
+    ObjectPropertyRange(:review.Part.Functions :review.PartFunction)
+
+    Declaration(DataProperty(:review.Part.Hub))
+    DataPropertyDomain(:review.Part.Hub :review.Part)
+    DataPropertyRange(:review.Part.Hub xsd:integer)
+
+    Declaration(DataProperty(:review.Part.Loose))
+    DataPropertyDomain(:review.Part.Loose :review.Part)
+    DataPropertyRange(:review.Part.Loose xsd:boolean)
+
+    Declaration(DataProperty(:review.PartFunction.Change))
+    DataPropertyDomain(:review.PartFunction.Change :review.PartFunction)
+    DataPropertyRange(:review.PartFunction.Change xsd:integer)
+
+    Declaration(DataProperty(:review.PartFunction.Depth))
+    DataPropertyDomain(:review.PartFunction.Depth :review.PartFunction)
+    DataPropertyRange(:review.PartFunction.Depth xsd:integer)
+)

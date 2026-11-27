@@ -28,6 +28,7 @@ type reviewJSON struct {
 	Types     []typeJSON    `json:"types"`
 	Focus     []focusJSON   `json:"focus"`
 	Paths     []pathsJSON   `json:"paths"`
+	Parts     []partJSON    `json:"parts"`
 
 	// Indexed says the history was indexed, so the types' change coupling
 	// was looked for.
@@ -186,6 +187,31 @@ func pathsListJSON(ps []review.Paths) []pathsJSON {
 	return out
 }
 
+// partJSON is a group of changed functions to read together, as
+// review.Part has it: functions in reading order, hub and change indexing
+// the changes.
+type partJSON struct {
+	Functions []partFunctionJSON `json:"functions"`
+	Hub       int                `json:"hub"`
+	Loose     bool               `json:"loose,omitempty"`
+}
+
+type partFunctionJSON struct {
+	Change int `json:"change"`
+	Depth  int `json:"depth"`
+}
+
+func partsJSON(ps []review.Part) []partJSON {
+	out := make([]partJSON, len(ps))
+	for i, p := range ps {
+		out[i] = partJSON{Hub: p.Hub, Loose: p.Loose, Functions: make([]partFunctionJSON, len(p.Functions))}
+		for j, f := range p.Functions {
+			out[i].Functions[j] = partFunctionJSON{Change: f.Change, Depth: f.Depth}
+		}
+	}
+	return out
+}
+
 type relationsJSON struct {
 	NewPackages  []string  `json:"newPackages"`
 	GonePackages []string  `json:"gonePackages"`
@@ -233,6 +259,7 @@ func newReviewJSON(rv *review.Review) *reviewJSON {
 		Types: typesJSON(rv.Types),
 		Focus: focusesJSON(rv.Focus),
 		Paths: pathsListJSON(rv.Paths),
+		Parts: partsJSON(rv.Parts),
 	}
 }
 

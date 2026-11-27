@@ -230,6 +230,12 @@ func (rv *revision) addTarget(out map[string]target, pkg, id string, ref ast.Ref
 	if !ok || d.pkg == pkg {
 		return
 	}
+	addUse(out, id, d, ref, approx)
+}
+
+// addUse adds ref, a reference to d, the declaration id, to out. A target
+// is approximate only when every reference to it is.
+func addUse(out map[string]target, id string, d decl, ref ast.Ref, approx bool) {
 	t, seen := out[id]
 	if !seen {
 		t = target{decl: d, line: ref.Line, approx: true}
@@ -240,12 +246,100 @@ func (rv *revision) addTarget(out map[string]target, pkg, id string, ref ast.Ref
 	out[id] = t
 }
 
-// relations works out what the changes start and stop between before and
-// after, the trees on either side of them. inScope reports whether a file
-// or directory is in Input.Scope; relations touching the scope at neither
-// end are left out.
-func relations(changes []ast.Change, before, after []*ast.File, pkgOf func(path, pkg string) string, inScope func(string) bool) Relations {
-	old, cur := newRevision(before, pkgOf), newRevision(after, pkgOf)
+// callees returns the functions and methods of the revision that s,
+// declared in package pkg, refers to, its own package included and s
+// itself left out, by symID.
+//
+// A method call whose receiver type is unknown is matched by name with the
+// methods of s's own package, and with the exported methods of the packages
+// s's file imports, as callers matches it the other way round.
+func (rv *revision) callees(s *ast.Symbol, pkg string) map[string]target {
+	out := map[string]target{}
+	self := symID(pkg, s.Key)
+	var imports map[string]bool
+	for _, ref := range s.Refs {
+		var ids []string
+		approx := false
+		switch ref.Kind {
+		case ast.RefLocal:
+			ids = []string{symID(pkg, ref.Name)}
+		case ast.RefImport:
+			ids = []string{symID(ref.Pkg, ref.Name)}
+		case ast.RefMethod:
+			if imports == nil {
+				imports = rv.importsOf(s.Path)
+			}
+			ids, approx = rv.methodCallees(ref, pkg, imports)
+		}
+		for _, id := range ids {
+			if d, ok := rv.decls[id]; ok && id != self && (d.sym.Kind == ast.KindFunc || d.sym.Kind == ast.KindMethod) {
+				addUse(out, id, d, ref, approx)
+			}
+		}
+	}
+	return out
+}
+
+// methodCallees returns the symIDs of the methods that ref, a method call
+// made in package pkg from a file importing imports, may call, and whether
+// they were matched by name only: the receiver's own method when it has
+// one, else the methods so named in pkg and, for an exported name, in the
+// packages imported.
+func (rv *revision) methodCallees(ref ast.Ref, pkg string, imports map[string]bool) ([]string, bool) {
+	if id := symID(pkg, ref.Recv+"."+ref.Name); ref.Recv != "" {
+		if _, own := rv.decls[id]; own {
+			return []string{id}, false
+		}
+	}
+	var ids []string
+	for _, id := range rv.methods[ref.Name] {
+		if p := rv.decls[id].pkg; p == pkg || goast.IsExported(ref.Name) && imports[p] {
+			ids = append(ids, id)
+		}
+	}
+	return ids, true
+}
+
+// callees returns what change c starts and stops referring to: the
+// functions and methods its old side refers to in old, the tree before the
+// change, or its new side in cur, the tree after it, and not both. renamed
+// gives the new identity of the symbols the changes rename or move.
+func callees(c ast.Change, old, cur *revision, renamed map[string]string, pkgOf func(path, pkg string) string) []Callee {
+	was := renamedTargets(onSide(c.Old, pkgOf, old.callees), renamed)
+	now := onSide(c.New, pkgOf, cur.callees)
+	var out []Callee
+	for _, side := range []struct {
+		a, b    map[string]target
+		started bool
+	}{{now, was, true}, {was, now, false}} {
+		for id, t := range side.a {
+			if _, ok := side.b[id]; ok {
+				continue
+			}
+			out = append(out, Callee{
+				Package: t.pkg, Name: qualified(t.sym), Path: t.sym.Path, Line: t.sym.StartLine,
+				Uses: t.uses, Approximate: t.approx, Started: side.started,
+			})
+		}
+	}
+	slices.SortFunc(out, func(a, b Callee) int {
+		started := func(c Callee) int {
+			if c.Started {
+				return 0
+			}
+			return 1
+		}
+		return cmp.Or(cmp.Compare(started(a), started(b)), cmp.Compare(a.Package, b.Package), cmp.Compare(a.Name, b.Name))
+	})
+	return out
+}
+
+// relations works out what the changes start and stop between old and cur,
+// the revisions on either side of them. renamed gives the new identity of
+// the symbols the changes rename or move. inScope reports whether a file or
+// directory is in Input.Scope; relations touching the scope at neither end
+// are left out.
+func relations(changes []ast.Change, old, cur *revision, renamed map[string]string, pkgOf func(path, pkg string) string, inScope func(string) bool) Relations {
 	r := Relations{
 		NewPackages:  packagesOnlyIn(cur, old, inScope),
 		GonePackages: packagesOnlyIn(old, cur, inScope),
@@ -253,10 +347,9 @@ func relations(changes []ast.Change, before, after []*ast.File, pkgOf func(path,
 		RemovedDeps:  depsOnlyIn(old, cur, inScope),
 	}
 
-	renamed := renames(changes, pkgOf)
 	for _, c := range changes {
-		was := renamedTargets(old.sideTargets(c.Old, pkgOf), renamed)
-		now := cur.sideTargets(c.New, pkgOf)
+		was := renamedTargets(onSide(c.Old, pkgOf, old.targets), renamed)
+		now := onSide(c.New, pkgOf, cur.targets)
 		r.AddedRefs = appendRefsOnlyIn(r.AddedRefs, now, was, c.New, pkgOf, inScope)
 		r.RemovedRefs = appendRefsOnlyIn(r.RemovedRefs, was, now, c.Old, pkgOf, inScope)
 	}
@@ -294,13 +387,14 @@ func renames(changes []ast.Change, pkgOf func(path, pkg string) string) map[stri
 	return renamed
 }
 
-// sideTargets returns the targets of s, one side of a change, or nil when s
-// is absent or declared in a test file.
-func (rv *revision) sideTargets(s *ast.Symbol, pkgOf func(path, pkg string) string) map[string]target {
+// onSide returns what find, revision.targets or revision.callees, gives
+// for s, one side of a change, or nil when s is absent or declared in a test
+// file.
+func onSide(s *ast.Symbol, pkgOf func(path, pkg string) string, find func(*ast.Symbol, string) map[string]target) map[string]target {
 	if s == nil || strings.HasSuffix(s.Path, "_test.go") {
 		return nil
 	}
-	return rv.targets(s, pkgOf(s.Path, s.Package))
+	return find(s, pkgOf(s.Path, s.Package))
 }
 
 // renamedTargets returns ts with each renamed symID replaced by its new
