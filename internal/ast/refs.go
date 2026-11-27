@@ -67,6 +67,16 @@ func (r Ref) Approximate() bool { return r.Kind == RefMethod && r.Recv == "" }
 // as a selector x.Name or as a key of a struct literal, with all its
 // occurrences in that body folded together.
 //
+// Writes counts the occurrences that may change the field: as the target of
+// an assignment other than :=, also through an index, a field or a pointer
+// (x.f = v, x.f[k] = v, x.f.g = v, *x.f = v, x.f += v), in x.f++ and x.f--,
+// as a range key or value assigned with =, with its address taken (&x.f), as
+// the channel of a send (x.f <- v), and as the first argument of delete,
+// clear and close. Every selector along the target is counted, so x.f.g = v
+// writes both f and g. Methods are the methods called on the field, x.f.M(),
+// sorted; whether they change it depends on its type, which is not known
+// here.
+//
 // Like Refs, FieldRefs are syntactic. The struct type is known for keyed
 // literals that spell their type (T{Name: v}, pkg.T{Name: v}) and for
 // selectors on the enclosing method's receiver; otherwise only the field
@@ -81,8 +91,10 @@ type FieldRef struct {
 	Type string // the struct type's name when known: "Config"
 	Name string // field name; empty for an unkeyed literal
 
-	Count int // occurrences
-	Line  int // first occurrence
+	Count   int      // occurrences
+	Writes  int      // occurrences that may change the field; see above
+	Methods []string // methods called on the field, x.f.M(); nil when none
+	Line    int      // first occurrence
 }
 
 // Approximate reports that the struct type is unknown and the reference may
@@ -166,6 +178,8 @@ func funcRefs(fset *token.FileSet, imports map[string]string, d *goast.FuncDecl)
 		declared: map[string]bool{},
 		skip:     map[*goast.Ident]bool{},
 		called:   map[goast.Expr]bool{},
+		written:  map[goast.Node]bool{},
+		methods:  map[goast.Node][]string{},
 		refs:     map[refKey]*Ref{},
 		fields:   map[refKey]*FieldRef{},
 	}
@@ -190,6 +204,8 @@ func funcRefs(fset *token.FileSet, imports map[string]string, d *goast.FuncDecl)
 
 	var fields []FieldRef
 	for _, f := range r.fields {
+		slices.Sort(f.Methods)
+		f.Methods = slices.Compact(f.Methods)
 		fields = append(fields, *f)
 	}
 	slices.SortFunc(fields, func(a, b FieldRef) int {
@@ -209,9 +225,11 @@ type refCollector struct {
 	recvName string // receiver variable, e.g. "ix"
 	recvType string // receiver base type, e.g. "Indexer"
 
-	declared map[string]bool       // names declared inside the function
-	skip     map[*goast.Ident]bool // identifiers that are not references
-	called   map[goast.Expr]bool   // callees of call expressions
+	declared map[string]bool         // names declared inside the function
+	skip     map[*goast.Ident]bool   // identifiers that are not references
+	called   map[goast.Expr]bool     // callees of call expressions
+	written  map[goast.Node]bool     // selectors that are, or lead to, the target of a write
+	methods  map[goast.Node][]string // selectors x.f with methods called on them, x.f.M()
 	refs     map[refKey]*Ref
 	fields   map[refKey]*FieldRef // kind is unused; recv holds the struct type
 }
@@ -225,19 +243,27 @@ func (r *refCollector) declare(n goast.Node) bool {
 		r.declareFields(x.Params)
 		r.declareFields(x.Results)
 	case *goast.AssignStmt:
-		if x.Tok == token.DEFINE {
-			for _, e := range x.Lhs {
-				if id, ok := e.(*goast.Ident); ok {
-					r.declared[id.Name] = true
-				}
+		for _, e := range x.Lhs {
+			if x.Tok != token.DEFINE {
+				r.markWritten(e)
+			} else if id, ok := e.(*goast.Ident); ok {
+				r.declared[id.Name] = true
 			}
 		}
+	case *goast.IncDecStmt:
+		r.markWritten(x.X)
+	case *goast.SendStmt:
+		r.markWritten(x.Chan)
+	case *goast.UnaryExpr:
+		if x.Op == token.AND {
+			r.markWritten(x.X)
+		}
 	case *goast.RangeStmt:
-		if x.Tok == token.DEFINE {
-			for _, e := range []goast.Expr{x.Key, x.Value} {
-				if id, ok := e.(*goast.Ident); ok {
-					r.declared[id.Name] = true
-				}
+		for _, e := range []goast.Expr{x.Key, x.Value} {
+			if x.Tok == token.ASSIGN {
+				r.markWritten(e)
+			} else if id, ok := e.(*goast.Ident); ok && x.Tok == token.DEFINE {
+				r.declared[id.Name] = true
 			}
 		}
 	case *goast.ValueSpec:
@@ -278,9 +304,52 @@ func (r *refCollector) declare(n goast.Node) bool {
 			}
 		}
 	case *goast.CallExpr:
-		r.called[callee(x.Fun)] = true
+		fn := callee(x.Fun)
+		r.called[fn] = true
+		switch fn := fn.(type) {
+		case *goast.Ident:
+			if (fn.Name == "delete" || fn.Name == "clear" || fn.Name == "close") && len(x.Args) > 0 {
+				r.markWritten(x.Args[0])
+			}
+		case *goast.SelectorExpr:
+			if on, ok := unparen(fn.X).(*goast.SelectorExpr); ok {
+				r.methods[on] = append(r.methods[on], fn.Sel.Name)
+			}
+		}
 	}
 	return true
+}
+
+// markWritten marks the selectors along the target of a write, down through
+// indexes, dereferences and fields: s.f[k].g marks s.f[k].g and s.f.
+func (r *refCollector) markWritten(e goast.Expr) {
+	for e != nil {
+		switch x := e.(type) {
+		case *goast.ParenExpr:
+			e = x.X
+		case *goast.IndexExpr:
+			e = x.X
+		case *goast.IndexListExpr:
+			e = x.X
+		case *goast.StarExpr:
+			e = x.X
+		case *goast.SelectorExpr:
+			r.written[x] = true
+			e = x.X
+		default:
+			return
+		}
+	}
+}
+
+func unparen(e goast.Expr) goast.Expr {
+	for {
+		p, ok := e.(*goast.ParenExpr)
+		if !ok {
+			return e
+		}
+		e = p.X
+	}
 }
 
 func (r *refCollector) declareFields(fl *goast.FieldList) {
@@ -361,6 +430,10 @@ func (r *refCollector) addField(k refKey, n goast.Node) {
 		r.fields[k] = f
 	}
 	f.Count++
+	if r.written[n] {
+		f.Writes++
+	}
+	f.Methods = append(f.Methods, r.methods[n]...)
 }
 
 // literalType resolves the spelled-out type of a struct literal to a type

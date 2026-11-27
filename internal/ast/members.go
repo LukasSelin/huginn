@@ -57,6 +57,11 @@ type Member struct {
 	Index    int    // position among the type's members
 	Line     int
 
+	// Group numbers the runs of members not separated by a blank line, from
+	// 0: a blank line before a member, or before its doc comment, starts the
+	// next group. Comments alone do not.
+	Group int
+
 	typeKey string // Type with parameter names dropped; used for comparison
 }
 
@@ -94,9 +99,26 @@ func (m *Member) String() string {
 // declaration, or nil for any other type.
 func typeMembers(fset *token.FileSet, sp *goast.TypeSpec) []Member {
 	var out []Member
+	group, prevEnd := 0, 0
+	// next moves to the group of field f: the next one when a blank line
+	// separates f, with its doc comment, from the field before it.
+	next := func(f *goast.Field) {
+		start, end := f.Pos(), f.End()
+		if f.Doc != nil {
+			start = f.Doc.Pos()
+		}
+		if f.Comment != nil {
+			end = f.Comment.End()
+		}
+		if l := fset.Position(start).Line; prevEnd > 0 && l > prevEnd+1 {
+			group++
+		}
+		prevEnd = fset.Position(end).Line
+	}
 	add := func(m Member, n goast.Node) {
 		m.Index = len(out)
 		m.Line = fset.Position(n.Pos()).Line
+		m.Group = group
 		if m.typeKey == "" {
 			m.typeKey = m.Type
 		}
@@ -106,6 +128,7 @@ func typeMembers(fset *token.FileSet, sp *goast.TypeSpec) []Member {
 	switch t := sp.Type.(type) {
 	case *goast.StructType:
 		for _, f := range t.Fields.List {
+			next(f)
 			typ := types.ExprString(f.Type)
 			tag := ""
 			if f.Tag != nil {
@@ -126,6 +149,7 @@ func typeMembers(fset *token.FileSet, sp *goast.TypeSpec) []Member {
 		}
 	case *goast.InterfaceType:
 		for _, f := range t.Methods.List {
+			next(f)
 			if ft, ok := f.Type.(*goast.FuncType); ok && len(f.Names) > 0 {
 				sig := strings.TrimPrefix(types.ExprString(ft), "func")
 				key := fieldList(ft.Params, "(", ")", false) + fieldList(ft.Results, "(", ")", false)
