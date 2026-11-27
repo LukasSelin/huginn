@@ -519,8 +519,26 @@ them), on the left the packages that call into it, and on the right those
 it uses. Its lines are the calls into what changed, weighted by call sites,
 and the imports and references the merge request starts and stops; point
 at a package to trace its lines, and pick it to narrow the callers,
-relations and changes listed below to the ones that involve it. The
-callers list production code unless asked for the tests too. The changes
+relations and changes listed below to the ones that involve it. Switched
+to *Functions*, it reads the change function by function, at three levels,
+since a change of a few hundred lines touches too many functions to read
+as one graph. The review splits the functions and methods it adds, edits
+and removes into *parts* to read one at a time: the functions of one
+package that call one another, when there are at least three; the rest,
+grouped by the calls among them, join the one part they are linked to, or
+make a part of their own; and those linked to no other changed function
+are loose. The calls are those the merge request starts, stops and keeps,
+its own package included, and those into what it changed. The whole
+change shows the parts around a ring, a chord as wide as the calls between
+two of them, beside the calls between packages and a card for each part
+in reading order: a part before the parts it calls. A part shows its
+functions around a ring, the rest of the change folded into single nodes,
+and as a matrix whose rows are its call tree, indented by who calls whom,
+so every call points down the list. A function shows every call into it
+and out of it, grouped by where it goes, the chains reaching it from
+unchanged code, and its flow; *Connections* on any changed function in
+the list below opens it there, and Escape goes up a level. The callers
+list production code unless asked for the tests too. The changes
 show the edits of existing code in full, a changed type by its members and
 whose code each breaks, a changed function by what it does to its paths;
 the new code, by file, and the changes to tests are folded away, each new

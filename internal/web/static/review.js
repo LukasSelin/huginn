@@ -24,6 +24,9 @@ const state = {
   ctrl: null,        // aborts the review being fetched, and its trace
   tracing: false,    // capslock is tracing the review on show
   traceError: '',    // why asking for the trace failed
+  graphView: 'packages', // the relations drawn between "packages" or "functions"
+  part: null,        // drawing functions, the index of the part open, if any
+  fn: null,          // and the change index of the function of it open, if any
 };
 
 const LIST_ROWS = 40;
@@ -105,7 +108,7 @@ async function run() {
     if (!r.ok) throw new Error((await r.text()).trim() || `${r.status}`);
     const rv = await r.json();
     if (ctrl !== state.ctrl) return;
-    Object.assign(state, { rv, focus: null, showAll: new Set(), tracing: rv.traceable && !rv.traced, traceError: '' });
+    Object.assign(state, { rv, focus: null, showAll: new Set(), tracing: rv.traceable && !rv.traced, traceError: '', part: null, fn: null });
     loading.hidden = true;
     $('out').hidden = false;
     render();
@@ -155,7 +158,7 @@ function render() {
   warnings();
   tiles();
   look();
-  legend();
+  graphHead();
   drawGraph();
   seams();
   lists();
@@ -336,9 +339,42 @@ function showChange(i) {
   card.classList.add('flash');
 }
 
+const GRAPH_NOTE = {
+  packages: 'which packages the change reaches, and the imports and references it starts and stops · point at a package to trace it, pick it to filter the lists below',
+  functions: 'the functions and methods it adds, edits and removes, split by the calls between them into parts to read one at a time · open a part, then a function, for every call in and out of it',
+};
+const GRAPH_KEY = 'huginn.review.graph'; // the graph last drawn, kept in this browser
+
+// graphHead says which graph the relations panel draws, and what it shows.
+function graphHead() {
+  for (const b of $('graphView').children) b.setAttribute('aria-pressed', String(b.dataset.view === state.graphView));
+  $('graphNote').textContent = GRAPH_NOTE[state.graphView];
+  legend();
+}
+
+function setGraphView(v) {
+  state.graphView = v === 'functions' ? 'functions' : 'packages';
+  try { localStorage.setItem(GRAPH_KEY, state.graphView); } catch { /* kept for this page only */ }
+  if (!state.rv) return;
+  graphHead();
+  drawGraph();
+}
+
 function legend() {
   const line = (cls, color, text) => h('span', {}, h('i', { class: `line ${cls}`, style: `border-color: var(${color})` }), text);
   const box = (color, text, dash) => h('span', {}, h('i', { class: 'box', style: `border-color: var(${color})${dash ? '; border-style: dashed' : ''}` }), text);
+  if (state.graphView === 'functions') {
+    $('legend').replaceChildren(
+      box('--accent', 'edited function'),
+      box('--added', 'new function', true),
+      box('--deleted', 'removed function', true),
+      box('--line-strong', 'unchanged code'),
+      line('', '--muted', 'calls what changed'),
+      line('', '--body', 'call kept between changed functions'),
+      line('', '--added', 'new call'),
+      line('dash', '--deleted', 'removed call'));
+    return;
+  }
   $('legend').replaceChildren(
     box('--accent', state.rv.scope.length ? 'in the scope' : 'changed'),
     box('--added', 'new package', true),
@@ -487,7 +523,14 @@ function edgeWidth(e) {
   return e.kind === 'impact' ? 1 + Math.min(5, w) : 1.5 + Math.min(3.5, w);
 }
 
+// drawGraph draws the relations as the graph picked: of packages, or of
+// functions as the change in parts.
 function drawGraph() {
+  if (state.graphView === 'functions') drawLevels();
+  else drawPackages();
+}
+
+function drawPackages() {
   const box = $('graphBox');
   const model = state.model = graphModel(state.rv);
   if (model.edges.length === 0) {
@@ -567,8 +610,12 @@ function untrace(el) {
 
 function pick(pkg) {
   state.focus = state.focus === pkg ? null : pkg;
-  for (const g of $('graphBox').querySelectorAll('.g-node')) {
-    g.classList.toggle('picked', g.getAttribute('aria-label').startsWith(`${state.focus}, `));
+  if (state.graphView === 'functions') {
+    drawGraph(); // drawing only what involves the package
+  } else {
+    for (const g of $('graphBox').querySelectorAll('.g-node')) {
+      g.classList.toggle('picked', g.getAttribute('aria-label').startsWith(`${state.focus}, `));
+    }
   }
   lists();
 }
@@ -580,6 +627,652 @@ function focusBar() {
     bar.replaceChildren('Showing what involves ', pkgCode(state.focus),
       h('button', { type: 'button', onclick: () => pick(state.focus) }, 'Show everything'));
   }
+}
+
+// --- The change in parts -------------------------------------------------------
+//
+// The change drawn function by function, at three levels, since a change of
+// a few hundred lines touches too many functions to read as one graph. The
+// review splits them into parts (review.Part): the whole change shows those
+// parts around a ring, a chord for the calls between two of them, beside
+// the calls between packages and a card for each part; a part shows its
+// functions around a ring, the rest of the change folded into single nodes,
+// and as a matrix whose rows are its call tree; a function shows every call
+// in and out of it, the chains that reach it, and its flow. Tests are left
+// out, as in the graph of packages.
+
+const FN_KIND = { added: 'new', deleted: 'removed', signature: 'signature', renamed: 'renamed', moved: 'moved', body: 'edited' };
+
+const isFunc = (c) => c.symbol === 'func' || c.symbol === 'method';
+const fnKey = (pkg, name) => `${pkg}|${name}`;
+// bare drops the package name from a qualified name: "(*Server).Handle".
+const bare = (name) => name.slice(name.indexOf('.') + 1);
+const CALL_LABEL = { impact: 'calls', kept: 'keeps calling', new: 'starts calling', gone: 'stops calling' };
+const CALL_COLOR = { impact: '--muted', kept: '--body', new: '--added', gone: '--deleted' };
+const stmtsOf = (c) => (c.kind === 'deleted' ? c.stmtsBefore : c.stmtsAfter);
+const cut = (s, n) => (s.length > n ? s.slice(0, n - 1) + '…' : s);
+
+// callModel works out the calls around the review's changed functions: a
+// node for every changed function or method outside tests, and for the
+// unchanged code calling them or that they start or stop calling; an edge
+// for each call into what changed ("impact"), each call between changed
+// functions that stays ("kept"), and each call the change starts ("new") or
+// stops ("gone").
+function callModel(rv) {
+  const nodes = new Map(), edges = new Map(), byOld = new Map(), changed = [];
+  const node = (pkg, name, more) => {
+    const key = fnKey(pkg, name);
+    let n = nodes.get(key);
+    if (!n) nodes.set(key, n = { key, pkg, name, links: [], ...more });
+    return n;
+  };
+  rv.changes.forEach((c, i) => {
+    if (!isFunc(c) || isTestFile(c)) return;
+    const n = node(c.package, c.name, { change: i, kind: c.kind, path: c.path, line: c.line });
+    if (n.change !== i) return; // a second init of the package
+    changed.push(n);
+    if (c.oldName) byOld.set(c.oldName, n);
+  });
+  const find = (pkg, name) => nodes.get(fnKey(pkg, name)) || byOld.get(name);
+  const edge = (a, b, kind) => {
+    const key = `${a.key}>${b.key}`;
+    let e = edges.get(key);
+    if (!e) {
+      edges.set(key, e = { a, b, kind, weight: 0, approx: true });
+      a.links.push(e);
+      b.links.push(e);
+    }
+    return e;
+  };
+  for (const n of changed) {
+    for (const ce of rv.changes[n.change].callees || []) {
+      const t = find(ce.package, ce.name) || node(ce.package, ce.name, { path: ce.path, line: ce.line });
+      if (t === n) continue;
+      const e = edge(n, t, ce.started ? 'new' : 'gone');
+      e.weight += ce.uses;
+      e.approx = e.approx && ce.approximate;
+    }
+  }
+  for (const n of changed) {
+    for (const cl of rv.changes[n.change].callers) {
+      if (cl.test) continue;
+      const s = find(cl.package, cl.name) || node(cl.package, cl.name, { path: cl.path, line: cl.line });
+      if (s === n || edges.has(`${s.key}>${n.key}`)) continue; // itself, or a call its callees say started
+      const e = edge(s, n, s.change != null ? 'kept' : 'impact');
+      e.weight += cl.calls;
+      e.approx = e.approx && cl.approximate;
+    }
+  }
+  return { changed, edges: [...edges.values()], unchanged: [...nodes.values()].filter((n) => n.change == null) };
+}
+
+// partsView returns the review's parts with the calls around them, worked
+// out once a review: partOf gives the part of each changed function by its
+// change index.
+function partsView() {
+  const rv = state.rv;
+  if (rv.partsView) return rv.partsView;
+  const model = callModel(rv);
+  const parts = (rv.parts || []).map((p, i) => ({ ...p, i }));
+  const partOf = new Map();
+  for (const p of parts) for (const f of p.functions) partOf.set(f.change, p.i);
+  const byChange = new Map(model.changed.map((n) => [n.change, n]));
+  return (rv.partsView = { model, parts, partOf, byChange });
+}
+
+// groupOf returns the part of a node, or 'U' for unchanged code.
+const groupOf = (pv, n) => (n.change != null && pv.partOf.has(n.change) ? pv.partOf.get(n.change) : 'U');
+const partName = (p) => (p.loose ? 'Loose' : bare(state.rv.changes[p.hub].name));
+const partLabel = (p) => (p.loose ? 'Loose' : `${p.i + 1} · ${partName(p)}`);
+
+// partFacts sums a part up: its size, kinds and packages, the calls inside
+// it, and the calls into it and out of it by group.
+function partFacts(pv, p) {
+  const cs = p.functions.map((f) => state.rv.changes[f.change]);
+  const count = (m, k, n = 1) => m.set(k, (m.get(k) || 0) + n);
+  const kinds = new Map(), pkgs = new Map(), into = new Map(), outOf = new Map();
+  const callers = new Set(), callees = new Set();
+  let inside = 0;
+  for (const c of cs) {
+    count(kinds, c.kind);
+    count(pkgs, c.package);
+  }
+  for (const e of pv.model.edges) {
+    const a = groupOf(pv, e.a), b = groupOf(pv, e.b);
+    if (a === p.i && b === p.i) inside++;
+    else if (b === p.i) {
+      count(into, a);
+      if (a === 'U') callers.add(e.a);
+    } else if (a === p.i) {
+      count(outOf, b);
+      if (b === 'U') callees.add(e.b);
+    }
+  }
+  return {
+    n: cs.length, stmts: sum(cs, stmtsOf), kinds, inside, into, outOf, callers: [...callers], callees: [...callees],
+    pkgs: [...pkgs].sort((x, y) => y[1] - x[1]).map(([k]) => k),
+  };
+}
+
+// openLevel shows the change in parts, part (an index into the parts) when
+// not null, and the function at change index fn of it when not null.
+function openLevel(part, fn) {
+  state.part = part;
+  state.fn = fn;
+  if (state.graphView !== 'functions') setGraphView('functions');
+  else drawGraph();
+}
+
+// upLevel goes up a level, reporting whether there was one.
+function upLevel() {
+  if (state.fn != null) openLevel(state.part, null);
+  else if (state.part != null) openLevel(null, null);
+  else return false;
+  return true;
+}
+
+function drawLevels() {
+  const pv = partsView(), box = $('graphBox');
+  if (!pv.parts.length) {
+    box.replaceChildren(h('p', { class: 'empty muted' }, 'No function or method changed outside tests.'));
+    return;
+  }
+  if (state.part != null && !pv.parts[state.part]) Object.assign(state, { part: null, fn: null });
+  if (state.fn != null && pv.partOf.get(state.fn) !== state.part) state.fn = null;
+  const body = state.fn != null ? fnLevel(pv, state.fn) : state.part != null ? partLevel(pv, pv.parts[state.part]) : wholeLevel(pv);
+  box.replaceChildren(levelNav(pv), body);
+}
+
+// levelNav is the way back up the levels, and to the part or function
+// before and after the one on show.
+function levelNav(pv) {
+  const crumb = (label, go, on) => (on
+    ? h('span', { class: 'lv-crumb on', 'aria-current': 'page' }, label)
+    : h('button', { type: 'button', class: 'lv-crumb', onclick: go }, label));
+  const sep = () => h('span', { class: 'lv-sep', 'aria-hidden': 'true' }, '›');
+  const items = [crumb('Whole change', () => openLevel(null, null), state.part == null)];
+  let prev = null, next = null;
+  if (state.part != null) {
+    const p = pv.parts[state.part];
+    items.push(sep(), crumb(partLabel(p), () => openLevel(p.i, null), state.fn == null));
+    if (state.fn != null) {
+      items.push(sep(), crumb(bare(state.rv.changes[state.fn].name), null, true));
+      const k = p.functions.findIndex((f) => f.change === state.fn);
+      const at = (f) => f && [bare(state.rv.changes[f.change].name), () => openLevel(p.i, f.change)];
+      prev = at(p.functions[k - 1]);
+      next = at(p.functions[k + 1]);
+    } else {
+      const at = (q) => q && [partLabel(q), () => openLevel(q.i, null)];
+      prev = at(pv.parts[p.i - 1]);
+      next = at(pv.parts[p.i + 1]);
+    }
+  }
+  const step = (x, back) => (x ? h('button', { type: 'button', class: 'lv-step', onclick: x[1] }, back ? `‹ ${x[0]}` : `${x[0]} ›`) : null);
+  return h('nav', { class: 'lv-nav', 'aria-label': 'Levels' }, ...items, h('span', { class: 'lv-steps' }, step(prev, true), step(next, false)));
+}
+
+const at = (cx, cy) => (a, r) => [cx + r * Math.cos(a), cy + r * Math.sin(a)];
+const pt = (p) => p.map((v) => v.toFixed(1)).join(' ');
+
+// --- Level 1: the whole change ---------------------------------------------------
+
+function wholeLevel(pv) {
+  const ring = partsRing(pv);
+  const totals = { fns: pv.model.changed.length, unchanged: pv.model.unchanged.length };
+  const cards = pv.parts.map((p) => partCard(pv, p, ring));
+  return h('div', { class: 'lv lv-whole' },
+    h('div', { class: 'lv-col' },
+      h('p', { class: 'lv-lead' }, `${plural(totals.fns, 'function')} changed, split by the calls between them into ${plural(pv.parts.filter((p) => !p.loose).length, 'part')} to read one at a time`),
+      ring, packageMatrix(pv)),
+    h('div', { class: 'lv-col lv-cards' }, h('p', { class: 'sub-h' }, 'Parts, in reading order'), ...cards));
+}
+
+// partsRing draws the parts around a ring, an arc each as long as its
+// functions are many, the unchanged code around them as one more, and a
+// chord for the calls between two, as wide as they are many. Pointing at a
+// part lights its chords; picking it opens it.
+function partsRing(pv) {
+  const groups = pv.parts.map((p) => ({ id: p.i, n: p.functions.length, p }));
+  if (pv.model.unchanged.length) groups.push({ id: 'U', n: pv.model.unchanged.length });
+  const links = new Map();
+  for (const e of pv.model.edges) {
+    const a = groupOf(pv, e.a), b = groupOf(pv, e.b);
+    if (a === b) continue;
+    const k = `${a}|${b}|${e.kind}`;
+    const l = links.get(k) || { a, b, kind: e.kind, n: 0 };
+    l.n++;
+    links.set(k, l);
+  }
+  const W = 680, H = 520, CX = 340, CY = 260, R0 = 168, R1 = 188, GAP = groups.length > 1 ? 0.06 : 0;
+  const on = at(CX, CY);
+  const unit = (2 * Math.PI - GAP * groups.length) / sum(groups, (g) => g.n);
+  const span = new Map();
+  let a = -Math.PI / 2 + GAP / 2;
+  for (const g of groups) {
+    span.set(g.id, [a, a + g.n * unit]);
+    a += g.n * unit + GAP;
+  }
+  const ends = new Map(), cursor = new Map();
+  for (const l of links.values()) {
+    ends.set(l.a, (ends.get(l.a) || 0) + l.n);
+    ends.set(l.b, (ends.get(l.b) || 0) + l.n);
+  }
+  const take = (id, n) => {
+    const [s0, s1] = span.get(id), pad = (s1 - s0) * 0.08;
+    const from = cursor.has(id) ? cursor.get(id) : s0 + pad;
+    const to = from + ((s1 - s0 - 2 * pad) * n) / ends.get(id);
+    cursor.set(id, to);
+    return [from, to];
+  };
+  const name = (id) => (id === 'U' ? 'unchanged code' : partLabel(pv.parts[id]));
+  // Labels go to the largest arcs first, each where it overlaps none placed
+  // before it; the others show theirs when pointed at.
+  const boxes = [];
+  for (const g of [...groups].sort((x, y) => y.n - x.n)) {
+    const [s0, s1] = span.get(g.id), mid = (s0 + s1) / 2, [x, y] = on(mid, R1 + 14);
+    const w = Math.max(cut(name(g.id), 28).length * 7, 90), right = Math.cos(mid) >= 0;
+    const b = [right ? x : x - w, y - 16, right ? x + w : x, y + 16];
+    g.labelled = boxes.every((o) => b[2] < o[0] || b[0] > o[2] || b[3] < o[1] || b[1] > o[3]);
+    if (g.labelled) boxes.push(b);
+  }
+  const el = svg('svg', { class: 'ring parts', viewBox: `0 0 ${W} ${H}`, role: 'img', 'aria-label': 'The parts of the change and the calls between them' });
+  const ribbons = [];
+  for (const l of [...links.values()].sort((x, y) => y.n - x.n)) {
+    const [a0, a1] = take(l.a, l.n), [b0, b1] = take(l.b, l.n);
+    const d = `M${pt(on(a0, R0))} A${R0} ${R0} 0 0 1 ${pt(on(a1, R0))} Q${CX} ${CY} ${pt(on(b0, R0))} A${R0} ${R0} 0 0 1 ${pt(on(b1, R0))} Q${CX} ${CY} ${pt(on(a0, R0))} Z`;
+    const r = svg('path', { d, class: `rb ${l.kind}` }, svg('title', {}, `${name(l.a)} ${CALL_LABEL[l.kind]} ${name(l.b)}: ${plural(l.n, 'call')}`));
+    r.dataset.a = l.a;
+    r.dataset.b = l.b;
+    ribbons.push(r);
+    el.append(r);
+  }
+  const arcs = new Map();
+  for (const g of groups) {
+    const [s0, s1] = span.get(g.id), large = s1 - s0 > Math.PI ? 1 : 0;
+    const d = `M${pt(on(s0, R1))} A${R1} ${R1} 0 ${large} 1 ${pt(on(s1, R1))} L${pt(on(s1, R0))} A${R0} ${R0} 0 ${large} 0 ${pt(on(s0, R0))} Z`;
+    const mid = (s0 + s1) / 2, [lx, ly] = on(mid, R1 + 14), right = Math.cos(mid) >= 0;
+    const anchor = right ? 'start' : 'end';
+    const arc = svg('g', {
+      class: `arc${g.id === 'U' ? ' quiet' : ''}${g.p && g.p.loose ? ' loose' : ''}${g.labelled ? '' : ' unlabelled'}`,
+      tabindex: g.id === 'U' ? -1 : 0, role: g.id === 'U' ? 'presentation' : 'button',
+    },
+      svg('title', {}, `${name(g.id)}: ${plural(g.n, 'function')}`),
+      svg('path', { d }),
+      svg('text', { x: lx.toFixed(1), y: (ly - 2).toFixed(1), 'text-anchor': anchor, class: 'arc-name' }, cut(name(g.id), 28)),
+      svg('text', { x: lx.toFixed(1), y: (ly + 12).toFixed(1), 'text-anchor': anchor, class: 'arc-sub' },
+        g.id === 'U' ? `${g.n} around them` : `${plural(g.n, 'function')}`));
+    arcs.set(g.id, arc);
+    if (g.id !== 'U') {
+      arc.setAttribute('aria-label', `${name(g.id)}, ${plural(g.n, 'function')}`);
+      arc.addEventListener('click', () => openLevel(g.id, null));
+      arc.addEventListener('keydown', (ev) => { if (ev.key === 'Enter' || ev.key === ' ') { ev.preventDefault(); openLevel(g.id, null); } });
+    }
+    arc.addEventListener('mouseenter', () => el.lit(g.id));
+    arc.addEventListener('mouseleave', () => el.lit(null));
+    el.append(arc);
+  }
+  el.append(svg('text', { x: CX, y: CY - 4, 'text-anchor': 'middle', class: 'ring-n' }, String(pv.model.changed.length)),
+    svg('text', { x: CX, y: CY + 14, 'text-anchor': 'middle', class: 'arc-sub' }, 'functions changed'));
+  el.lit = (id) => {
+    el.classList.toggle('tracing', id != null);
+    for (const r of ribbons) r.classList.toggle('hot', id != null && (r.dataset.a === String(id) || r.dataset.b === String(id)));
+    for (const [gid, arc] of arcs) arc.classList.toggle('hot', gid === id);
+  };
+  return el;
+}
+
+// packageMatrix counts the calls between packages: a row per package
+// calling the columns, the diagonal staying inside one.
+function packageMatrix(pv) {
+  const changed = new Map();
+  for (const n of pv.model.changed) changed.set(n.pkg, (changed.get(n.pkg) || 0) + 1);
+  const pkgs = [...changed.keys()].sort((a, b) => changed.get(b) - changed.get(a) || a.localeCompare(b));
+  for (const p of [...new Set(pv.model.unchanged.map((n) => n.pkg))].sort()) if (!changed.has(p)) pkgs.push(p);
+  const cells = new Map();
+  for (const e of pv.model.edges) {
+    const k = `${e.a.pkg}|${e.b.pkg}`;
+    const c = cells.get(k) || { n: 0, kinds: {} };
+    c.n++;
+    c.kinds[e.kind] = (c.kinds[e.kind] || 0) + 1;
+    cells.set(k, c);
+  }
+  const most = Math.max(1, ...[...cells.values()].map((c) => c.n));
+  const ORDER = ['new', 'kept', 'gone', 'impact'];
+  const WORD = { new: 'new', kept: 'kept', gone: 'stopped', impact: 'from unchanged code' };
+  const rows = pkgs.map((a) => h('tr', {}, h('th', { class: 'pm-row', title: a }, short(a)),
+    pkgs.map((b) => {
+      const c = cells.get(`${a}|${b}`);
+      if (!c) return h('td', { class: a === b ? 'diag' : '' });
+      const top = ORDER.reduce((x, k) => ((c.kinds[k] || 0) > (c.kinds[x] || 0) ? k : x), 'new');
+      return h('td', {
+        class: `on ${top}`, style: `--w: ${(0.2 + 0.6 * (c.n / most)).toFixed(2)}`,
+        title: `${short(a)} → ${short(b)}: ${ORDER.filter((k) => c.kinds[k]).map((k) => `${c.kinds[k]} ${WORD[k]}`).join(' · ')}`,
+      }, c.n);
+    })));
+  return h('div', { class: 'pm' },
+    h('p', { class: 'sub-h' }, 'Calls between packages', h('span', { class: 'muted small' }, ' · row calls column, the diagonal stays inside one')),
+    h('div', { class: 'scroll' }, h('table', { class: 'pm-table' },
+      h('thead', {}, h('tr', {}, h('th', {}), pkgs.map((p) => h('th', { class: 'pm-col', title: p }, h('span', {}, short(p)))))),
+      h('tbody', {}, rows))));
+}
+
+const KIND_ORDER = ['added', 'body', 'signature', 'renamed', 'moved', 'deleted'];
+
+// kindBar is a bar of a part's changes by kind.
+function kindBar(kinds) {
+  return h('span', { class: 'kind-bar', 'aria-hidden': 'true' },
+    KIND_ORDER.filter((k) => kinds.get(k)).map((k) => h('i', { class: `m-${k}`, style: `flex: ${kinds.get(k)}` })));
+}
+
+// names lists a few names of nodes: "a, b and 3 more".
+function names(ns, few = 3) {
+  const xs = ns.slice(0, few).map((n) => bare(n.name));
+  const more = ns.length - xs.length;
+  return more > 0 ? `${xs.join(', ')} and ${more} more` : xs.length > 1 ? `${xs.slice(0, -1).join(', ')} and ${xs.at(-1)}` : xs.join('');
+}
+
+function partCard(pv, p, ring) {
+  const f = partFacts(pv, p);
+  const kinds = KIND_ORDER.filter((k) => f.kinds.get(k)).map((k) => `${f.kinds.get(k)} ${FN_KIND[k]}`).join(' · ');
+  const parts = (m) => [...m.keys()].filter((g) => g !== 'U').sort((x, y) => x - y).map((g) => g + 1);
+  const links = [];
+  if (p.loose) {
+    links.push('linked to no other changed function: called through an interface, only from tests, or not at all');
+  } else {
+    if (f.callers.length) links.push(`called from ${names(f.callers)}`);
+    const by = parts(f.into), to = parts(f.outOf);
+    if (by.length) links.push(`called by ${by.join(', ')}`);
+    if (to.length) links.push(`calls into ${to.join(', ')}`);
+    if (f.callees.length) links.push(`calls ${plural(f.callees.length, 'unchanged function')}`);
+    if (!links.length) links.push('no other part calls it, and it calls none');
+  }
+  const card = h('button', { type: 'button', class: `part-card${p.loose ? ' loose' : ''}`, onclick: () => openLevel(p.i, null) },
+    h('span', { class: 'pc-head' },
+      h('span', { class: 'pc-num' }, p.loose ? '·' : String(p.i + 1)),
+      h('b', { class: 'pc-name', title: p.loose ? '' : state.rv.changes[p.hub].name }, partName(p)),
+      h('span', { class: 'pc-pkgs code muted' }, f.pkgs.map(short).join(' · ')),
+      h('span', { class: 'pc-open' }, 'Open ›')),
+    h('span', { class: 'pc-stats' }, `${plural(f.n, 'function')} · ${f.stmts.toLocaleString()} stmts`, kindBar(f.kinds), h('span', { class: 'muted' }, kinds)),
+    h('span', { class: `pc-links small${p.loose ? ' pc-warn' : ''}` }, links.join(' · ')));
+  card.addEventListener('mouseenter', () => ring.lit(p.i));
+  card.addEventListener('mouseleave', () => ring.lit(null));
+  card.addEventListener('focus', () => ring.lit(p.i));
+  card.addEventListener('blur', () => ring.lit(null));
+  return card;
+}
+
+// --- Level 2: one part ------------------------------------------------------------
+
+// partGraph folds the calls around a part: its own functions stay, each
+// other part becomes one node and so does the unchanged code of each
+// package.
+function partGraph(pv, p) {
+  const members = new Set(p.functions.map((f) => f.change));
+  const nodes = new Map(), edges = new Map();
+  const end = (n) => {
+    let key, more;
+    if (n.change != null && members.has(n.change)) {
+      key = `f${n.change}`;
+      more = { change: n.change, label: bare(n.name), kind: n.kind };
+    } else {
+      const g = groupOf(pv, n);
+      key = g === 'U' ? `u${n.pkg}` : `p${g}`;
+      more = g === 'U' ? { label: short(n.pkg), quiet: true } : { label: partLabel(pv.parts[g]), part: g };
+      more.folded = true;
+    }
+    let x = nodes.get(key);
+    if (!x) nodes.set(key, x = { key, names: new Set(), calls: false, called: false, ...more });
+    if (x.folded) x.names.add(bare(n.name));
+    return x;
+  };
+  for (const e of pv.model.edges) {
+    const ina = e.a.change != null && members.has(e.a.change), inb = e.b.change != null && members.has(e.b.change);
+    if (!ina && !inb) continue;
+    const a = end(e.a), b = end(e.b);
+    if (a.folded) a.calls = true;
+    if (b.folded) b.called = true;
+    const k = `${a.key}>${b.key}`;
+    const x = edges.get(k) || { a, b, kind: e.kind, n: 0, weight: 0 };
+    if (e.kind === 'new' || (e.kind === 'kept' && x.kind !== 'new')) x.kind = e.kind;
+    x.n++;
+    x.weight += e.weight;
+    edges.set(k, x);
+  }
+  const fns = p.functions.map((f) => nodes.get(`f${f.change}`) || { key: `f${f.change}`, change: f.change, label: bare(state.rv.changes[f.change].name), kind: state.rv.changes[f.change].kind });
+  const folded = [...nodes.values()].filter((x) => x.folded);
+  return { fns, into: folded.filter((x) => x.calls), outOf: folded.filter((x) => !x.calls), edges: [...edges.values()] };
+}
+
+function partLevel(pv, p) {
+  const f = partFacts(pv, p), g = partGraph(pv, p);
+  const kinds = KIND_ORDER.filter((k) => f.kinds.get(k)).map((k) => `${f.kinds.get(k)} ${FN_KIND[k]}`).join(', ');
+  return h('div', { class: 'lv lv-part' },
+    h('p', { class: 'lv-lead' }, `${plural(f.n, 'function')} · ${f.stmts.toLocaleString()} stmts · ${kinds} · `, h('span', { class: 'code' }, f.pkgs.map(short).join(', ')),
+      ' · the rest of the change folded into single nodes'),
+    h('div', { class: 'lv-row' },
+      h('div', { class: 'lv-col' }, partRing(p, g)),
+      h('div', { class: 'lv-col lv-wide' }, treeMatrix(p, g), partEnds(g))));
+}
+
+// partRing draws a part's functions around a ring in reading order, what
+// calls into it before them and what it calls after, each folded node a
+// square. Pointing at a node lights its calls; picking a function opens it.
+function partRing(p, g) {
+  const items = [...g.into, null, ...g.fns, null, ...g.outOf].filter((x, i, xs) => x || (i > 0 && xs[i - 1]));
+  if (items.at(-1) === null) items.pop();
+  if (items.length > 1) items.push(null);
+  const R = Math.max(150, Math.min(260, items.length * 6.5)), S = 2 * (R + 150), C = S / 2;
+  const on = at(C, C), step = (2 * Math.PI) / items.length;
+  const angle = new Map();
+  items.forEach((x, i) => { if (x) angle.set(x.key, -Math.PI / 2 + i * step); });
+  // Too tight for every label, a node shows its own when it or a neighbour
+  // is pointed at.
+  const crowded = (2 * Math.PI * R) / items.length < 13;
+  const el = svg('svg', { class: `ring part${crowded ? ' crowded' : ''}`, viewBox: `0 0 ${S} ${S}`, role: 'img', 'aria-label': `The functions of ${partLabel(p)} and the calls around them` });
+  const defs = svg('defs', {});
+  for (const [kind, color] of Object.entries(CALL_COLOR)) {
+    defs.append(svg('marker', { id: `pr-${kind}`, viewBox: '0 0 10 10', refX: 9, refY: 5, markerWidth: 7, markerHeight: 7, markerUnits: 'userSpaceOnUse', orient: 'auto' },
+      svg('path', { d: 'M0,1 L10,5 L0,9 z', style: `fill: var(${color})` })));
+  }
+  el.append(defs);
+  const lines = new Map();
+  for (const e of g.edges) {
+    const a = angle.get(e.a.key), b = angle.get(e.b.key);
+    const outer = e.a.folded || e.b.folded;
+    const d = `M${pt(on(a, R - (e.a.folded ? 10 : 7)))} C${pt(on(a, R * (outer ? 0.2 : 0.45)))} ${pt(on(b, R * (outer ? 0.2 : 0.45)))} ${pt(on(b, R - (e.b.folded ? 11 : 9)))}`;
+    const line = svg('path', { d, class: `g-edge ${e.kind}`, 'stroke-width': (1.25 + Math.min(2.5, Math.log2(e.n))).toFixed(1), 'marker-end': `url(#pr-${e.kind})` },
+      svg('title', {}, `${e.a.label} ${CALL_LABEL[e.kind]} ${e.b.label}${e.n > 1 ? `: ${plural(e.n, 'call')}` : ''}`));
+    lines.set(e, line);
+    el.append(line);
+  }
+  const marks = new Map();
+  for (const x of items) {
+    if (!x) continue;
+    const a = angle.get(x.key), [cx, cy] = on(a, R), [lx, ly] = on(a, R + (x.folded ? 14 : 10));
+    const right = Math.cos(a) >= -1e-9, deg = (a * 180) / Math.PI;
+    const shape = x.folded
+      ? svg('rect', { x: (cx - 7).toFixed(1), y: (cy - 7).toFixed(1), width: 14, height: 14, rx: 3, class: x.quiet ? 'fold quiet' : 'fold' })
+      : svg('circle', { cx: cx.toFixed(1), cy: cy.toFixed(1), r: 5, class: `dot fk-${x.kind}` });
+    const text = svg('text', {
+      x: lx.toFixed(1), y: (ly + 4).toFixed(1), 'text-anchor': right ? 'start' : 'end',
+      transform: `rotate(${(right ? deg : deg + 180).toFixed(1)} ${lx.toFixed(1)} ${ly.toFixed(1)})`,
+      class: x.folded ? 'fold-name' : 'fn-name',
+    }, cut(x.label, 26));
+    const tip = x.folded ? `${x.label}: ${[...x.names].slice(0, 12).join(', ')}${x.names.size > 12 ? ', …' : ''}` : state.rv.changes[x.change].name;
+    const mark = svg('g', { class: `rn${x.folded ? '' : ' pick'}`, tabindex: x.folded && x.part == null ? -1 : 0, role: 'button', 'aria-label': tip }, svg('title', {}, tip), shape, text);
+    const go = () => (x.folded ? x.part != null && openLevel(x.part, null) : openLevel(p.i, x.change));
+    mark.addEventListener('click', go);
+    mark.addEventListener('keydown', (ev) => { if (ev.key === 'Enter' || ev.key === ' ') { ev.preventDefault(); go(); } });
+    mark.addEventListener('mouseenter', () => lit(x));
+    mark.addEventListener('mouseleave', () => lit(null));
+    marks.set(x.key, mark);
+    el.append(mark);
+  }
+  const lit = (x) => {
+    el.classList.toggle('tracing', !!x);
+    for (const m of marks.values()) m.classList.remove('hot');
+    for (const [e, line] of lines) {
+      const hot = !!x && (e.a === x || e.b === x);
+      line.classList.toggle('hot', hot);
+      if (hot) {
+        marks.get(e.a.key).classList.add('hot');
+        marks.get(e.b.key).classList.add('hot');
+      }
+    }
+    if (x) marks.get(x.key).classList.add('hot');
+  };
+  return el;
+}
+
+const CALL_MARK = { new: '+', kept: '•', gone: '−', impact: '•' };
+
+// treeMatrix is the part as a matrix: a row per function in reading order,
+// indented as its call tree, each calling the columns it marks, the folded
+// nodes it calls last; and how often what is outside calls in.
+function treeMatrix(p, g) {
+  const cols = [...g.fns, ...g.into.filter((x) => x.called), ...g.outOf];
+  const cell = new Map(g.edges.map((e) => [`${e.a.key}>${e.b.key}`, e]));
+  const fromOutside = new Map();
+  for (const e of g.edges) if (e.a.folded && !e.b.folded) fromOutside.set(e.b.key, (fromOutside.get(e.b.key) || 0) + e.weight);
+  const depth = new Map(p.functions.map((f) => [`f${f.change}`, f.depth]));
+  const head = h('tr', {}, h('th', { class: 'corner' }, 'row calls column'), h('th', { class: 'tm-from', title: 'calls from outside the part' }, '←'),
+    cols.map((c, j) => h('th', { class: `tm-col${j === g.fns.length ? ' gap' : ''}${c.folded ? ' folded' : ''}`, title: c.folded ? c.label : state.rv.changes[c.change].name }, h('span', {}, cut(c.label, 22)))));
+  const rows = g.fns.map((r, i) => {
+    const c = state.rv.changes[r.change];
+    return h('tr', {},
+      h('th', { class: 'tm-row' }, h('button', {
+        type: 'button', style: `padding-left: ${6 + depth.get(r.key) * 12}px`, title: `${c.name} · ${FN_KIND[c.kind] || c.kind} · ${stmtsOf(c)} stmts`,
+        onclick: () => openLevel(p.i, r.change),
+      }, mark(c.kind), h('span', { class: 'tm-name' }, r.label), h('span', { class: 'muted' }, stmtsOf(c)))),
+      h('td', { class: 'tm-from' }, fromOutside.get(r.key) ? `×${fromOutside.get(r.key)}` : ''),
+      cols.map((col, j) => {
+        const e = cell.get(`${r.key}>${col.key}`);
+        const cls = [j === g.fns.length ? 'gap' : '', i === j ? 'diag' : '', e ? `on ${e.kind}` : ''].filter(Boolean).join(' ');
+        return h('td', { class: cls, title: e ? `${r.label} ${CALL_LABEL[e.kind]} ${col.label}${e.n > 1 ? `: ${plural(e.n, 'function')}` : ''} ×${e.weight}` : null }, e ? CALL_MARK[e.kind] : '');
+      }));
+  });
+  return h('div', { class: 'tm' },
+    h('p', { class: 'sub-h' }, 'The part, in reading order', h('span', { class: 'muted small' }, ' · indented by who calls whom; pick a function to read it')),
+    h('div', { class: 'scroll' }, h('table', { class: 'tm-table' }, h('thead', {}, head), h('tbody', {}, rows))));
+}
+
+// partEnds says where a part is entered from and what outside it it calls.
+function partEnds(g) {
+  const line = (cls, word, xs) => (xs.length ? h('p', {}, h('span', { class: cls }, word), ' ',
+    ...xs.flatMap((x, i) => [i ? ' · ' : '', h('b', {}, x.label), ': ', h('span', { class: 'code' }, [...x.names].slice(0, 6).join(', ') + (x.names.size > 6 ? ', …' : ''))])) : null);
+  return h('div', { class: 'lv-ends small' },
+    line('in', '← entered from', g.into) || h('p', { class: 'muted' }, 'Nothing outside tests calls into it.'),
+    line('out', '→ calls', g.outOf));
+}
+
+// --- Level 3: one function -----------------------------------------------------------
+
+function fnLevel(pv, i) {
+  const rv = state.rv, c = rv.changes[i], n = pv.byChange.get(i), p = pv.parts[pv.partOf.get(i)];
+  const k = p.functions.findIndex((f) => f.change === i);
+  const paths = pathsOf(i);
+  const outline = h('div', { class: 'lv-outline' },
+    h('p', { class: 'sub-h' }, partLabel(p), h('span', { class: 'muted small' }, ` · ${k + 1} of ${p.functions.length}`)),
+    p.functions.map((f) => {
+      const fc = rv.changes[f.change];
+      return h('button', {
+        type: 'button', class: `ol-row${f.change === i ? ' on' : ''}`, style: `padding-left: ${6 + f.depth * 12}px`,
+        title: `${fc.name} · ${FN_KIND[fc.kind] || fc.kind} · ${stmtsOf(fc)} stmts`, 'aria-current': f.change === i ? 'true' : null,
+        onclick: () => openLevel(p.i, f.change),
+      }, mark(fc.kind), h('span', { class: 'ol-name' }, bare(fc.name)), h('span', { class: 'muted' }, stmtsOf(fc)));
+    }));
+  const card = h('div', { class: 'lv-fn' },
+    h('div', { class: 'lv-fn-head' }, mark(c.kind), h('span', { class: `k k-${c.symbol}` }, c.symbol), h('code', { class: 'lv-fn-name' }, c.name),
+      h('span', { class: 'muted code' }, `${c.path}:${c.line}`), h('span', { class: 'muted small' }, c.summary),
+      h('button', { type: 'button', class: 'lv-step', onclick: () => showChange(i) }, 'Read the change')),
+    chains(n), bowtie(pv, n, p),
+    paths ? h('div', { class: 'lv-flow' }, h('p', { class: 'sub-h' }, 'Its flow', h('span', { class: 'muted small' }, ' · where the calls above happen')), pathsView(paths)) : null);
+  return h('div', { class: 'lv lv-row lv-function' }, outline, card);
+}
+
+// chains lists a few chains of calls reaching n from code the change leaves
+// alone, through the changed functions calling it: "main › serve › here".
+function chains(n) {
+  const out = [];
+  const walk = (x, path, seen) => {
+    if (out.length >= 3) return;
+    const ins = x.links.filter((e) => e.b === x && e.kind !== 'gone' && !seen.has(e.a));
+    if (!ins.length || path.length >= 6) {
+      if (x !== n) out.push([x, ...path]);
+      return;
+    }
+    const top = ins.filter((e) => e.a.change == null).sort((p, q) => q.weight - p.weight)[0];
+    if (top) out.push([top.a, x, ...path]);
+    for (const e of ins) if (e.a.change != null) walk(e.a, [x, ...path], new Set([...seen, x]));
+  };
+  walk(n, [], new Set([n]));
+  return h('div', { class: 'lv-chains' },
+    h('p', { class: 'sub-h' }, 'Reached from'),
+    out.length
+      ? out.slice(0, 3).map((ch) => h('div', { class: 'chain code' }, ch.flatMap((m, j) => [
+        j ? h('span', { class: 'muted' }, ' › ') : null,
+        m === n ? h('b', {}, 'here') : h('span', { class: m.change == null ? 'muted' : '', title: m.name }, bare(m.name))])))
+      : h('div', { class: 'muted small' }, 'Nothing outside tests calls it.'));
+}
+
+// bowtie draws every call into a function on its left and out of it on its
+// right, the calls out grouped into those within its part, into other parts
+// and into unchanged code. Picking a changed function opens it.
+function bowtie(pv, n, p) {
+  const ins = n.links.filter((e) => e.b === n).sort((x, y) => y.weight - x.weight);
+  const outs = n.links.filter((e) => e.a === n);
+  const where = (e) => (e.b.change == null ? 2 : groupOf(pv, e.b) === p.i ? 0 : 1);
+  const groups = [['in this part', 0], ['other parts', 1], ['unchanged code', 2]]
+    .map(([word, w]) => [word, outs.filter((e) => where(e) === w).sort((x, y) => (x.kind === 'new' ? 0 : 1) - (y.kind === 'new' ? 0 : 1) || y.weight - x.weight)])
+    .filter(([, es]) => es.length);
+  const ROW = 26;
+  const right = [];
+  for (const [word, es] of groups) {
+    right.push({ label: `${word} · ${es.length}` });
+    for (const e of es) right.push({ e, other: e.b });
+  }
+  const rows = Math.max(ins.length, right.length, 2), H = rows * ROW, mid = H / 2;
+  const topL = (H - ins.length * ROW) / 2, topR = (H - right.length * ROW) / 2;
+  const box = h('div', { class: 'bowtie', style: `height: ${H}px` });
+  const lines = svg('svg', { class: 'bt-lines', viewBox: `0 0 1000 ${H}`, preserveAspectRatio: 'none', 'aria-hidden': 'true' });
+  const curve = (x0, y0, x1, y1, e) => lines.append(svg('path', {
+    d: `M${x0} ${y0} C${(x0 + x1) / 2} ${y0} ${(x0 + x1) / 2} ${y1} ${x1} ${y1}`, class: `g-edge ${e.kind}${e.approx ? ' approx' : ''}`,
+    'stroke-width': (1.5 + Math.min(2, Math.log2(Math.max(1, e.weight)))).toFixed(1), 'vector-effect': 'non-scaling-stroke',
+  }));
+  box.append(lines);
+  const chip = (e, other, side, y) => {
+    const changed = other.change != null;
+    const opens = changed && pv.partOf.has(other.change);
+    const word = e.kind === 'impact' ? `×${e.weight}` : `${e.kind === 'new' ? 'starts' : e.kind === 'gone' ? 'stops' : 'kept'} ×${e.weight}`;
+    const attrs = {
+      class: `bt-chip ${side} ${changed ? `fk-${other.kind}` : 'ctx'}`, style: `top: ${y}px`,
+      title: `${other.name}${other.path ? ` · ${other.path}:${other.line}` : ''}${e.approx ? ' · matched by method name only' : ''}`,
+    };
+    const kids = [h('span', { class: 'bt-name' }, other.pkg !== n.pkg && !changed ? `${short(other.pkg).split('/').pop()}.${bare(other.name)}` : bare(other.name)),
+      e.approx ? h('span', { class: 'muted' }, 'by name') : null, h('span', { class: `bt-word ${e.kind}` }, word)];
+    return opens ? h('button', { ...attrs, type: 'button', onclick: () => openLevel(pv.partOf.get(other.change), other.change) }, ...kids) : h('span', attrs, ...kids);
+  };
+  ins.forEach((e, j) => {
+    const y = topL + j * ROW;
+    box.append(chip(e, e.a, 'left', y + 3));
+    curve(300, y + ROW / 2, 378, mid, e);
+  });
+  right.forEach((r, j) => {
+    const y = topR + j * ROW;
+    if (r.label) {
+      box.append(h('span', { class: 'bt-group', style: `top: ${y + 6}px` }, r.label));
+      return;
+    }
+    box.append(chip(r.e, r.other, 'right', y + 3));
+    curve(622, mid, 700, y + ROW / 2, r.e);
+  });
+  const c = state.rv.changes[n.change];
+  box.append(h('div', { class: `bt-center fk-${c.kind}`, style: `top: ${mid - 24}px` },
+    h('b', {}, bare(c.name)), h('span', { class: 'muted small' }, `${FN_KIND[c.kind] || c.kind} · ${short(c.package)}`)));
+  if (!ins.length) box.append(h('span', { class: 'bt-none left', style: `top: ${mid - 8}px` }, 'nothing outside tests calls it'));
+  if (!outs.length) box.append(h('span', { class: 'bt-none right', style: `top: ${mid - 8}px` }, 'starts and stops no call, and keeps none to changed code'));
+  return h('div', { class: 'lv-bowtie' },
+    h('div', { class: 'bt-heads sub-h' }, h('span', {}, `Called by · ${ins.length}`), h('span', {}, `Calls · ${outs.length}`)), box);
 }
 
 // --- The affinity matrix of each type it touches ------------------------------
@@ -1058,7 +1751,7 @@ function symbolCounts(xs) {
 function changeRow(c, i, where) {
   const p = pathsOf(i);
   const line = [mark(c.kind), h('span', { class: 'k' }, c.symbol), h('code', {}, c.name),
-    h('span', { class: 'muted small' }, p ? p.verdict : c.summary), h('span', { class: 'muted code' }, where)];
+    h('span', { class: 'muted small' }, p ? p.verdict : c.summary), h('span', { class: 'muted code' }, where), connections(i)];
   if (!p || !p.hunks.length) return h('div', { class: 'row', id: `ch-${i}` }, ...line);
   return h('details', { class: 'row flow-outline', id: `ch-${i}` }, h('summary', {}, ...line), flowView(p));
 }
@@ -1120,6 +1813,21 @@ function stepLine(s) {
       h('code', { title: s.text }, s.text), note ? h('span', { class: 'st-note' }, ` ${note}`) : null, was));
 }
 
+// connections offers to open a changed function in the change in parts,
+// with every call in and out of it, or returns null for other changes.
+function connections(i) {
+  const pv = partsView();
+  if (!pv.partOf.has(i)) return null;
+  return h('button', {
+    type: 'button', class: 'conn', title: 'every call in and out of it, in the relations above',
+    onclick: (ev) => {
+      ev.preventDefault(); // inside a summary, it would open or close the row
+      openLevel(pv.partOf.get(i), i);
+      $('graphTitle').scrollIntoView({ behavior: 'smooth', block: 'start' });
+    },
+  }, 'Connections');
+}
+
 // changeCard is a change in full: where it is, what changed and whom it
 // reaches, a type's changed members, and its callers, production code first.
 function changeCard(c, i) {
@@ -1142,7 +1850,7 @@ function changeCard(c, i) {
     : null;
   return h('div', { class: 'change', id: `ch-${i}` },
     h('div', { class: 'change-head' }, mark(c.kind), h('span', { class: 'k' }, c.symbol), h('code', {}, c.name),
-      h('span', { class: 'muted code' }, where)),
+      h('span', { class: 'muted code' }, where), connections(i)),
     h('div', { class: 'meta' }, c.summary,
       c.apiChange ? h('span', { class: 'api' }, ' · API change') : null),
     detail, pathsOf(i) ? pathsView(pathsOf(i)) : null, callers);
@@ -1207,6 +1915,13 @@ $('pick').addEventListener('submit', (ev) => {
   history.pushState(null, '', q ? `?${q}` : location.pathname);
   run();
 });
+for (const b of $('graphView').children) b.addEventListener('click', () => setGraphView(b.dataset.view));
+// Escape goes up a level of the change in parts.
+document.addEventListener('keydown', (ev) => {
+  if (ev.key === 'Escape' && state.rv && state.graphView === 'functions' && !/^(INPUT|SELECT|TEXTAREA)$/.test(ev.target.tagName) && upLevel()) {
+    ev.preventDefault();
+  }
+});
 $('outsideOnly').addEventListener('change', (ev) => { state.outsideOnly = ev.target.checked; impact(); });
 $('withTests').addEventListener('change', (ev) => { state.withTests = ev.target.checked; impact(); });
 window.addEventListener('popstate', () => { readURL(); run(); });
@@ -1216,6 +1931,7 @@ window.addEventListener('resize', () => {
   resizing = setTimeout(() => { if (state.rv) drawGraph(); }, 150);
 });
 
+try { setGraphView(localStorage.getItem(GRAPH_KEY)); } catch { /* the graph of packages */ }
 readURL();
 api('/api/status').then((st) => { $('repo').textContent = st.repo; }, () => {});
 loadOptions($('head').value.trim());

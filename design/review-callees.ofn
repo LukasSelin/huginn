@@ -1,0 +1,48 @@
+# The review page draws the change as a call graph of functions, beside the
+# graph of packages: who calls what the change edits, how the changed
+# functions call each other, and what they start and stop calling. Callers
+# are already known; semdiff.Change gains its callees, the functions and
+# methods of the repository, its own package included, that the change
+# starts or stops referring to.
+Prefix(:=<https://huginn#>)
+Prefix(rdfs:=<http://www.w3.org/2000/01/rdf-schema#>)
+Prefix(xsd:=<http://www.w3.org/2001/XMLSchema#>)
+
+Ontology(<https://huginn/design/review-callees>
+    Declaration(Class(:semdiff.Change))
+
+    Declaration(Class(:semdiff.Callee))
+    AnnotationAssertion(rdfs:comment :semdiff.Callee "A function or method of the repository that a changed declaration starts or stops referring to.")
+
+    Declaration(ObjectProperty(:semdiff.Change.Callees))
+    ObjectPropertyDomain(:semdiff.Change.Callees :semdiff.Change)
+    ObjectPropertyRange(:semdiff.Change.Callees :semdiff.Callee)
+
+    Declaration(DataProperty(:semdiff.Callee.Package))
+    DataPropertyDomain(:semdiff.Callee.Package :semdiff.Callee)
+    DataPropertyRange(:semdiff.Callee.Package xsd:string)
+
+    Declaration(DataProperty(:semdiff.Callee.Name))
+    DataPropertyDomain(:semdiff.Callee.Name :semdiff.Callee)
+    DataPropertyRange(:semdiff.Callee.Name xsd:string)
+
+    Declaration(DataProperty(:semdiff.Callee.Path))
+    DataPropertyDomain(:semdiff.Callee.Path :semdiff.Callee)
+    DataPropertyRange(:semdiff.Callee.Path xsd:string)
+
+    Declaration(DataProperty(:semdiff.Callee.Line))
+    DataPropertyDomain(:semdiff.Callee.Line :semdiff.Callee)
+    DataPropertyRange(:semdiff.Callee.Line xsd:integer)
+
+    Declaration(DataProperty(:semdiff.Callee.Uses))
+    DataPropertyDomain(:semdiff.Callee.Uses :semdiff.Callee)
+    DataPropertyRange(:semdiff.Callee.Uses xsd:integer)
+
+    Declaration(DataProperty(:semdiff.Callee.Approximate))
+    DataPropertyDomain(:semdiff.Callee.Approximate :semdiff.Callee)
+    DataPropertyRange(:semdiff.Callee.Approximate xsd:boolean)
+
+    Declaration(DataProperty(:semdiff.Callee.Started))
+    DataPropertyDomain(:semdiff.Callee.Started :semdiff.Callee)
+    DataPropertyRange(:semdiff.Callee.Started xsd:boolean)
+)

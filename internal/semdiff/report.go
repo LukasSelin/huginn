@@ -218,6 +218,15 @@ type Change struct {
 	Approximate bool
 	Impact      string // "17 call sites · exported"
 
+	// Callees are the functions and methods of the repository, the
+	// symbol's own package included, that the change starts or stops
+	// referring to: those its body refers to on one side of the change
+	// only. Those it refers to on both sides are left out, and so is code
+	// in test files. A reference following a symbol the change renames or
+	// moves counts as neither. The started come first, then by package and
+	// name.
+	Callees []Callee
+
 	Similarity float64 // body similarity, below 1 for fuzzy rename or move matches
 
 	// Members are the member-level changes of a struct or interface type
@@ -242,6 +251,22 @@ type Caller struct {
 	Approximate bool
 	Test        bool // declared in a _test.go file
 	Outside     bool // declared outside Input.Scope; never set without a scope
+}
+
+// Callee is a function or method of the repository that a changed
+// declaration starts or stops referring to.
+type Callee struct {
+	Package string // import path
+	Name    string // qualified with the package name: "store.(*DB).Close"
+
+	// Path and Line locate the callee's declaration, on the side of the
+	// change where the reference exists.
+	Path string
+	Line int
+
+	Uses        int  // occurrences in the changed declaration, on that side
+	Approximate bool // matched by method name only, without knowing the receiver's type
+	Started     bool // the change starts referring to it; otherwise it stops
 }
 
 // BlastRadius is what the commit's changes reach outside themselves. Added
@@ -296,15 +321,19 @@ func Build(in Input) *Report {
 	pkgs := map[string]bool{}
 
 	changes := ast.Diff(olds, news)
+	old, cur := newRevision(TreeBefore(in.Tree, in.Files), pkgOf), newRevision(in.Tree, pkgOf)
+	renamed := renames(changes, pkgOf)
 	for _, c := range changes {
 		if !changeInScope(c, inScope) {
 			continue
 		}
-		r.addChange(indexedChange(c, pkgOf, idx, blastFor(c, blast, pkgs)))
+		rc := indexedChange(c, pkgOf, idx, blastFor(c, blast, pkgs))
+		rc.Callees = callees(c, old, cur, renamed, pkgOf)
+		r.addChange(rc)
 	}
 	r.Blast.addCallers(blast, pkgs)
 
-	r.Relations = relations(changes, TreeBefore(in.Tree, in.Files), in.Tree, pkgOf, inScope)
+	r.Relations = relations(changes, old, cur, renamed, pkgOf, inScope)
 	r.summarizeFiles(in, inScope)
 	return r
 }

@@ -71,7 +71,11 @@
     <section class="panel graph" aria-labelledby="graphTitle">
       <div class="titlerow">
         <h2 class="h2" id="graphTitle">Relations</h2>
-        <span class="muted small">which packages the change reaches, and the imports and references it starts and stops · point at a package to trace it, pick it to filter the lists below</span>
+        <span class="muted small graph-note" id="graphNote"></span>
+        <div class="seg graph-view" id="graphView" role="group" aria-label="Draw the relations between">
+          <button type="button" data-view="packages" aria-pressed="true">Packages</button>
+          <button type="button" data-view="functions" aria-pressed="false">Functions</button>
+        </div>
       </div>
       <div class="legend" id="legend"></div>
       <div class="graph-box" id="graphBox"></div>
