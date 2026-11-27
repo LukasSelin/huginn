@@ -26,6 +26,7 @@ type reviewJSON struct {
 	reportJSON
 	Relations relationsJSON `json:"relations"`
 	Types     []typeJSON    `json:"types"`
+	Focus     []focusJSON   `json:"focus"`
 
 	// Indexed says the history was indexed, so the types' change coupling
 	// was looked for.
@@ -42,6 +43,33 @@ type typeJSON struct {
 	Before  *cohesion.Report `json:"before"`
 	After   *cohesion.Report `json:"after"`
 	Notes   []cohesion.Note  `json:"notes"`
+}
+
+// focusJSON is one thing to look at first, as review.Focus has it: kind is
+// "breaking", "behavior", "dependency" or "structure", and change indexes
+// the changes, -1 for none.
+type focusJSON struct {
+	Kind         string       `json:"kind"`
+	Name         string       `json:"name"`
+	Path         string       `json:"path"`
+	Line         int          `json:"line"`
+	What         string       `json:"what"`
+	Why          string       `json:"why,omitempty"`
+	Change       int          `json:"change"`
+	Reaches      []callerJSON `json:"reaches"`
+	Tests        int          `json:"tests"`
+	Implementers bool         `json:"implementers,omitempty"`
+}
+
+func focusesJSON(fs []review.Focus) []focusJSON {
+	out := make([]focusJSON, len(fs))
+	for i, f := range fs {
+		out[i] = focusJSON{
+			Kind: f.Kind.String(), Name: f.Name, Path: f.Path, Line: f.Line, What: f.What, Why: f.Why,
+			Change: f.Change, Reaches: callersJSON(f.Reaches), Tests: f.Tests, Implementers: f.Implementers,
+		}
+	}
+	return out
 }
 
 type relationsJSON struct {
@@ -89,6 +117,7 @@ func newReviewJSON(rv *review.Review) *reviewJSON {
 			RemovedRefs:  refsJSON(rel.RemovedRefs),
 		},
 		Types: typesJSON(rv.Types),
+		Focus: focusesJSON(rv.Focus),
 	}
 }
 

@@ -1,23 +1,27 @@
 'use strict';
 
 // The review page: what a merge request changes since its merge base with
-// the branch it goes into, the code that depends on what it changed, and the
-// imports and references between packages it starts and stops, optionally
-// limited to folders. What is reviewed lives in the URL, so a review can be
-// linked to.
+// the branch it goes into, optionally limited to folders. It opens on what
+// the diff does not show (the exported API it breaks, the existing code it
+// edits and who runs that code, the imports it starts), then the packages
+// it reaches, the code depending on what it changed, and the changes, the
+// edits of existing code in full and the new code and tests folded away.
+// What is reviewed lives in the URL, so a review can be linked to.
 
 const state = {
   rv: null,          // the review on show
   model: null,       // its relations graph
   focus: null,       // the package picked in the graph, filtering the lists
   folders: [],       // the scope being edited
-  kinds: new Set(KINDS.map(([k]) => k)),
   outsideOnly: false,
+  withTests: false,  // the impact lists callers in test files too
   showAll: new Set(), // lists expanded past their first rows
   ctrl: null,        // aborts the review being fetched
 };
 
 const LIST_ROWS = 40;
+const LOOK_EDITS = 6; // edits of existing code in "Look here first" before the rest fold away
+const REACH_NAMES = 3;
 const shortHash = (s) => s.slice(0, 7);
 const sum = (xs, f) => xs.reduce((n, x) => n + f(x), 0);
 
@@ -112,12 +116,10 @@ function render() {
   $('what').textContent = `${rv.headName} into ${rv.target} · merge base ${shortHash(rv.mergeBase)} · ${plural(rv.commits, 'commit')} · ${where}`;
   $('headline').textContent = rv.headline;
   $('kinds').replaceChildren(...KINDS.filter(([k]) => rv.counts[k]).map(([k, label]) => h('span', {}, mark(k), `${label} ${rv.counts[k]}`)));
-  const api = rv.blast.apiChanges;
-  $('api').hidden = api.length === 0;
-  $('api').replaceChildren('Exported API changed: ', ...api.flatMap((n, i) => [i ? ', ' : '', h('code', {}, n)]));
   $('warnings').hidden = !(rv.warnings && rv.warnings.length);
   $('warnings').replaceChildren(...(rv.warnings || []).map((w) => h('li', {}, w)));
   tiles();
+  look();
   legend();
   drawGraph();
   seams();
@@ -132,25 +134,123 @@ function lists() {
   files();
 }
 
-function outsideCallers() {
-  const out = state.rv.blast.callers.filter((c) => c.outside);
-  return { sites: sum(out, (c) => c.calls), decls: out.length, pkgs: new Set(out.map((c) => c.package)).size };
+// reach sums up callers: call sites, declarations and packages.
+function reach(cs) {
+  return { sites: sum(cs, (c) => c.calls), decls: cs.length, pkgs: new Set(cs.map((c) => c.package)).size, approx: cs.some((c) => c.approximate) };
 }
+const production = (cs) => cs.filter((c) => !c.test);
+const inTests = (cs) => cs.filter((c) => c.test);
+const outsideCallers = () => reach(production(state.rv.blast.callers).filter((c) => c.outside));
 
+// The key numbers count production code: tests often outnumber it many
+// times, and rarely break in ways that matter to a reviewer.
 function tiles() {
   const rv = state.rv, b = rv.blast, R = rv.relations;
-  const t = [{ n: b.callSites, label: 'call sites reached', sub: `${plural(b.callers.length, 'declaration')} · ${plural(b.packages.length, 'package')}${b.approximate ? ' · approx.' : ''}` }];
+  const p = reach(production(b.callers)), tests = reach(inTests(b.callers));
+  const t = [{
+    n: p.sites, label: 'call sites reached',
+    sub: [plural(p.decls, 'declaration'), plural(p.pkgs, 'package'), tests.sites ? `${tests.sites.toLocaleString()} more in tests` : '', p.approx ? 'approx.' : ''].filter(Boolean).join(' · '),
+  }];
   if (rv.scope.length) {
     const o = outsideCallers();
     t.push({ cls: 't-out', n: o.sites, label: 'outside the scope', sub: `${plural(o.decls, 'declaration')} · ${plural(o.pkgs, 'package')}` });
   }
   t.push(
     { cls: 't-added', n: R.addedDeps.length, label: 'new imports', sub: `${R.removedDeps.length} removed` },
-    { cls: 't-added', n: R.addedRefs.length, label: 'new references', sub: `${R.removedRefs.length} removed` },
     { cls: b.apiChanges.length ? 't-api' : '', n: b.apiChanges.length, label: 'exported API changes', sub: 'that can break callers' },
   );
   $('tiles').replaceChildren(...t.map((x) => h('div', { class: `tile ${x.cls || ''}` },
     h('strong', {}, x.n.toLocaleString()), h('span', { class: 'label' }, x.label), h('span', { class: 'sub' }, x.sub))));
+}
+
+// --- Look here first ---------------------------------------------------------
+
+const LOOK_KIND = {
+  breaking: 'Breaks API', behavior: 'Edits', dependency: 'New import', structure: 'Blocks',
+};
+
+// look lists what the review says to look at first, as review.Focus has it:
+// the exported API the change breaks, the edits of existing code, the
+// largest reaching most first, the imports it starts and the warnings
+// about the types it touches. Edits past the first few fold away.
+function look() {
+  const rv = state.rv, fs = rv.focus || [];
+  if (!fs.length) {
+    $('look').replaceChildren(h('li', { class: 'look-empty muted small' },
+      'Nothing beyond new code: no existing code is edited and no import between packages starts.'));
+    return;
+  }
+  const edits = fs.filter((f) => f.kind === 'behavior');
+  const all = state.showAll.has('look');
+  let shownEdits = 0;
+  const items = [];
+  for (const f of fs) {
+    if (f.kind === 'behavior' && !all && ++shownEdits > LOOK_EDITS) continue;
+    items.push(lookItem(f));
+  }
+  if (!all && edits.length > LOOK_EDITS) {
+    items.push(h('li', { class: 'look-more' }, h('button', {
+      class: 'more', type: 'button', onclick: () => { state.showAll.add('look'); look(); },
+    }, `and ${plural(edits.length - LOOK_EDITS, 'more edit')} of existing code`)));
+  }
+  $('look').replaceChildren(...items);
+}
+
+function lookItem(f) {
+  const rv = state.rv;
+  const ch = f.change >= 0 ? rv.changes[f.change] : null;
+  let name;
+  if (f.kind === 'dependency') {
+    const [from, to] = f.name.split(' → ');
+    name = h('span', {}, pkgCode(from), ' → ', pkgCode(to));
+  } else if (ch) {
+    name = h('a', { href: `#ch-${f.change}`, onclick: (ev) => { ev.preventDefault(); showChange(f.change); } }, h('code', {}, f.name));
+  } else {
+    name = h('code', {}, f.name);
+  }
+  const where = f.line ? `${f.path}:${f.line}` : f.path;
+  return h('li', { class: `look-item l-${f.kind}` },
+    h('span', { class: 'look-kind' }, LOOK_KIND[f.kind] || f.kind),
+    h('div', { class: 'look-body' },
+      h('div', { class: 'look-head' }, name, where ? h('span', { class: 'muted code' }, where) : null),
+      h('div', { class: 'look-what' }, f.what, f.why ? h('span', { class: 'why' }, ` · ${f.why}`) : null),
+      reachLine(f, ch)));
+}
+
+// reachLine says whom an item reaches: "called by a, b and 3 more · 29 in
+// tests", or that nothing does.
+function reachLine(f, ch) {
+  if (f.kind !== 'breaking' && f.kind !== 'behavior') return null;
+  const verb = f.implementers ? 'implemented by' : ch && (ch.symbol === 'func' || ch.symbol === 'method') ? 'called by' : 'used by';
+  const parts = [];
+  if (f.reaches.length) {
+    const names = f.reaches.slice(0, REACH_NAMES).flatMap((c, i) => [i ? ', ' : '', h('code', { title: `${c.path}:${c.line}` }, c.name),
+      c.outside ? h('span', { class: 'tag out' }, 'outside') : null]);
+    const more = f.reaches.length - REACH_NAMES;
+    parts.push(h('span', {}, `${verb} `, ...names, more > 0 ? ` and ${more} more` : ''));
+  } else if (f.implementers) {
+    parts.push('no implementer found outside the change');
+  } else {
+    parts.push(f.tests ? 'only tests use it' : 'nothing calls it');
+  }
+  if (f.tests) parts.push(`${f.tests.toLocaleString()} in tests`);
+  return h('div', { class: 'look-reach small' }, ...parts.flatMap((p, i) => [i ? ' · ' : '', p]));
+}
+
+// showChange scrolls to a change's card, showing every package first if
+// the one picked in the graph hides it.
+function showChange(i) {
+  let card = $(`ch-${i}`);
+  if (!card && state.focus) {
+    pick(state.focus);
+    card = $(`ch-${i}`);
+  }
+  if (!card) return;
+  for (let d = card.closest('details'); d; d = d.parentElement.closest('details')) d.open = true;
+  card.scrollIntoView({ behavior: 'smooth', block: 'center' });
+  card.classList.remove('flash');
+  void card.offsetWidth; // restart the animation
+  card.classList.add('flash');
 }
 
 function legend() {
@@ -462,6 +562,22 @@ function typeCard(t) {
     ? t.notes.map((n) => h('li', { class: n.warn ? 'warn-note' : '' }, n.text))
     : h('li', { class: 'muted' }, 'It leaves the blocks as they were.'))));
 
+  // The whole reading is for planning a split rather than reviewing the
+  // change, so it is drawn only when asked for.
+  const reading = h('details', { class: 'reading' },
+    h('summary', {}, 'Affinity reading', h('span', { class: 'muted' }, ' · the matrix, its blocks, the callers, the names and the change coupling, and where to start a split')));
+  reading.addEventListener('toggle', () => {
+    if (reading.open && reading.children.length === 1) reading.append(...affinityReading(t));
+  });
+  body.append(reading);
+  card.append(body);
+  return card;
+}
+
+// affinityReading draws a type's whole affinity reading, after the change
+// with a switch to before it.
+function affinityReading(t) {
+  const out = [];
   const view = h('div', { class: 'type-view' });
   const show = (which) => view.replaceChildren(...typeView(t, which === 'before' ? t.before : t.after, which));
   if (t.before && t.after) {
@@ -475,12 +591,11 @@ function typeCard(t) {
         },
       }, which === 'after' ? 'After the change' : 'Before'));
     }
-    body.append(seg);
+    out.push(seg);
   }
-  body.append(view);
+  out.push(view);
   show(t.after ? 'after' : 'before');
-  card.append(body);
-  return card;
+  return out;
 }
 
 const section = (title, ...kids) => h('div', { class: 'facts' }, h('p', { class: 'sub-h' }, title), ...kids);
@@ -682,18 +797,28 @@ function focusedCallers() {
   return [...by.values()].sort((a, b) => b.calls - a.calls || a.name.localeCompare(b.name));
 }
 
+// impact lists the code using what changed: production code, and the
+// tests too when asked for.
 function impact() {
   const rv = state.rv, b = rv.blast, scoped = rv.scope.length > 0;
+  const p = reach(production(b.callers)), tests = reach(inTests(b.callers));
   $('outsideToggle').hidden = !scoped;
-  let note = b.callSites
-    ? `${plural(b.callSites, 'call site')}${b.approximate ? ' (approx.)' : ''} in ${plural(b.callers.length, 'declaration')}, ${plural(b.packages.length, 'package')}`
-    : 'nothing outside the change uses what it changed';
-  if (scoped && b.callSites) note += ` · ${outsideCallers().sites.toLocaleString()} outside the scope`;
+  $('testsToggle').hidden = tests.decls === 0;
+  $('testsLabel').textContent = `with ${plural(tests.decls, 'test')}`;
+  let note;
+  if (p.decls) {
+    note = `${plural(p.sites, 'call site')}${p.approx ? ' (approx.)' : ''} in ${plural(p.decls, 'declaration')}, ${plural(p.pkgs, 'package')}`;
+    if (tests.decls) note += ` · ${tests.sites.toLocaleString()} more in tests`;
+    if (scoped) note += ` · ${outsideCallers().sites.toLocaleString()} outside the scope`;
+  } else {
+    note = tests.decls ? `only tests use what it changed: ${plural(tests.sites, 'call site')}` : 'nothing outside the change uses what it changed';
+  }
   $('impactNote').textContent = note;
 
   // Callers outside the scope first, tests last, then by uses.
   const first = (c) => (c.outside ? 0 : 1) + (c.test ? 2 : 0);
   let cs = [...focusedCallers()].sort((a, b) => first(a) - first(b) || b.calls - a.calls);
+  if (!state.withTests) cs = cs.filter((c) => !c.test);
   if (scoped && state.outsideOnly) cs = cs.filter((c) => c.outside);
   const table = $('callers');
   if (!cs.length) {
@@ -782,45 +907,127 @@ function relations() {
   $('rels').replaceChildren(...out);
 }
 
+const isTestFile = (c) => c.path.endsWith('_test.go') || (c.oldPath || '').endsWith('_test.go');
+
+// changes lists the changes in three groups: the edits of existing
+// production code in full, in the order "Look here first" ranks them; the
+// new code by file; and the changes to tests. The last two are folded
+// away, since the merge request's diff shows them whole.
 function changes() {
   const rv = state.rv, f = state.focus;
-  const present = KINDS.filter(([k]) => rv.counts[k]);
-  $('kindChips').replaceChildren(...present.map(([k, label]) => h('button', {
-    type: 'button', class: 'chip', 'aria-pressed': String(state.kinds.has(k)),
-    onclick: () => { state.kinds.has(k) ? state.kinds.delete(k) : state.kinds.add(k); changes(); },
-  }, mark(k), label, h('span', { class: 'n' }, rv.counts[k]))));
-
-  const cs = rv.changes.filter((c) => c.kinds.some((k) => state.kinds.has(k)) &&
-    (!f || c.package === f || c.callers.some((cl) => cl.package === f)));
-  if (!cs.length) {
+  const shown = rv.changes.map((c, i) => ({ c, i }))
+    .filter(({ c }) => !f || c.package === f || c.callers.some((cl) => cl.package === f));
+  if (!shown.length) {
     $('changes').replaceChildren(h('p', { class: 'muted small' }, 'No changes to list.'));
     return;
   }
-  const items = limit('changes', cs).map((c) => {
-    const where = c.oldPath && (c.oldPath !== c.path || c.oldName)
-      ? `${c.path}:${c.line}, was ${c.oldName || c.name} at ${c.oldPath}:${c.oldLine}` : `${c.path}:${c.line}`;
-    const sig = c.oldSignature && c.newSignature && c.oldSignature !== c.newSignature
-      ? h('div', { class: 'sig' }, h('div', { class: 'minus' }, '− ' + c.oldSignature), h('div', { class: 'plus' }, '+ ' + c.newSignature))
-      : null;
-    const callers = c.callers.length
-      ? h('details', {}, h('summary', {}, plural(c.callers.length, 'caller')),
-        h('ul', {}, c.callers.slice(0, 50).map((cl) => h('li', {}, h('code', {}, cl.name), ' ',
-          h('span', { class: 'muted code' }, `${cl.path}:${cl.line} ×${cl.calls}`),
-          cl.outside ? h('span', { class: 'tag out' }, 'outside') : null,
-          cl.test ? h('span', { class: 'tag' }, 'test') : null))))
-      : null;
-    return h('div', { class: 'change' },
-      h('div', { class: 'change-head' }, mark(c.kind), h('span', { class: 'k' }, c.symbol), h('code', {}, c.name),
-        h('span', { class: 'muted code' }, where)),
-      h('div', { class: 'meta' }, [c.summary, c.impact].filter(Boolean).join(' · '),
-        c.apiChange ? h('span', { class: 'api' }, ' · API change') : null),
-      sig, callers);
+  const rank = new Map((rv.focus || []).filter((x) => x.change >= 0).map((x, n) => [x.change, n]));
+  const existing = shown.filter(({ c }) => !isTestFile(c) && c.kind !== 'added')
+    .sort((a, b) => (rank.get(a.i) ?? Infinity) - (rank.get(b.i) ?? Infinity) || a.i - b.i);
+  const added = shown.filter(({ c }) => !isTestFile(c) && c.kind === 'added');
+  const tests = shown.filter(({ c }) => isTestFile(c));
+
+  const out = [h('p', { class: 'sub-h' }, `Existing code it edits · ${existing.length}`)];
+  if (existing.length) {
+    const cards = limit('changes', existing).map(({ c, i }) => changeCard(c, i));
+    out.push(...cards, more('changes', cards.length, existing.length) || '');
+  } else {
+    out.push(h('p', { class: 'muted small' }, 'None: it only adds code and changes tests.'));
+  }
+
+  if (added.length) {
+    const byFile = groupBy(added, ({ c }) => c.path);
+    out.push(h('p', { class: 'sub-h' }, `New code · ${plural(added.length, 'symbol')} in ${plural(byFile.size, 'file')}`));
+    for (const [path, xs] of byFile) {
+      out.push(h('details', { class: 'group' },
+        h('summary', {}, h('code', {}, path), h('span', { class: 'muted small' }, ` · ${xs.length} new: ${symbolCounts(xs)}`)),
+        h('div', { class: 'rows' }, xs.map(({ c, i }) => changeRow(c, i, `:${c.line}`)))));
+    }
+  }
+
+  if (tests.length) {
+    const files = new Set(tests.map(({ c }) => c.path)).size;
+    out.push(h('details', { class: 'group tests' },
+      h('summary', {}, h('span', { class: 'sub-h' }, 'Tests'), h('span', { class: 'muted small' }, ` · ${plural(tests.length, 'change')} in ${plural(files, 'file')}`)),
+      h('div', { class: 'rows' }, tests.map(({ c, i }) => changeRow(c, i, `${c.path}:${c.line}`)))));
+  }
+  $('changes').replaceChildren(...out);
+}
+
+// groupBy groups xs by key, in the order the keys first appear.
+function groupBy(xs, key) {
+  const out = new Map();
+  for (const x of xs) {
+    const k = key(x);
+    out.set(k, [...(out.get(k) || []), x]);
+  }
+  return out;
+}
+
+// symbolCounts counts changes by kind of declaration: "19 consts, 6 funcs".
+function symbolCounts(xs) {
+  const n = groupBy(xs, ({ c }) => c.symbol);
+  return [...n].sort((a, b) => b[1].length - a[1].length).map(([s, ys]) => plural(ys.length, s)).join(', ');
+}
+
+// changeRow is a change in one line, for new code and tests.
+function changeRow(c, i, where) {
+  return h('div', { class: 'row', id: `ch-${i}` }, mark(c.kind), h('span', { class: 'k' }, c.symbol),
+    h('code', {}, c.name), h('span', { class: 'muted small' }, c.summary), h('span', { class: 'muted code' }, where));
+}
+
+// changeCard is a change in full: where it is, what changed and whom it
+// reaches, a type's changed members, and its callers, production code first.
+function changeCard(c, i) {
+  const where = c.oldPath && (c.oldPath !== c.path || c.oldName)
+    ? `${c.path}:${c.line}, was ${c.oldName || c.name} at ${c.oldPath}:${c.oldLine}` : `${c.path}:${c.line}`;
+  let detail = null;
+  if (c.members && c.members.length) {
+    detail = membersView(c.members);
+  } else if (c.oldSignature && c.newSignature && c.oldSignature !== c.newSignature) {
+    detail = h('div', { class: 'sig' }, h('div', { class: 'minus' }, '− ' + c.oldSignature), h('div', { class: 'plus' }, '+ ' + c.newSignature));
+  }
+  const prod = production(c.callers), tests = inTests(c.callers);
+  const label = [prod.length ? plural(prod.length, 'caller') : '', tests.length ? `${tests.length.toLocaleString()} in tests` : ''].filter(Boolean).join(' · ');
+  const callers = c.callers.length
+    ? h('details', {}, h('summary', {}, label),
+      h('ul', {}, [...prod, ...tests].slice(0, 50).map((cl) => h('li', {}, h('code', {}, cl.name), ' ',
+        h('span', { class: 'muted code' }, `${cl.path}:${cl.line} ×${cl.calls}`),
+        cl.outside ? h('span', { class: 'tag out' }, 'outside') : null,
+        cl.test ? h('span', { class: 'tag' }, 'test') : null))))
+    : null;
+  return h('div', { class: 'change', id: `ch-${i}` },
+    h('div', { class: 'change-head' }, mark(c.kind), h('span', { class: 'k' }, c.symbol), h('code', {}, c.name),
+      h('span', { class: 'muted code' }, where)),
+    h('div', { class: 'meta' }, c.summary,
+      c.apiChange ? h('span', { class: 'api' }, ' · API change') : null),
+    detail, callers);
+}
+
+// membersView lists a type's changed members, each with whose code it
+// breaks, and the implementers an interface change breaks.
+function membersView(ms) {
+  let impls = [];
+  const rows = ms.map((m) => {
+    const notes = [];
+    if (m.breaks) notes.push(h('span', { class: 'tag warn' }, `breaks ${m.breaks}`));
+    if (m.uses) notes.push(h('span', { class: 'tag' }, `${plural(m.uses, 'use')}${m.approximate ? ' (approx.)' : ''}`));
+    if (m.unkeyed) notes.push(h('span', { class: 'tag warn' }, `breaks ${plural(m.unkeyed, 'unkeyed literal')}`));
+    if (m.implementers && m.implementers.length) impls = m.implementers; // every member shares the one list
+    const decl = !m.oldDecl ? [h('span', { class: 'plus' }, `+ ${m.member} ${m.newDecl}`)]
+      : !m.newDecl ? [h('span', { class: 'minus' }, `− ${m.member} ${m.oldDecl}`)]
+        : [h('span', { class: 'minus' }, `− ${m.member} ${m.oldDecl}`), h('br'), h('span', { class: 'plus' }, `+ ${m.member} ${m.newDecl}`)];
+    return h('div', { class: 'member' }, ...decl, ...notes);
   });
-  $('changes').replaceChildren(...items, more('changes', items.length, cs.length) || '');
+  const implList = impls.length
+    ? h('div', { class: 'member muted' }, 'implemented by ', ...impls.flatMap((c, i) => [i ? ', ' : '', h('code', { title: `${c.path}:${c.line}` }, c.name), c.test ? ' (test)' : '']))
+    : null;
+  return h('div', { class: 'sig members' }, rows, implList);
 }
 
 function files() {
   const fs = state.rv.files;
+  $('filesNote').textContent = `${plural(fs.length, 'file')} · +${sum(fs, (f) => f.added).toLocaleString()} −${sum(fs, (f) => f.removed).toLocaleString()}`;
   $('files').replaceChildren(
     h('thead', {}, h('tr', {}, h('th', {}, 'File'), h('th', { class: 'num' }, 'Lines'), h('th', {}, 'Symbols'))),
     h('tbody', {}, fs.length ? fs.map((f) => h('tr', {},
@@ -857,6 +1064,7 @@ $('pick').addEventListener('submit', (ev) => {
   run();
 });
 $('outsideOnly').addEventListener('change', (ev) => { state.outsideOnly = ev.target.checked; impact(); });
+$('withTests').addEventListener('change', (ev) => { state.withTests = ev.target.checked; impact(); });
 window.addEventListener('popstate', () => { readURL(); run(); });
 let resizing = 0;
 window.addEventListener('resize', () => {
