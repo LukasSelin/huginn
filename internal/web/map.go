@@ -36,7 +36,7 @@ type mapQuery struct {
 	tests    bool
 }
 
-func (s *Server) mapQuery(r *http.Request) mapQuery {
+func (ix *index) mapQuery(r *http.Request) mapQuery {
 	q := r.URL.Query()
 	unix := func(k string) time.Time {
 		n, err := strconv.ParseInt(q.Get(k), 10, 64)
@@ -46,7 +46,7 @@ func (s *Server) mapQuery(r *http.Request) mapQuery {
 		return time.Unix(n, 0)
 	}
 	// Tests can only be shown when the index kept them.
-	return mapQuery{from: unix("from"), to: unix("to"), tests: s.opts.Tests && q.Get("tests") == "1"}
+	return mapQuery{from: unix("from"), to: unix("to"), tests: ix.tests && q.Get("tests") == "1"}
 }
 
 type tileJSON struct {
@@ -117,11 +117,11 @@ type filterJSON struct {
 
 // codeMap serves one tile per directory with live code or edits, stats
 // restricted to the ?from=&to= window (unix seconds, half-open).
-func (s *Server) codeMap(ix *index, w http.ResponseWriter, r *http.Request) {
-	q := s.mapQuery(r)
+func (ix *index) codeMap(w http.ResponseWriter, r *http.Request) {
+	q := ix.mapQuery(r)
 	// Generated code never reaches the index (git.Options.IncludeGenerated
 	// is off), and symbols do not record it, so it cannot be toggled.
-	out := mapJSON{Tests: q.tests, Can: filterJSON{Tests: s.opts.Tests}, Dirs: []tileJSON{}}
+	out := mapJSON{Tests: q.tests, Can: filterJSON{Tests: ix.tests}, Dirs: []tileJSON{}}
 	if !q.from.IsZero() {
 		out.From = q.from.Unix()
 	}
@@ -178,7 +178,7 @@ type recentJSON struct {
 // mapDir serves the inspector for one directory: its tile with more hot
 // symbols, and its most recent semantic changes in the window. The root
 // directory is "/api/map/" or "/api/map/.".
-func (s *Server) mapDir(ix *index, w http.ResponseWriter, r *http.Request) {
+func (ix *index) mapDir(w http.ResponseWriter, r *http.Request) {
 	p := r.PathValue("dir")
 	if p == "" {
 		p = "."
@@ -188,7 +188,7 @@ func (s *Server) mapDir(ix *index, w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "no such directory", http.StatusNotFound)
 		return
 	}
-	q := s.mapQuery(r)
+	q := ix.mapQuery(r)
 	st := d.Window(q.from, q.to, q.tests, 0)
 	out := mapDirJSON{tileJSON: ix.tile(d, q, 8), Added: st.Edits.Of(ast.Added), Removed: st.Edits.Of(ast.Deleted), Recent: []recentJSON{}}
 	var recent []codemap.Touch

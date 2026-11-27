@@ -56,20 +56,20 @@ func entry[K comparable, T any](mu *sync.Mutex, ms *map[K]*memo[T], k K) *memo[T
 	return m
 }
 
-func (s *Server) analyzer(ix *index) *affinity.Analyzer {
+func (ix *index) analyzer() *affinity.Analyzer {
 	st := &ix.affinity
-	st.once.Do(func() { st.an = affinity.New(ix.h, s.opts.Tests) })
+	st.once.Do(func() { st.an = affinity.New(ix.h, ix.tests) })
 	return st.an
 }
 
 // affinityTypes serves the struct types that look like they do too much,
 // for the window of history the months parameter gives.
-func (s *Server) affinityTypes(ix *index, w http.ResponseWriter, r *http.Request) {
+func (ix *index) affinityTypes(w http.ResponseWriter, r *http.Request) {
 	months, ok := monthsParam(w, r)
 	if !ok {
 		return
 	}
-	an := s.analyzer(ix)
+	an := ix.analyzer()
 	cs, _ := entry(&ix.affinity.mu, &ix.affinity.types, months).get(func() ([]affinity.Candidate, error) {
 		return an.Candidates(affinity.Options{Months: months, Top: candidateTop}), nil
 	})
@@ -78,7 +78,7 @@ func (s *Server) affinityTypes(ix *index, w http.ResponseWriter, r *http.Request
 
 // affinityAPI serves the affinity report of the type with the ID the type
 // parameter gives, or of the one the name parameter names.
-func (s *Server) affinityAPI(ix *index, w http.ResponseWriter, r *http.Request) {
+func (ix *index) affinityAPI(w http.ResponseWriter, r *http.Request) {
 	months, ok := monthsParam(w, r)
 	if !ok {
 		return
@@ -89,7 +89,7 @@ func (s *Server) affinityAPI(ix *index, w http.ResponseWriter, r *http.Request) 
 		http.Error(w, "want either type or name", http.StatusBadRequest)
 		return
 	}
-	an := s.analyzer(ix)
+	an := ix.analyzer()
 	var id lineage.ID
 	if idParam != "" {
 		n, err := strconv.ParseInt(idParam, 10, 64)

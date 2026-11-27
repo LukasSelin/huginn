@@ -11,7 +11,6 @@ import (
 	"strings"
 	"sync"
 
-	"huginn/internal/git"
 	"huginn/internal/journey"
 	"huginn/internal/lineage"
 	"huginn/internal/story"
@@ -27,25 +26,25 @@ type journeys struct {
 	storyErr  error
 }
 
-func (s *Server) journey(ix *index, step journey.Step) *journey.Journey {
+func (ix *index) journey(step journey.Step) *journey.Journey {
 	ix.journeys.once[step].Do(func() {
-		ix.journeys.steps[step] = journey.Build(ix.h, ix.cmap, step, journey.Options{Tests: s.opts.Tests})
+		ix.journeys.steps[step] = journey.Build(ix.h, ix.cmap, step, journey.Options{Tests: ix.tests})
 	})
 	return ix.journeys.steps[step]
 }
 
-func (s *Server) story(ix *index) (*story.Story, error) {
+func (ix *index) story() (*story.Story, error) {
 	ix.journeys.storyOnce.Do(func() {
 		// Templated narration needs no context of its own; a narrator that
 		// calls out would get one from the request instead. The result is
 		// cached for every request, so it must not stop with the first one.
 		ctx := context.Background() //nolint:forbidigo // outlives the request that starts it, see above
-		tags, err := s.repo.Tags(ctx, git.Options{Branch: s.opts.Branch})
+		tags, err := ix.tags(ctx)
 		if err != nil {
 			ix.journeys.storyErr = err
 			return
 		}
-		ix.journeys.story, ix.journeys.storyErr = story.Build(ctx, ix.h, s.journey(ix, journey.Commit), story.FromTags(tags), story.Templates{})
+		ix.journeys.story, ix.journeys.storyErr = story.Build(ctx, ix.h, ix.journey(journey.Commit), story.FromTags(tags), story.Templates{})
 	})
 	return ix.journeys.story, ix.journeys.storyErr
 }
@@ -182,7 +181,7 @@ func momentsJSON(ms []story.Moment) []momentJSON {
 
 // journeyAPI serves the history as frames of ?step=commit|week|month (week
 // by default), with the package layout and the story.
-func (s *Server) journeyAPI(ix *index, w http.ResponseWriter, r *http.Request) {
+func (ix *index) journeyAPI(w http.ResponseWriter, r *http.Request) {
 	q := r.URL.Query().Get("step")
 	if q == "" {
 		q = "week"
@@ -192,12 +191,12 @@ func (s *Server) journeyAPI(ix *index, w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "step must be commit, week or month", http.StatusBadRequest)
 		return
 	}
-	st, err := s.story(ix)
+	st, err := ix.story()
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
-	j := s.journey(ix, step)
+	j := ix.journey(step)
 	out := journeyJSON{Step: step.String(), Packages: packagesJSON(j.Packages), Groups: []groupJSON{}, Authors: nonNil(j.Authors), Frames: []frameJSON{}, Chapters: []chapterJSON{}, Moments: momentsJSON(st.Moments), Releases: momentsJSON(st.Releases)}
 	out.RevTimes = make([]int64, ix.h.Revisions())
 	for i := range out.RevTimes {
@@ -313,7 +312,7 @@ type symEventJSON struct {
 // journeyPackage serves the symbols of one package directory frame by
 // frame, for ?step= as /api/journey. An empty directory is the root. ?keep=
 // names a symbol ID to include even in a truncated view.
-func (s *Server) journeyPackage(ix *index, w http.ResponseWriter, r *http.Request) {
+func (ix *index) journeyPackage(w http.ResponseWriter, r *http.Request) {
 	dir := r.PathValue("dir")
 	if dir == "" {
 		dir = "."
@@ -325,7 +324,7 @@ func (s *Server) journeyPackage(ix *index, w http.ResponseWriter, r *http.Reques
 		return
 	}
 	keep, _ := strconv.ParseInt(q.Get("keep"), 10, 64)
-	v := s.journey(ix, step).Symbols(ix.h, dir, journey.SymbolOptions{Tests: s.opts.Tests, Limit: packageSymbolLimit, Keep: lineage.ID(keep)})
+	v := ix.journey(step).Symbols(ix.h, dir, journey.SymbolOptions{Tests: ix.tests, Limit: packageSymbolLimit, Keep: lineage.ID(keep)})
 	if v.Total == 0 {
 		http.Error(w, "no symbols in that directory", http.StatusNotFound)
 		return
@@ -374,7 +373,7 @@ type linkJSON struct {
 // journeyLinks serves the symbols referring into and out of one package
 // directory after revision ?rev=, the latest by default. An empty directory
 // is the root.
-func (s *Server) journeyLinks(ix *index, w http.ResponseWriter, r *http.Request) {
+func (ix *index) journeyLinks(w http.ResponseWriter, r *http.Request) {
 	dir := r.PathValue("dir")
 	if dir == "" {
 		dir = "."
@@ -388,7 +387,7 @@ func (s *Server) journeyLinks(ix *index, w http.ResponseWriter, r *http.Request)
 		}
 		rev = n
 	}
-	l := journey.LinksAt(ix.h, dir, rev, s.opts.Tests)
+	l := journey.LinksAt(ix.h, dir, rev, ix.tests)
 	out := linksJSON{Dir: dir, Rev: rev, Symbols: []linkSymJSON{}, Out: []linkJSON{}, In: []linkJSON{}}
 	for _, x := range l.Symbols {
 		out.Symbols = append(out.Symbols, linkSymJSON{ID: x.ID, Name: x.Name, Kind: x.Kind.String()})
@@ -419,7 +418,7 @@ type symHitJSON struct {
 // journeySymbols finds symbols to follow by ?q=, a case-insensitive part of
 // their latest qualified name: exact matches first, then prefixes, then the
 // rest; live before deleted; then by name and ID.
-func (s *Server) journeySymbols(ix *index, w http.ResponseWriter, r *http.Request) {
+func (ix *index) journeySymbols(w http.ResponseWriter, r *http.Request) {
 	q := strings.ToLower(strings.TrimSpace(r.URL.Query().Get("q")))
 	out := []symHitJSON{}
 	if q == "" {

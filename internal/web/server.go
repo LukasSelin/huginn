@@ -50,13 +50,18 @@ type Server struct {
 	build   func(context.Context, string) (*commitJSON, error) // buildReport, or a test's stand-in
 }
 
-// index is the read-only view the API serves once indexing is done.
+// index is the read-only view the API serves once indexing is done, with
+// the routes that serve it; see indexRoutes.
 type index struct {
 	h      *lineage.History
 	cmap   *codemap.Map
 	health *health.Report
 	silos  *silos.Report
 	took   time.Duration
+	tests  bool // the history keeps the symbols of test files
+
+	// tags reads the tags the story marks its releases with.
+	tags func(context.Context) ([]git.Tag, error)
 
 	journeys journeys      // built with the prebuilt responses, or on first request
 	affinity affinityState // reports made on request
@@ -88,7 +93,10 @@ func (s *Server) Index(ctx context.Context) error {
 		s.settle.Do(func() { close(s.settled) })
 		return err
 	}
-	ix := &index{h: h, cmap: codemap.Build(h), health: health.Build(h, health.Options{}), silos: silos.Build(h, silos.Options{})}
+	ix := &index{h: h, cmap: codemap.Build(h), health: health.Build(h, health.Options{}), silos: silos.Build(h, silos.Options{}),
+		tests: s.opts.Tests, tags: func(ctx context.Context) ([]git.Tag, error) {
+			return s.repo.Tags(ctx, git.Options{Branch: s.opts.Branch})
+		}}
 	// The responses saved for this history are loaded rather than built
 	// again. They were saved once all were built, the detail ones too.
 	// Without a key they are neither loaded nor saved.
@@ -97,14 +105,14 @@ func (s *Server) Index(ctx context.Context) error {
 	for k, e := range saved {
 		ix.pre.Store(k, e)
 	}
-	s.prebuild(ctx, ix, s.pageURLs(ix))
+	ix.prebuild(ctx, ix.pageURLs())
 	ix.took = time.Since(start)
 	s.index.Store(ix)
 	s.settle.Do(func() { close(s.settled) })
 	if len(saved) > 0 {
 		return nil
 	}
-	s.prebuild(ctx, ix, s.detailURLs(ix))
+	ix.prebuild(ctx, ix.detailURLs())
 	if ctx.Err() != nil {
 		return ctx.Err()
 	}
@@ -126,7 +134,7 @@ func (s *Server) Handler() http.Handler {
 	mux.Handle("GET /review", s.file("review.html"))
 	mux.Handle("GET /affinity", s.file("affinity.html"))
 	mux.HandleFunc("GET /api/status", s.status)
-	s.indexRoutes(mux, s.index.Load)
+	indexRoutes(mux, s.index.Load)
 	mux.HandleFunc("GET /api/commit/{rev...}", s.commit)
 	mux.HandleFunc("GET /api/review", s.reviewAPI)
 	mux.HandleFunc("GET /api/review/options", s.reviewOptions)
@@ -134,23 +142,23 @@ func (s *Server) Handler() http.Handler {
 }
 
 // indexRoutes adds the routes served from the index that load returns.
-func (s *Server) indexRoutes(mux *http.ServeMux, load func() *index) {
+func indexRoutes(mux *http.ServeMux, load func() *index) {
 	ready := func(fn func(*index, http.ResponseWriter, *http.Request)) http.HandlerFunc {
 		return ready(load, fn)
 	}
-	mux.HandleFunc("GET /api/symbol/{id}", ready(s.symbol))
-	mux.HandleFunc("GET /api/map", ready(prebuilt(s.codeMap)))
-	mux.HandleFunc("GET /api/map/{dir...}", ready(prebuilt(s.mapDir)))
-	mux.HandleFunc("GET /api/health", ready(prebuilt(s.health)))
-	mux.HandleFunc("GET /api/silos", ready(prebuilt(s.silosAPI)))
-	mux.HandleFunc("GET /api/silos/leave", ready(s.silosLeave))
-	mux.HandleFunc("GET /api/journey", ready(prebuilt(s.journeyAPI)))
-	mux.HandleFunc("GET /api/journey/package/{dir...}", ready(prebuilt(s.journeyPackage)))
-	mux.HandleFunc("GET /api/journey/links/{dir...}", ready(s.journeyLinks))
-	mux.HandleFunc("GET /api/journey/symbols", ready(s.journeySymbols))
-	mux.HandleFunc("GET /api/layers", ready(prebuilt(s.layersAPI)))
-	mux.HandleFunc("GET /api/affinity/types", ready(s.affinityTypes))
-	mux.HandleFunc("GET /api/affinity", ready(s.affinityAPI))
+	mux.HandleFunc("GET /api/symbol/{id}", ready((*index).symbol))
+	mux.HandleFunc("GET /api/map", ready(prebuilt((*index).codeMap)))
+	mux.HandleFunc("GET /api/map/{dir...}", ready(prebuilt((*index).mapDir)))
+	mux.HandleFunc("GET /api/health", ready(prebuilt((*index).healthAPI)))
+	mux.HandleFunc("GET /api/silos", ready(prebuilt((*index).silosAPI)))
+	mux.HandleFunc("GET /api/silos/leave", ready((*index).silosLeave))
+	mux.HandleFunc("GET /api/journey", ready(prebuilt((*index).journeyAPI)))
+	mux.HandleFunc("GET /api/journey/package/{dir...}", ready(prebuilt((*index).journeyPackage)))
+	mux.HandleFunc("GET /api/journey/links/{dir...}", ready((*index).journeyLinks))
+	mux.HandleFunc("GET /api/journey/symbols", ready((*index).journeySymbols))
+	mux.HandleFunc("GET /api/layers", ready(prebuilt((*index).layersAPI)))
+	mux.HandleFunc("GET /api/affinity/types", ready((*index).affinityTypes))
+	mux.HandleFunc("GET /api/affinity", ready((*index).affinityAPI))
 }
 
 // file serves the static file name, or the one the request names when name
@@ -271,7 +279,7 @@ type eventJSON struct {
 	OldName   string `json:"oldName,omitempty"`
 }
 
-func (s *Server) symbol(ix *index, w http.ResponseWriter, r *http.Request) {
+func (ix *index) symbol(w http.ResponseWriter, r *http.Request) {
 	id, _ := strconv.ParseInt(r.PathValue("id"), 10, 64)
 	sym := ix.h.Symbol(lineage.ID(id))
 	if sym == nil {
