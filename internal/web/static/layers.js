@@ -210,6 +210,7 @@
   $('canvas').addEventListener('pointerleave', () => stage.classList.remove('over'));
   $('zoomIn').addEventListener('click', () => stack.zoomBy(1.25));
   $('zoomOut').addEventListener('click', () => stack.zoomBy(0.8));
+  $('zoomReset').addEventListener('click', () => stack.fit());
   const spread = spreadControl({ stage, more: $('spreadMore'), less: $('spreadLess'), onChange: (v) => stack.setSpread(v) });
   stack.setSpread(spread.value);
   for (const b of $('step').children) b.addEventListener('click', () => { play(false); load(b.dataset.v).catch(fail); });
@@ -224,6 +225,7 @@
     else if (e.key === 'ArrowRight') { play(false); setFrame(state.frame + 1); }
     else if (e.key === '+' || e.key === '=') stack.zoomBy(1.25);
     else if (e.key === '-') stack.zoomBy(0.8);
+    else if (e.key === '0') stack.fit();
     else if (e.key === '>') spread.by(1);
     else if (e.key === '<') spread.by(-1);
     else return;
