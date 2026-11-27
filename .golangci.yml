@@ -1,11 +1,12 @@
 version: "2"
 
-# Two kinds of linter are enabled, kept apart below:
+# Three kinds of linter are enabled, kept apart below:
 #
 #   boundaries   depguard (layering, and which packages may run programs or
 #                use the network) and forbidigo (calls only cmd/huginn may
 #                make).
 #   correctness  low-noise checks that find bugs rather than style.
+#   complexity   gocognit, a budget on how hard a function is to follow.
 #
 # Every enabled linter is listed explicitly; turn a new one on in its own
 # change so its findings are not mixed with another's.
@@ -28,6 +29,8 @@ linters:
     # Tried and left off: forcetypeassert. Every finding was a container
     # holding one type (container/heap, sync.Map, list.List), where the
     # checked form only adds dead branches.
+    # complexity
+    - gocognit
   settings:
     depguard:
       # The packages are stacked in layers, bottom to top:
@@ -204,6 +207,10 @@ linters:
       # A switch with a default case has chosen what to do with new values.
       default-signifies-exhaustive: true
 
+    gocognit:
+      # Past this a function does several jobs at once; split out the steps.
+      min-complexity: 20
+
     gosec:
       excludes:
         - G104 # unchecked errors: errcheck covers these
@@ -239,3 +246,7 @@ linters:
       # failure, not a bug.
       - path: _test\.go
         linters: [forbidigo, gosec]
+      # The complexity budget is for production code; table-driven tests
+      # branch by design.
+      - path: _test\.go
+        linters: [gocognit]
