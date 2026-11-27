@@ -260,16 +260,24 @@ type BlastRadius struct {
 // ExportedAPIChanged reports that some exported API changed.
 func (b *BlastRadius) ExportedAPIChanged() bool { return len(b.APIChanges) > 0 }
 
-// Build builds the report for one commit.
-func Build(in Input) *Report {
-	mods := newModules(in.GoMod)
-	pkgOf := func(filePath, pkgName string) string {
+// PackagePaths returns the function that gives the import path of the
+// package declared as pkg in the file at the slash-separated repository
+// path, using the go.mod files of a tree as Input.GoMod holds them. An
+// external test package gets its directory's path with "_test" appended.
+func PackagePaths(gomod map[string][]byte) func(path, pkg string) string {
+	mods := newModules(gomod)
+	return func(filePath, pkgName string) string {
 		p := mods.importPath(path.Dir(filePath))
 		if strings.HasSuffix(pkgName, "_test") {
 			p += "_test"
 		}
 		return p
 	}
+}
+
+// Build builds the report for one commit.
+func Build(in Input) *Report {
+	pkgOf := PackagePaths(in.GoMod)
 
 	inScope := newScope(in.Scope)
 	scoped := inScope != nil
@@ -339,7 +347,7 @@ func Build(in Input) *Report {
 	}
 	slices.Sort(r.Blast.Packages)
 
-	r.Relations = relations(changes, treeBefore(in.Tree, in.Files), in.Tree, pkgOf, inScope)
+	r.Relations = relations(changes, TreeBefore(in.Tree, in.Files), in.Tree, pkgOf, inScope)
 	r.summarizeFiles(in, inScope)
 	return r
 }

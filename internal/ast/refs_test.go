@@ -63,6 +63,46 @@ func (s *Server) Handle(name string) error {
 	}
 }
 
+func TestFieldWrites(t *testing.T) {
+	f := mustParse(t, "order.go", `package shop
+
+type Order struct {
+	items   []Item
+	coupons map[string]int
+	total   int
+	cfg     Config
+	seen    int
+	mu      sync.Mutex
+}
+
+func (o *Order) Update(x Item) {
+	o.items = append(o.items, x)
+	o.coupons["x"]++
+	delete(o.coupons, "y")
+	o.cfg.Rate = 2
+	n := o.total
+	o.seen++
+	p := &o.seen
+	o.mu.Lock()
+	(o.items)[0] = x
+	_, _ = n, p
+}
+`)
+	var got []string
+	for _, r := range symbol(t, f, "Order.Update").FieldRefs {
+		if r.Type == "Order" {
+			got = append(got, fmt.Sprintf("%s %d/%d", r.Name, r.Writes, r.Count))
+		}
+	}
+	// items: the assignment and the indexed one, not append's argument.
+	// coupons: ++ through an index, and delete. cfg: a field of it set.
+	// seen: ++ and its address taken. mu: only a method called.
+	want := []string{"cfg 1/1", "coupons 2/2", "items 2/3", "mu 0/1", "seen 2/2", "total 0/1"}
+	if fmt.Sprint(got) != fmt.Sprint(want) {
+		t.Errorf("receiver field writes/uses:\n got %q\nwant %q", got, want)
+	}
+}
+
 func TestImportName(t *testing.T) {
 	for path, want := range map[string]string{
 		"fmt":                     "fmt",

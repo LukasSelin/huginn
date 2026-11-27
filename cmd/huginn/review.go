@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"strings"
 
+	"huginn/internal/cohesion"
 	"huginn/internal/git"
 	"huginn/internal/review"
 	"huginn/internal/semdiff"
@@ -139,9 +140,57 @@ func (p *printer) review(rv *review.Review) {
 	p.summary(r)
 	p.blast("Impact", r)
 	p.relations(r.Relations)
+	p.types(rv.Types)
 	p.files(r)
 	p.changes(r)
 	p.noise(r)
+}
+
+// types prints, for each struct type the change touches, what it does to
+// the type's affinity matrix: its blocks before and after, warnings first,
+// and the block to extract first.
+func (p *printer) types(ts []review.TypeReview) {
+	if len(ts) == 0 {
+		return
+	}
+	p.printf("\nAffinity matrix of the types it touches\n")
+	for _, t := range ts {
+		p.printf("  %s  %s:%d  %s\n", t.Name, t.Path, t.Line, matrixSummary(t))
+		for _, n := range t.Notes {
+			mark := "-"
+			if n.Warn {
+				mark = "!"
+			}
+			p.printf("    %s %s\n", mark, n.Text)
+		}
+		if r := t.After; r != nil && r.Start != nil {
+			p.printf("    start with block %s: %s\n", r.Start.Block, r.Start.Reason)
+		}
+	}
+}
+
+// matrixSummary sums up a type's matrix: "11 methods · blocks 4 → 3 ·
+// LCOM4 1, 2 without hubs and bridges".
+func matrixSummary(t review.TypeReview) string {
+	r := t.After
+	if r == nil {
+		r = t.Before
+	}
+	blocks := plural(realBlocks(r), "block")
+	if t.Before != nil && t.After != nil {
+		blocks = fmt.Sprintf("blocks %d → %d", realBlocks(t.Before), realBlocks(t.After))
+	}
+	return fmt.Sprintf("%s · %s · LCOM4 %d, %d without hubs and bridges", plural(len(r.Methods), "method"), blocks, r.LCOM4, r.LCOM4Split)
+}
+
+func realBlocks(r *cohesion.Report) int {
+	n := 0
+	for _, b := range r.Blocks {
+		if b.Label != "core" {
+			n++
+		}
+	}
+	return n
 }
 
 // relations prints the imports and cross-package references a change

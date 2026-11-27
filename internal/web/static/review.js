@@ -120,6 +120,7 @@ function render() {
   tiles();
   legend();
   drawGraph();
+  seams();
   lists();
 }
 
@@ -396,6 +397,260 @@ function focusBar() {
     bar.replaceChildren('Showing what involves ', pkgCode(state.focus),
       h('button', { type: 'button', onclick: () => pick(state.focus) }, 'Show everything'));
   }
+}
+
+// --- The affinity matrix of each type it touches ------------------------------
+//
+// Each struct type the change touches is read as the affinity matrix
+// technique reads a God object: a row per method and a column per field,
+// marked R and W; the columns classified; hubs set aside; rows and columns
+// reordered into blocks; the five patterns read off; the blocks checked
+// against the callers, the history and the names; and the block to extract
+// first named. The change's own effect on all that comes first.
+
+const list = (xs) => xs || [];
+
+// COLUMN_TYPES are the technique's column types and where each ends up.
+const COLUMN_TYPES = [
+  ['entity', 'Entity state', 'per instance, written by methods', 'stays with the core entity'],
+  ['policy', 'Policy / config', 'only read; the same for every instance', 'a stateless policy or service'],
+  ['collaborator', 'Collaborator', 'an I/O handle or service', 'the adapter that uses it'],
+  ['infrastructure', 'Infrastructure', 'logging, metrics', 'ignored: each new type gets its own'],
+  ['temporary', 'Temporary', 'used only during one operation', 'a method object for that operation'],
+  ['unused', 'Unused', 'no method uses it', 'drop it, or find who does'],
+];
+const COLUMN_SHORT = { entity: 'state', policy: 'policy', collaborator: 'collab', infrastructure: 'infra', temporary: 'temp', unused: '–' };
+const BLOCK_KIND = {
+  entity: 'entity state: stays with the core entity',
+  adapter: 'collaborators: the adapter that uses them',
+  policy: 'policy: a stateless policy or service',
+  'method object': 'temporaries: a method object for one operation',
+  core: 'the hubs, and the rows that use only them',
+};
+const ROW_KIND = {
+  core: ['core', 'uses only the hubs'],
+  bridge: ['bridge row', 'marks no field, only calls other methods: orchestration for a thin coordinator'],
+  free: ['free function', 'marks no field and calls nothing: the safest extraction'],
+  tie: ['spans blocks', 'marks the fields of several blocks: split it with Extract Method first'],
+};
+const blockIndex = (r, label) => r.blocks.findIndex((b) => b.label === label);
+const blockClass = (r, label) => (label === 'core' ? 'hub' : label ? `g${blockIndex(r, label) % 8}` : 'loose');
+const realBlocks = (r) => list(r.blocks).filter((b) => b.label !== 'core').length;
+// inModule writes the import paths in a text relative to the module.
+const inModule = (text) => (state.rv.module ? text.split(state.rv.module + '/').join('') : text);
+
+function seams() {
+  const ts = list(state.rv.types);
+  $('typesPanel').hidden = ts.length === 0;
+  $('types').replaceChildren(...ts.map(typeCard));
+}
+
+function typeCard(t) {
+  const r = t.after || t.before;
+  const warns = t.notes.filter((n) => n.warn).length;
+  const blocks = t.before && t.after ? `blocks ${realBlocks(t.before)} → ${realBlocks(t.after)}` : plural(realBlocks(r), 'block');
+  const card = h('details', { class: 'type', open: warns > 0 || null },
+    h('summary', {},
+      h('code', { class: 'tname', title: t.package }, t.name),
+      h('span', { class: 'muted code' }, `${t.path}:${t.line}`),
+      h('span', { class: 'muted small' }, `${plural(r.methods.length, 'method')} · ${plural(r.fields.length, 'field')} · ${blocks} · LCOM4 ${r.lcom4}, ${r.lcom4Split} without hubs and bridges`),
+      !t.before ? h('span', { class: 'tag' }, 'new') : null,
+      !t.after ? h('span', { class: 'tag' }, 'removed') : null,
+      warns ? h('span', { class: 'tag warn' }, `${warns} to look at`) : null));
+  const body = h('div', { class: 'type-body' });
+  body.append(section('What the change does', h('ul', { class: 'notes' }, t.notes.length
+    ? t.notes.map((n) => h('li', { class: n.warn ? 'warn-note' : '' }, n.text))
+    : h('li', { class: 'muted' }, 'It leaves the blocks as they were.'))));
+
+  const view = h('div', { class: 'type-view' });
+  const show = (which) => view.replaceChildren(...typeView(t, which === 'before' ? t.before : t.after, which));
+  if (t.before && t.after) {
+    const seg = h('div', { class: 'seg', role: 'group', 'aria-label': 'Show the type' });
+    for (const which of ['after', 'before']) {
+      seg.append(h('button', {
+        type: 'button', 'aria-pressed': String(which === 'after'),
+        onclick: (ev) => {
+          for (const b of seg.children) b.setAttribute('aria-pressed', String(b === ev.currentTarget));
+          show(which);
+        },
+      }, which === 'after' ? 'After the change' : 'Before'));
+    }
+    body.append(seg);
+  }
+  body.append(view);
+  show(t.after ? 'after' : 'before');
+  card.append(body);
+  return card;
+}
+
+const section = (title, ...kids) => h('div', { class: 'facts' }, h('p', { class: 'sub-h' }, title), ...kids);
+
+// typeView reads one side of a type, in the order of a working session.
+function typeView(t, r, which) {
+  const out = [];
+  const advice = list(r.advice);
+  if (r.start || advice.length) {
+    const b = r.start && r.blocks[blockIndex(r, r.start.block)];
+    out.push(section('Where to start', h('ul', {},
+      b ? h('li', { class: 'start' }, 'Extract block ', h('span', { class: `glabel ${blockClass(r, b.label)}` }, b.label),
+        ` (${b.fields.join(', ')}) first: ${r.start.reason}`) : null,
+      advice.map((a) => h('li', {}, a)))));
+  }
+  out.push(section('Affinity matrix', h('p', { class: 'muted small' },
+    'Rows are methods and columns fields, R for read and W for write, reordered so each block sits on the diagonal. Hubs, used by most rows, and infrastructure are set aside on the right.'),
+  matrix(r, new Set(which === 'after' ? t.changed : []))));
+  out.push(columnTypes(r), blocksView(r), patterns(r));
+  if (which === 'after') out.push(clientsView(r), namesView(r), couplingView(r));
+  return out;
+}
+
+// matrix draws the affinity matrix: a band of block labels and one of
+// column types over the field names, then a row per method.
+function matrix(r, changed) {
+  const fieldClass = (f) => (f.role === 'infrastructure' ? 'infra' : blockClass(r, f.block));
+  const head = h('tr', {}, h('th', { class: 'corner' }, 'method \\ field'),
+    r.fields.map((f) => h('th', {
+      class: `fcol ${fieldClass(f)}`,
+      title: `${f.name} ${f.type}\n${COLUMN_TYPES.find(([k]) => k === f.role)[1]}${f.hub ? ', hub' : ''}${f.operation ? ` of ${f.operation}` : ''}\nread by ${f.readers}, written by ${f.writers}`,
+    }, h('span', {}, f.name))),
+    h('th', { class: 'calls' }, 'calls'));
+  const band = (cells) => h('tr', { class: 'bands' }, h('th', {}), cells, h('th', {}));
+  const blocksBand = band(r.fields.map((f) => h('th', { class: fieldClass(f) }, f.hub ? 'hub' : f.role === 'infrastructure' ? '' : f.block || '·')));
+  const typesBand = band(r.fields.map((f) => h('th', { class: `ctype ${fieldClass(f)}` }, h('span', {}, COLUMN_SHORT[f.role]))));
+  const rows = r.methods.map((m) => {
+    const uses = new Map(list(m.uses).map((u) => [u.field, u]));
+    const kind = ROW_KIND[m.kind];
+    return h('tr', { class: changed.has(m.name) ? 'changed' : '' },
+      h('th', { class: 'mname' },
+        h('code', {}, m.name),
+        changed.has(m.name) ? h('span', { class: 'tag out', title: 'changed by the merge request' }, 'changed') : null,
+        kind ? h('span', { class: `tag k-${m.kind}`, title: kind[1] }, m.kind === 'tie' ? `spans ${list(m.spans).join('·')}` : kind[0]) : null),
+      r.fields.map((f, i) => {
+        const u = uses.get(i);
+        if (!u) return h('td', { class: 'cell' });
+        const mark = (u.read ? 'R' : '') + (u.write ? 'W' : '');
+        const own = m.block && f.block === m.block;
+        return h('td', {
+          class: `cell on ${own ? blockClass(r, m.block) : fieldClass(f)}${u.write ? ' w' : ''}${m.kind === 'tie' ? ' tie' : ''}${!own && f.block && m.block && f.block !== 'core' ? ' far' : ''}`,
+          title: `${m.name} ${u.read && u.write ? 'reads and writes' : u.write ? 'writes' : 'reads'} ${f.name}`,
+        }, mark);
+      }),
+      h('td', { class: 'calls code muted' }, list(m.calls).join(', ')));
+  });
+  return h('div', { class: 'scroll' }, h('table', { class: 'matrix' }, h('thead', {}, head, blocksBand, typesBand), h('tbody', {}, rows)));
+}
+
+// columnTypes lists the columns by type, with where each type ends up.
+function columnTypes(r) {
+  const rows = COLUMN_TYPES.map(([key, name, what, where]) => {
+    const fs = r.fields.filter((f) => f.role === key);
+    if (!fs.length) return null;
+    return h('tr', {}, h('td', {}, h('strong', {}, name), h('div', { class: 'muted small' }, what)),
+      h('td', { class: 'code' }, fs.map((f) => f.name + (f.hub ? ' (hub)' : '') + (f.operation ? ` (of ${f.operation})` : '')).join(', ')),
+      h('td', { class: 'muted' }, where));
+  });
+  return section('Column types', h('div', { class: 'scroll' }, h('table', { class: 'data ctypes' },
+    h('thead', {}, h('tr', {}, h('th', {}, 'Type'), h('th', {}, 'Columns'), h('th', {}, 'Ends up'))), h('tbody', {}, rows))));
+}
+
+const STANCE = { agrees: ['✓', 'agrees'], disagrees: ['✗', 'disagrees'], note: ['•', 'note'] };
+const VERDICT = { extract: 'extract: the signals agree', check: 'check first: a signal disagrees', candidate: 'candidate' };
+
+// blocksView lists the blocks, the candidate types, each checked against
+// the other signals.
+function blocksView(r) {
+  const bs = list(r.blocks);
+  if (!bs.length) return section('Blocks', h('p', { class: 'muted small' }, 'No block: no row marks a column outside the hubs.'));
+  return section('Blocks, the candidate types', h('div', { class: 'blocks' }, bs.map((b) => h('div', { class: `block${r.start && r.start.block === b.label ? ' first' : ''}` },
+    h('div', { class: 'block-head' },
+      h('span', { class: `glabel ${blockClass(r, b.label)}` }, b.label),
+      h('span', { class: 'small' }, BLOCK_KIND[b.kind]),
+      b.label !== 'core' ? h('span', { class: `tag v-${b.verdict}` }, VERDICT[b.verdict]) : null,
+      r.start && r.start.block === b.label ? h('span', { class: 'tag out' }, 'start here') : null),
+    h('div', { class: 'small' }, h('code', {}, b.fields.join(', ') || '—'), h('span', { class: 'muted' }, ' · '), b.methods.join(', ') || '—'),
+    b.label !== 'core' ? h('div', { class: 'muted small' },
+      b.ownsWrites ? 'owns its writes' : 'others write its fields',
+      state.rv.indexed ? ` · ${plural(b.changes, 'commit')} in the last year` : '',
+      b.word ? ` · named «${b.word}»` : '') : null,
+    list(b.evidence).length ? h('ul', { class: 'evidence' }, b.evidence.map((e) => h('li', { class: `st-${e.stance}` },
+      h('span', { class: 'mark-st', title: `${e.signal} ${STANCE[e.stance][1]}` }, STANCE[e.stance][0]), ' ', h('span', { class: 'muted' }, `${e.signal}: `), inModule(e.text)))) : null))));
+}
+
+// patterns reads off the technique's patterns beyond the blocks.
+function patterns(r) {
+  const items = [];
+  for (const t of list(r.ties)) {
+    items.push([true, 'Row spanning blocks', `${t.method} (${plural(t.stmts, 'statement')}) marks the fields of blocks ${t.blocks.join(' and ')}: split it with Extract Method until each piece falls in one block, then redraw the matrix.`]);
+  }
+  for (const s of list(r.sharedWrites)) {
+    items.push([true, 'Column written from two blocks', `${s.field} is written by ${s.writers.join(', ')} in blocks ${s.blocks.join(', ')}: ownership follows writes, so let one block own it and the others pass the value in or ask the owner.`]);
+  }
+  const bridges = r.methods.filter((m) => m.kind === 'bridge').map((m) => m.name);
+  if (bridges.length) items.push([false, 'Bridge rows', `${bridges.join(', ')} only ${bridges.length === 1 ? 'calls' : 'call'} other methods: orchestration for a thin coordinator or use case, not any block.`]);
+  const free = r.methods.filter((m) => m.kind === 'free').map((m) => m.name);
+  if (free.length) items.push([false, 'Empty rows', `${free.join(', ')} ${free.length === 1 ? 'marks' : 'mark'} no field: ${free.length === 1 ? 'a free function' : 'free functions'}, the safest to move out first.`]);
+  for (const e of list(r.envy)) {
+    items.push([false, 'Column read only through getters', `${e.field} is only read through ${e.getters.join(', ')}${list(e.clients).length ? `, by ${e.clients.map(short).join(', ')}` : ''}: the code using it outside probably belongs in its block.`]);
+  }
+  const hubs = r.fields.filter((f) => f.hub).map((f) => f.name);
+  if (hubs.length) items.push([false, 'Hubs', `${hubs.join(', ')} ${hubs.length === 1 ? 'is' : 'are'} used by most rows and set aside: ${hubs.length === 1 ? 'it connects' : 'they connect'} everything and hide the blocks.`]);
+  if (!items.length) return h('div', {});
+  return section('Patterns', h('ul', { class: 'patterns' }, items.map(([w, name, text]) => h('li', { class: w ? 'warn-note' : '' }, h('strong', {}, name), ': ', text))));
+}
+
+function clientsView(r) {
+  const rows = list(r.clients);
+  const box = section('Callers × public methods');
+  if (!r.methods.some((m) => m.exported)) {
+    box.append(h('p', { class: 'muted small' }, 'Its methods are unexported, so only its own package uses them.'));
+    return box;
+  }
+  if (!rows.length) {
+    box.append(h('p', { class: 'muted small' }, 'No code outside the type calls its public methods directly; calls through interfaces are not seen.'));
+  } else {
+    const used = r.methods.filter((m) => rows.some((c) => c.methods.includes(m.name)));
+    box.append(h('div', { class: 'scroll' }, h('table', { class: 'matrix clients' },
+      h('thead', {}, h('tr', {}, h('th', { class: 'corner' }, 'caller \\ method'), used.map((m) => h('th', { class: `fcol ${blockClass(r, m.block)}` }, h('span', {}, m.name)))),
+        h('tr', { class: 'bands' }, h('th', {}), used.map((m) => h('th', { class: blockClass(r, m.block) }, m.block || '·')))),
+      h('tbody', {}, rows.map((c) => h('tr', {}, h('th', { class: 'mname' }, h('code', { title: c.package }, short(c.package))),
+        used.map((m) => h('td', { class: `cell${c.methods.includes(m.name) ? ` on ${blockClass(r, m.block)}` : ''}` }, c.methods.includes(m.name) ? 'x' : ''))))))));
+    const roles = list(r.roles);
+    box.append(h('ul', {}, roles.map((ro) => {
+      const bs = list(ro.blocks);
+      const verdict = bs.length > 1 ? `spans blocks ${bs.join(', ')}: a use case; give it a facade rather than splitting along its lines`
+        : bs.length === 1 ? `block ${bs[0]} only: the callers split as the fields do` : '';
+      return h('li', {}, ro.clients.map(short).join(', '), h('span', { class: 'muted' }, ' use '), ro.methods.join(', '),
+        verdict ? h('span', { class: 'muted' }, ` · ${verdict}`) : null);
+    })));
+    box.append(h('p', { class: 'muted small' }, 'Each role can be an interface declared on the callers\' side, naming only the methods it uses: split the interface before the implementation.'));
+  }
+  if (list(r.unused).length) box.append(h('p', { class: 'small' }, h('span', { class: 'muted' }, 'Public with no caller outside the type, so make it private or delete it: '), r.unused.join(', ')));
+  return box;
+}
+
+function namesView(r) {
+  const words = list(r.words), flags = list(r.flags);
+  if (!words.length && !flags.length) return h('div', {});
+  return section('Naming pass', h('ul', {},
+    words.map((w) => h('li', {}, h('strong', {}, w.word), h('span', { class: 'muted' }, ' · '), w.members.join(', '))),
+    flags.length ? h('li', {}, h('span', { class: 'muted' }, 'Mode flags or states, where each value may be a type of its own: '), flags.join(', ')) : null));
+}
+
+function couplingView(r) {
+  const box = section('Change coupling');
+  if (!state.rv.indexed) {
+    box.append(h('p', { class: 'muted small' }, 'Once the history is indexed, this lists the methods changed in the same commits.'));
+    return box;
+  }
+  const cs = list(r.coupled);
+  if (!cs.length) {
+    box.append(h('p', { class: 'muted small' }, 'No methods changed together often in the last year.'));
+    return box;
+  }
+  box.append(h('ul', {}, cs.map((c) => h('li', { class: c.across ? 'warn-note' : '' },
+    h('code', {}, c.a), ' and ', h('code', {}, c.b), ` changed together in ${c.together} commits (of ${c.aChanges} and ${c.bChanges})`,
+    c.across ? h('span', { class: 'muted' }, ' · across blocks: a concept missing between them, a boundary in the wrong place, or one rule written twice') : h('span', { class: 'muted' }, ' · within a block: it confirms the block')))));
+  return box;
 }
 
 // --- The lists --------------------------------------------------------------

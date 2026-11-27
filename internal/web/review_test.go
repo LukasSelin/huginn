@@ -26,6 +26,11 @@ func TestReviewAPI(t *testing.T) {
 	if len(rv.Changes) != 1 || rv.Changes[0].Name != "util.Min" || rv.Changes[0].Kind != "added" {
 		t.Errorf("changes = %+v", rv.Changes)
 	}
+	// util has no struct type, so there is no matrix to show, but the
+	// page always gets the list.
+	if rv.Types == nil || len(rv.Types) != 0 {
+		t.Errorf("types = %+v, want an empty list", rv.Types)
+	}
 
 	// The signature change of store.Open, reviewed as a merge request into
 	// the first commit and limited to store: its caller in app is outside.
