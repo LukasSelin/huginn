@@ -2,6 +2,7 @@ package review
 
 import (
 	"context"
+	"encoding/json"
 	"slices"
 	"testing"
 
@@ -82,21 +83,23 @@ func TestFocus(t *testing.T) {
 
 // TestByExit keeps together the items reaching outside the process
 // through the same call, each group where its first item is: Charge and
-// Refund, ranked after Load, move up to Authorize, which pays through the
-// same line, while Sync, which leaves nowhere in the repository, and Load
-// keep their places.
+// Refund, ranked after Load, move up to Authorize, which pays by the same
+// call, while Sync, which leaves nowhere in the repository, Load and
+// Receipt, which writes a file on Authorize's line, keep their places.
 func TestByExit(t *testing.T) {
-	item := func(name string, path string, line int) Focus {
+	call := func(name, callee, path string, line int) Focus {
 		c := Capability{Name: "NETWORK", Path: []Step{{Name: name}}}
 		if path != "" {
-			c.Path = append(c.Path, Step{Name: "http.Get", Path: path, Line: line})
+			c.Path = append(c.Path, Step{Name: callee, Path: path, Line: line})
 		}
 		return Focus{Kind: FocusExternal, Name: name, Capabilities: []Capability{c}}
 	}
+	item := func(name, path string, line int) Focus { return call(name, "http.Get", path, line) }
 	fs := []Focus{
 		item("payments.Authorize", "payments/payments.go", 6),
 		item("sync.Sync", "", 0),
 		item("store.Load", "store/store.go", 5),
+		call("payments.Receipt", "os.WriteFile", "payments/payments.go", 6),
 		item("billing.Charge", "payments/payments.go", 6),
 		item("store.Save", "store/store.go", 9),
 		item("billing.Refund", "payments/payments.go", 6),
@@ -105,12 +108,16 @@ func TestByExit(t *testing.T) {
 	for _, f := range byExit(fs) {
 		got = append(got, f.Name)
 	}
-	want := []string{"payments.Authorize", "billing.Charge", "billing.Refund", "sync.Sync", "store.Load", "store.Save"}
+	want := []string{"payments.Authorize", "billing.Charge", "billing.Refund", "sync.Sync", "store.Load", "payments.Receipt", "store.Save"}
 	if !slices.Equal(got, want) {
 		t.Errorf("byExit = %q, want %q", got, want)
 	}
+	if !fs[0].SameExit(fs[4]) || fs[0].SameExit(fs[3]) || fs[1].SameExit(fs[1]) {
+		t.Errorf("Authorize shares its exit with Charge %v, with Receipt %v; Sync with itself %v",
+			fs[0].SameExit(fs[4]), fs[0].SameExit(fs[3]), fs[1].SameExit(fs[1]))
+	}
 
-	if exit, ok := fs[3].Exit(); !ok || exit.Name != "http.Get" || exit.Path != "payments/payments.go" || exit.Line != 6 {
+	if exit, ok := fs[4].Exit(); !ok || exit.Name != "http.Get" || exit.Path != "payments/payments.go" || exit.Line != 6 {
 		t.Errorf("Charge's exit = %+v, %v", exit, ok)
 	}
 	if exit, ok := fs[1].Exit(); ok {
@@ -118,5 +125,23 @@ func TestByExit(t *testing.T) {
 	}
 	if _, ok := (Focus{Kind: FocusBehavior}).Exit(); ok {
 		t.Error("an edit has an exit")
+	}
+
+	// The JSON the review is printed as carries each item's exit.
+	var decoded []struct {
+		Kind string
+		Name string
+		Exit *Step
+	}
+	b, err := json.Marshal([]Focus{fs[4], fs[1], {Kind: FocusBehavior, Name: "billing.Total"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := json.Unmarshal(b, &decoded); err != nil {
+		t.Fatal(err)
+	}
+	if len(decoded) != 3 || decoded[0].Kind != "external" || decoded[0].Name != "billing.Charge" || decoded[0].Exit == nil ||
+		*decoded[0].Exit != (Step{Name: "http.Get", Path: "payments/payments.go", Line: 6}) || decoded[1].Exit != nil || decoded[2].Exit != nil {
+		t.Errorf("json:\n%s", b)
 	}
 }

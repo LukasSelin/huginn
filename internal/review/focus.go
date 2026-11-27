@@ -2,6 +2,7 @@ package review
 
 import (
 	"cmp"
+	"encoding/json"
 	"fmt"
 	"math"
 	"slices"
@@ -88,19 +89,35 @@ type Focus struct {
 
 // Exit returns the call by which a FocusExternal item's first capability
 // leaves the repository's code. Several functions the change adds or edits
-// often reach outside through the same line; the focus lists the items
-// whose exits are made at the same place together, so that line is read
-// once.
+// often reach outside through the same call; the focus lists the items
+// sharing an exit together (see SameExit), so that call is read once.
 func (f Focus) Exit() (Step, bool) {
 	if len(f.Capabilities) == 0 {
 		return Step{}, false
 	}
-	c := f.Capabilities[0]
-	i := c.Leaves()
-	if i < 0 {
-		return Step{}, false
+	return f.Capabilities[0].Exit()
+}
+
+// SameExit reports whether f and g leave the repository's code by the same
+// call: the same function, called on the same line.
+func (f Focus) SameExit(g Focus) bool {
+	x, okF := f.Exit()
+	y, okG := g.Exit()
+	return okF && okG && x == y
+}
+
+// MarshalJSON encodes an item's fields and, under "Exit", the call Exit
+// returns, or null for an item without one.
+func (f Focus) MarshalJSON() ([]byte, error) {
+	type fields Focus // without this method
+	var exit *Step
+	if s, ok := f.Exit(); ok {
+		exit = &s
 	}
-	return c.Path[i], true
+	return json.Marshal(struct {
+		fields
+		Exit *Step
+	}{fields(f), exit})
 }
 
 // focus lists what to look at first in r, most important first: the code
@@ -114,7 +131,7 @@ func (f Focus) Exit() (Step, bool) {
 // depends on the world, which tests rarely bring along. Of it, existing
 // code the change makes reach somewhere new comes first, then new code,
 // then the rest, each the largest edit reaching the most callers first;
-// and the items leaving the repository's code at the same place come
+// and the items leaving the repository's code by the same call come
 // together, where the first of them is.
 func focus(r *semdiff.Report, types []TypeReview, caps map[int][]Capability) []Focus {
 	var external, breaking, behavior []Focus
@@ -163,26 +180,14 @@ func focus(r *semdiff.Report, types []TypeReview, caps map[int][]Capability) []F
 	return out
 }
 
-// byExit moves up next to each item the later ones whose exits are made at
-// the same place, keeping the order otherwise: the items before a group's
-// first stay before it, and its members keep their order.
+// byExit moves up next to each item the later ones sharing its exit,
+// keeping the order otherwise: the items before a group's first stay
+// before it, and its members keep their order.
 func byExit(fs []Focus) []Focus {
-	type site struct {
-		path string
-		line int
-	}
-	first := map[site]int{}
-	lead := make([]int, len(fs)) // the first item leaving at the same place, by index
+	lead := make([]int, len(fs)) // the first item sharing its exit, by index
 	for i, f := range fs {
-		lead[i] = i
-		exit, ok := f.Exit()
-		if !ok {
-			continue
-		}
-		if j, seen := first[site{exit.Path, exit.Line}]; seen {
-			lead[i] = j
-		} else {
-			first[site{exit.Path, exit.Line}] = i
+		if lead[i] = slices.IndexFunc(fs[:i], f.SameExit); lead[i] < 0 {
+			lead[i] = i
 		}
 	}
 	order := make([]int, len(fs))

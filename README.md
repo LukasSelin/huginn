@@ -123,7 +123,7 @@ The UI is backed by a small JSON API:
 | `GET /api/layers?step=commit\|week\|month` | every frame's live packages with their layer, and the references between them, marking those that run within a cycle; packages carry the journey's map layout |
 | `GET /api/affinity/types?months=n` | the struct types with methods, ranked by how much they seem to do, with edits counted over the last `n` months (12; 0 for all history) |
 | `GET /api/affinity?type=id\|name=dir.Type&months=n` | one type's affinity report, as `huginn affinity -json` prints it: the matrix, blocks, findings, change coupling, clients, names, suggested order and disagreements |
-| `GET /api/review?head=rev&base=rev&path=dir` | a merge request's review, as `huginn review` reports it, with what to look at first under `focus`: `head` defaults to `HEAD`, `base` to the remote's default branch, and `path`, repeated, limits it to folders; works while indexing. With `caps=1`, and capslock on `PATH`, it also traces what the change reaches outside the process, under each item's `capabilities`, with the call the first of them leaves the repository's code by under `exit` (items leaving at the same place come one after another), and says so in `traced` |
+| `GET /api/review?head=rev&base=rev&path=dir` | a merge request's review, as `huginn review` reports it, with what to look at first under `focus`: `head` defaults to `HEAD`, `base` to the remote's default branch, and `path`, repeated, limits it to folders; works while indexing. With `caps=1`, and capslock on `PATH`, it also traces what the change reaches outside the process, under each item's `capabilities`, with the call the first of them leaves the repository's code by under `exit` (items leaving by the same call come one after another), and says so in `traced` |
 | `GET /api/review/options?head=rev` | what the review page offers to pick from: the branch checked out, the default target, every branch, and the directories holding Go code at `head` |
 
 ### `huginn silos`
@@ -452,11 +452,12 @@ made. *(new)* marks a capability the function did not reach at the merge
 base: existing code that now reaches somewhere new comes first, then new
 code, then edits of code that already did.
 
-When several of the changed functions leave the repository's code through
-the same line, usually a helper the change edits and the entry points
-calling it, they are listed together under that line, where the first of
-them would be. The call made there and what it leads to are named once,
-and each function's path stops at it:
+When several of the changed functions leave the repository's code by the
+same call, the same function called on the same line, usually in a helper
+the change edits with the entry points calling it, they are listed
+together under that call, where the first of them would be. The call,
+what it leads to and where it is made are named once, and each function's
+path stops at it:
 
 ```
 Look here first
@@ -473,9 +474,9 @@ Look here first
           network (new): payments.Authorize → http.Get
 ```
 
-A function is grouped by the place its first capability leaves, the one
+A function is grouped by the call its first capability leaves by, the one
 the change makes or, of those, the furthest out; its other ways out are
-listed in full.
+listed in full. `-format json` gives each item's call under `Exit`.
 
 To tell, huginn checks out the head and the merge base into temporary
 clones that borrow the repository's objects, and runs capslock on the

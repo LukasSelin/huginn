@@ -56,7 +56,7 @@ type typeJSON struct {
 // "external", "breaking", "behavior", "dependency" or "structure", and
 // change indexes the changes, -1 for none. Exit is the call an "external"
 // item's first capability leaves the repository's code by; the items right
-// after it whose exits are made at the same place are listed with it.
+// after it sharing that exit (review.Focus.SameExit) are listed with it.
 type focusJSON struct {
 	Kind         string           `json:"kind"`
 	Name         string           `json:"name"`

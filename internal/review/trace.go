@@ -67,6 +67,16 @@ func (c Capability) Leaves() int {
 	return -1
 }
 
+// Exit returns the call that leaves the repository's code, the step
+// Leaves indexes, unless the function itself has the capability.
+func (c Capability) Exit() (Step, bool) {
+	i := c.Leaves()
+	if i < 0 {
+		return Step{}, false
+	}
+	return c.Path[i], true
+}
+
 // outside lists, in the order the reports give them, capslock's
 // capabilities that reach outside the process. Reflection, unsafe
 // pointers, reading the environment and what capslock could not analyse

@@ -102,7 +102,7 @@ func (m *markdown) focus(rv *review.Review) {
 }
 
 // focusItem lists a focus item indented by in: its kind, unless it is
-// grouped under the place it leaves the repository's code, what it does to
+// grouped under the call it leaves the repository's code by, what it does to
 // its paths, what changed and what it reaches, and how it reaches outside
 // the process.
 func (m *markdown) focusItem(rv *review.Review, f review.Focus, in string, grouped bool) {

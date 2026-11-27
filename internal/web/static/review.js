@@ -214,8 +214,8 @@ const LOOK_KIND = {
 // the code the change adds or edits that reaches outside the process, the
 // exported API it breaks, the edits of existing code, the largest reaching
 // most first, the imports it starts and the warnings about the types it
-// touches. The code reaching outside that leaves the repository's code at
-// the same place is listed under it. Past the first few, the edits and the
+// touches. The code reaching outside that leaves the repository's code by
+// the same call is listed under it. Past the first few, the edits and the
 // code reaching outside fold away. Above them it says whether capslock is
 // still tracing, and below them what it found when it found nothing, or
 // how to have it.
@@ -265,17 +265,18 @@ function look() {
   $('look').replaceChildren(...items);
 }
 
-// sameSite reports whether two calls are made at the same place.
-const sameSite = (a, b) => !!a && !!b && a.path === b.path && a.line === b.line;
+// sameCall reports whether two steps are the same call, the same function
+// called on the same line, as review.Focus.SameExit compares exits.
+const sameCall = (a, b) => !!a && !!b && a.package === b.package && a.name === b.name && a.path === b.path && a.line === b.line;
 
 // lookRuns cuts the focus into runs: each item reaching outside the process
-// with those right after it whose exits are made at the same place, as the
-// review orders them, and every other item alone.
+// with those right after it sharing its exit, as the review orders them,
+// and every other item alone.
 function lookRuns(fs) {
   const runs = [];
   for (const f of fs) {
     const last = runs[runs.length - 1];
-    if (last && f.kind === 'external' && last[0].kind === 'external' && sameSite(last[0].exit, f.exit)) last.push(f);
+    if (last && sameCall(last[0].exit, f.exit)) last.push(f);
     else runs.push([f]);
   }
   return runs;
@@ -287,10 +288,10 @@ function lookItem(f) {
     h('div', { class: 'look-body' }, ...lookBody(f, false)));
 }
 
-// lookGroup lists the items reaching outside the process through the same
-// place under it: the call made there and what it leads to, how many of
+// lookGroup lists the items reaching outside the process by the same call
+// under it: the call, what it leads to and where it is made, how many of
 // the changes (total) reach outside through it, then each item shown, its
-// paths through that place stopping at the call.
+// paths by that call stopping there.
 function lookGroup(fs, total) {
   const c = fs[0].capabilities[0], exit = fs[0].exit;
   return h('li', { class: 'look-item l-external look-group' },
@@ -304,7 +305,7 @@ function lookGroup(fs, total) {
 
 // lookBody is what an item says: its name and place, what the change does
 // to its paths, what changed, whom it reaches and how it reaches outside
-// the process. Grouped, its paths through the group's place stop there.
+// the process. Grouped, its paths by the group's call stop there.
 function lookBody(f, grouped) {
   const rv = state.rv;
   const ch = f.change >= 0 ? rv.changes[f.change] : null;
@@ -331,10 +332,10 @@ function lookBody(f, grouped) {
 // capabilityLine says how an item reaches outside the process: "network
 // new  http.Get → … → net.(*Dialer).DialContext  payments/payments.go:6",
 // the place being where the call leaving the repository's code is made.
-// Grouped under that place, the path stops at the call made there.
+// Grouped under that call, the path stops there.
 function capabilityLine(f, c, grouped) {
   let steps = c.path, elided = c.elided, leave = c.leaves >= 0 ? c.path[c.leaves] : null;
-  if (grouped && sameSite(leave, f.exit)) {
+  if (grouped && sameCall(leave, f.exit)) {
     steps = c.path.slice(0, c.leaves + 1);
     elided = 0;
     leave = null;
