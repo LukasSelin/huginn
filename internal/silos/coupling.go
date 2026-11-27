@@ -6,6 +6,7 @@ import (
 	"slices"
 	"strings"
 
+	"huginn/internal/cochange"
 	"huginn/internal/knowledge"
 	"huginn/internal/lineage"
 	"huginn/internal/semdiff"
@@ -92,30 +93,19 @@ func (a *analysis) couplings(h *lineage.History) (syms, pkgs []Pair) {
 			}
 		}
 	}
-	symChanges := cochange(symRevs, maxCommitSyms, a.symLinks)
-	pkgChanges := cochange(pkgRevs, maxCommitDirs, a.pkgLinks)
+	symChanges := coChanges(symRevs, maxCommitSyms, a.symLinks)
+	pkgChanges := coChanges(pkgRevs, maxCommitDirs, a.pkgLinks)
 	return a.pairs(a.syms, a.symLinks, symChanges), a.pairs(a.pkgs, a.pkgLinks, pkgChanges)
 }
 
-// cochange counts, for revisions changing at most limit units, how often
-// each unit changed and how often each pair changed together.
-func cochange(revs [][]int, limit int, links map[[2]int]*link) map[int]int {
-	changes := map[int]int{}
-	for _, us := range revs {
-		n := len(us)
-		if n == 0 || n > limit {
-			continue
-		}
-		for _, u := range us {
-			changes[u]++
-		}
-		for i := range us {
-			for j := i + 1; j < n; j++ {
-				l := get(links, key(us[i], us[j]))
-				l.co++
-				l.w += 1 / float64(n-1)
-			}
-		}
+// coChanges counts, for revisions changing at most limit units, how often
+// each unit changed, and adds how often each pair changed together to links.
+func coChanges(revs [][]int, limit int, links map[[2]int]*link) map[int]int {
+	changes, pairs := cochange.Count(revs, limit)
+	for k, p := range pairs {
+		l := get(links, k)
+		l.co += p.N
+		l.w += p.W
 	}
 	return changes
 }
@@ -125,10 +115,7 @@ func (a *analysis) pairs(us []*unit, links map[[2]int]*link, changes map[int]int
 	out := []Pair{}
 	for k, l := range links {
 		x, y := us[k[0]], us[k[1]]
-		logical := 0.0
-		if l.co >= minCoChanges {
-			logical = min(1, l.w/float64(min(changes[k[0]], changes[k[1]])))
-		}
+		logical := cochange.Logical(cochange.Pair{N: l.co, W: l.w}, changes[k[0]], changes[k[1]], minCoChanges)
 		strength := math.Log2(1+float64(l.refs)) + logicalWeight*logical
 		if strength <= 0 || knowledge.Total(x.ws) <= 0 || knowledge.Total(y.ws) <= 0 {
 			continue

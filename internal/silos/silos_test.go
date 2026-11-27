@@ -308,7 +308,7 @@ func TestCoupling(t *testing.T) {
 
 func TestCochangeNormalizes(t *testing.T) {
 	links := map[[2]int]*link{}
-	changes := cochange([][]int{{0, 1}, {0, 1, 2}, {0, 1, 2, 3}, {3}}, 3, links)
+	changes := coChanges([][]int{{0, 1}, {0, 1, 2}, {0, 1, 2, 3}, {3}}, 3, links)
 	// The four-unit commit is too big to count.
 	if changes[0] != 2 || changes[3] != 1 {
 		t.Errorf("changes %v", changes)
