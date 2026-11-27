@@ -117,7 +117,7 @@ func TestReviewFormats(t *testing.T) {
 			Kind   string
 			Steps  []struct{ Mark, Kind, Text, Then string }
 		}
-		Report  struct {
+		Report struct {
 			Counts    map[string]int
 			Relations struct {
 				AddedDeps []struct{ From, To, Crossing string }
