@@ -35,9 +35,9 @@ go test ./...
 
 ```
 huginn symbols [-C dir] [-branch rev] [-tests] [-no-cache] name
-huginn serve [-C dir] [-branch rev] [-tests] [-no-cache] [-addr host:port]
+huginn serve [-C dir] [-branch rev] [-tests] [-no-cache] [-caps=false] [-addr host:port]
 huginn semdiff [-C dir] [-include-generated] [-callers n] rev
-huginn review [-C dir] [-base rev] [-head rev] [-format text|markdown|json] [-callers n] [folder ...]
+huginn review [-C dir] [-base rev] [-head rev] [-format text|markdown|json] [-callers n] [-caps=false] [folder ...]
 huginn silos [-C dir] [-branch rev] [-no-cache] [-n count] [-leaves name,...]
 huginn affinity [-C dir] [-branch rev] [-tests] [-no-cache] [-months n] [-hub share] [-min-co n] [-n count] [-json] [type]
 ```
@@ -123,7 +123,7 @@ The UI is backed by a small JSON API:
 | `GET /api/layers?step=commit\|week\|month` | every frame's live packages with their layer, and the references between them, marking those that run within a cycle; packages carry the journey's map layout |
 | `GET /api/affinity/types?months=n` | the struct types with methods, ranked by how much they seem to do, with edits counted over the last `n` months (12; 0 for all history) |
 | `GET /api/affinity?type=id\|name=dir.Type&months=n` | one type's affinity report, as `huginn affinity -json` prints it: the matrix, blocks, findings, change coupling, clients, names, suggested order and disagreements |
-| `GET /api/review?head=rev&base=rev&path=dir` | a merge request's review, as `huginn review` reports it, with what to look at first under `focus`: `head` defaults to `HEAD`, `base` to the remote's default branch, and `path`, repeated, limits it to folders; works while indexing |
+| `GET /api/review?head=rev&base=rev&path=dir` | a merge request's review, as `huginn review` reports it, with what to look at first under `focus`: `head` defaults to `HEAD`, `base` to the remote's default branch, and `path`, repeated, limits it to folders; works while indexing. With `caps=1`, and capslock on `PATH`, it also traces what the change reaches outside the process, under each item's `capabilities`, and says so in `traced` |
 | `GET /api/review/options?head=rev` | what the review page offers to pick from: the branch checked out, the default target, every branch, and the directories holding Go code at `head` |
 
 ### `huginn silos`
@@ -340,15 +340,20 @@ request's own diff is.
 The report puts first what the change does that its diff does not show,
 then what it reaches, then what it is made of:
 
-- **Look here first** lists, most important first, the exported API the
-  change breaks (a deleted, renamed or retyped symbol and its callers, or
-  an interface's new methods and the implementers that lack them), then
-  the existing production code it edits, the largest edits reaching the
-  most call sites first, each with the production code calling it and how
-  many tests do, then the imports between packages it starts, and the
-  warnings about the blocks of the types it touches. New code, pure
-  renames and moves, and tests are left out: the diff shows them whole.
-  Six edits are listed; the rest are counted.
+- **Look here first** lists, most important first, the production code
+  the change adds or edits that reaches outside the process, the network,
+  files, other programs or the operating system, with how it gets there
+  (see [What reaches outside the process](#what-reaches-outside-the-process)),
+  then the exported API the change breaks (a deleted, renamed or retyped
+  symbol and its callers, or an interface's new methods and the
+  implementers that lack them), then the existing production code it
+  edits, the largest edits reaching the most call sites first, each with
+  the production code calling it and how many tests do, then the imports
+  between packages it starts, and the warnings about the blocks of the
+  types it touches. New code, pure renames and moves, and tests are left
+  out, the diff shows them whole, unless the new code reaches outside the
+  process. Six edits, and six changes reaching outside, are listed; the
+  rest are counted.
 - **Impact** is the blast radius: the existing declarations anywhere in the
   repository that use what changed. Production code is counted first and
   listed first, and the call sites in tests are counted apart, since they
@@ -406,12 +411,72 @@ Files
 …
 ```
 
+#### What reaches outside the process
+
+A path that ends at the network, a file, another program or the operating
+system is the one tests rarely run for real: they stub it, or skip it. So
+when Google's [capslock](https://github.com/google/capslock) is on `PATH`,
+the review asks it which of the functions and methods the change adds or
+edits can reach such a capability, and lists those first:
+
+```bash
+go install github.com/google/capslock/cmd/capslock@latest
+```
+
+```
+Look here first
+  [external] git.(*Repo).GoDirs  internal/git/range.go:228
+      new method · 22 stmts · cyclomatic 8 · only tests use it · 1 in tests
+      exec (new): exec.(*Cmd).Output  internal/git/range.go:236
+  [external] web.(*Server).reviewAPI  internal/web/review.go:106
+      new method · 13 stmts · cyclomatic 5 · nothing calls it
+      exec (new): review.Build → git.(*Repo).Commits → exec.(*Cmd).Output  internal/git/walk.go:262
+      network (new): http.Error  internal/web/review.go:124
+```
+
+Each line names a capability: `network`, `files`, `exec` (running a
+program), `system calls`, `operating system`, a kind of system state the
+code changes (`env`, `signals`), `cgo` or `arbitrary execution`.
+Reflection, unsafe pointers, reading the environment and calls capslock
+cannot analyse stay inside the process and are left out. Then come one
+path there, from the changed function through the repository's own code to
+the call that leaves it (`…` stands for calls skipped in another package
+before the one capslock finds the capability in), and where that call is
+made. *(new)* marks a capability the function did not reach at the merge
+base: existing code that now reaches somewhere new comes first, then new
+code, then edits of code that already did.
+
+To tell, huginn checks out the head and the merge base into temporary
+clones that borrow the repository's objects, and runs capslock on the
+packages declaring what changed, both at once. That takes a while, from
+ten seconds on a small module up to minutes on a large one: capslock loads
+and type-checks the packages with everything they import. Run it with
+`-caps=false` to skip it; without capslock on `PATH`, huginn says so and
+reviews without it. When capslock cannot load the merge base, nothing is
+marked new; when it cannot load the head, the review says so and lists no
+such paths.
+
+capslock's call graph is generous where functions are passed as values: an
+iterator's yield function seems to call every function of its type, and
+`err.Error()` every `Error` method, so a function parsing strings appears
+to reach the network. huginn drops a path where it steps into a function
+only its own package can name (a function literal, an unexported function,
+a method of an unexported type) without having been in that package,
+which would have handed the function over, and where it steps into an
+`Error` or `String` method, or into any method the standard library calls,
+of a package it has not been in. On huginn's own packages that leaves
+about a third of capslock's paths out of the process, and those are real:
+git commands, `net.Listen`, `http.Error`, `os.Stat`. capslock reports one path
+per capability, the shortest, so a capability whose shortest path was
+dropped is missed even when a longer, real one exists.
+
 `-format markdown` writes the same report for a merge request comment,
 with the changes and files folded away; `-format json` writes it for other
 tools. In a GitLab merge request pipeline, a job like this one posts it on
 the merge request. It needs an image with Go, git and `glab`, and a token
 that may comment, here in `GITLAB_TOKEN`; `GIT_DEPTH: 0` fetches enough
-history to reach the merge base.
+history to reach the merge base, and capslock, installed alongside huginn,
+traces what reaches outside the process.
 
 ```yaml
 huginn-review:
@@ -422,6 +487,7 @@ huginn-review:
   script:
     - git clone --depth 1 https://github.com/LukasSelin/huginn.git /tmp/huginn
     - (cd /tmp/huginn && go install ./cmd/huginn)
+    - go install github.com/google/capslock/cmd/capslock@latest
     - huginn review -format markdown services/billing > review.md
     - glab mr note "$CI_MERGE_REQUEST_IID" --message "$(cat review.md)"
 ```
@@ -433,7 +499,11 @@ waiting for the history to be indexed. What it reviews is kept in the
 address, as `/review?head=feature&path=services/billing`, so a review can be
 shared or bookmarked. The page opens on the same order as the report: the
 key numbers, counting production code, then *Look here first*, whose
-symbols lead to their changes. Under it, a diagram lays the packages out
+symbols lead to their changes. With capslock on `PATH` when `huginn serve`
+starts (and without `-caps=false`), the page shows the review at once and
+then traces what reaches outside the process, adding those paths to the
+top of *Look here first* when capslock is done; what it traced is kept, so
+a merge base many reviews share is traced once. Under it, a diagram lays the packages out
 in three columns: in the middle what changed (with folders, the packages in
 them), on the left the packages that call into it, and on the right those
 it uses. Its lines are the calls into what changed, weighted by call sites,

@@ -5,7 +5,7 @@
 // prints the life of every symbol whose qualified name is name, e.g.
 // "ParseFile" or "(*Indexer).Visit", newest change first.
 //
-//	huginn serve [-C dir] [-branch rev] [-tests] [-no-cache] [-addr host:port]
+//	huginn serve [-C dir] [-branch rev] [-tests] [-no-cache] [-caps=false] [-addr host:port]
 //
 // indexes the history and serves the journey, layers, map, health and
 // review pages in a browser.
@@ -24,13 +24,14 @@
 // prints the semantic diff of one commit: its changed symbols, their
 // callers, the blast radius and the files that changed only in formatting.
 //
-//	huginn review [-C dir] [-base rev] [-head rev] [-format text|markdown|json] [folder ...]
+//	huginn review [-C dir] [-base rev] [-head rev] [-format text|markdown|json] [-caps=false] [folder ...]
 //
 // prints what a merge request changes, compared from its merge base with
-// the branch it goes into: the code that depends on what it changed, and
-// the imports and references between packages it starts and stops. Folders
-// limit the report to their code; callers and relations are still found
-// across the whole repository.
+// the branch it goes into: the code it adds or edits that reaches the
+// network, files or other programs, as capslock traces it, the code that
+// depends on what it changed, and the imports and references between
+// packages it starts and stops. Folders limit the report to their code;
+// callers and relations are still found across the whole repository.
 //
 //	huginn silos [-C dir] [-branch rev] [-no-cache] [-n count] [-leaves name,...]
 //
@@ -58,17 +59,19 @@ import (
 	"path/filepath"
 	"time"
 
+	"huginn/internal/capslock"
 	"huginn/internal/git"
 	"huginn/internal/lineage"
+	"huginn/internal/review"
 	"huginn/internal/web"
 )
 
 const usage = `usage:
   huginn symbols [-C dir] [-branch rev] [-max-count n] [-tests] [-no-cache] name
-  huginn serve [-C dir] [-branch rev] [-tests] [-no-cache] [-addr host:port]
+  huginn serve [-C dir] [-branch rev] [-tests] [-no-cache] [-caps=false] [-addr host:port]
   huginn story [-C dir] [-branch rev] [-tests] [-no-cache] [-moments]
   huginn semdiff [-C dir] [-include-generated] [-callers n] rev
-  huginn review [-C dir] [-base rev] [-head rev] [-format text|markdown|json] [-callers n] [folder ...]
+  huginn review [-C dir] [-base rev] [-head rev] [-format text|markdown|json] [-callers n] [-caps=false] [folder ...]
   huginn silos [-C dir] [-branch rev] [-no-cache] [-n count] [-leaves name,...]
   huginn affinity [-C dir] [-branch rev] [-tests] [-no-cache] [-months n] [-hub share] [-min-co n] [-n count] [-json] [type]`
 
@@ -182,6 +185,7 @@ func serve(ctx context.Context, stdout, stderr io.Writer, args []string) error {
 	tests := fs.Bool("tests", false, "include symbols declared in _test.go files")
 	noCache := fs.Bool("no-cache", false, "walk all history instead of reusing .git/huginn")
 	addr := fs.String("addr", "localhost:7878", "address to listen on")
+	caps := fs.Bool("caps", true, "have reviews trace with capslock which changed functions reach the network, files or other programs")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -198,6 +202,14 @@ func serve(ctx context.Context, stdout, stderr io.Writer, args []string) error {
 		return err
 	}
 	srv := web.New(repo, filepath.Base(abs), opts)
+	if *caps {
+		tool, findErr := capslock.Find()
+		if findErr != nil {
+			fmt.Fprintf(stderr, "huginn: %v, to see in reviews which changes reach outside the process\n", findErr)
+		} else {
+			srv.SetTracer(review.NewTracer(tool))
+		}
+	}
 
 	ln, err := net.Listen("tcp", *addr)
 	if err != nil {

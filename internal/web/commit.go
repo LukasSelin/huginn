@@ -10,6 +10,7 @@ import (
 
 	"huginn/internal/ast"
 	"huginn/internal/git"
+	"huginn/internal/review"
 	"huginn/internal/semdiff"
 )
 
@@ -278,6 +279,8 @@ type repoAPI struct {
 
 	reports *reportCache                                       // commit reports by hash
 	build   func(context.Context, string) (*commitJSON, error) // buildReport, or a test's stand-in
+
+	tracer *review.Tracer // traces reviews with capslock; nil without it
 }
 
 func newRepoAPI(repo *git.Repo, generated bool) *repoAPI {
