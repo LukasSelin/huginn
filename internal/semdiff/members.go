@@ -59,19 +59,7 @@ func memberChanges(c ast.Change, pkgOf func(path, pkg string) string, idx *index
 	var impls []Caller
 	searched := false
 	for _, mc := range c.Members {
-		cur := mc.Cur()
-		rc := MemberChange{Flags: mc.Flags, Member: cur.Kind.String(), Name: cur.Name}
-		if o := mc.Old; o != nil {
-			rc.OldDecl = o.String()
-			rc.Exported = o.Exported
-			if mc.Flags.Has(ast.MemberRenamed) {
-				rc.OldName = o.Name
-			}
-		}
-		if n := mc.New; n != nil {
-			rc.NewDecl = n.String()
-			rc.Exported = rc.Exported || n.Exported
-		}
+		rc := newMemberChange(mc)
 		if api {
 			rc.Breaks = breaks(mc)
 			rc.Breaking = rc.Breaks != ""
@@ -82,18 +70,40 @@ func memberChanges(c ast.Change, pkgOf func(path, pkg string) string, idx *index
 			}
 			rc.Implementers = impls
 		}
-		if o := mc.Old; o != nil && (o.Kind == ast.MemberField || o.Kind == ast.MemberEmbedded) &&
+		if o := mc.Old; o != nil && isFieldKind(o.Kind) &&
 			mc.Flags&(ast.MemberRemoved|ast.MemberRetyped|ast.MemberRenamed) != 0 {
 			rc.Uses, rc.Approximate = idx.fieldUses(c.Old.Name, o.Name, pkg)
 		}
-		if m := mc.Cur(); (m.Kind == ast.MemberField || m.Kind == ast.MemberEmbedded) &&
-			mc.Flags&(ast.MemberAdded|ast.MemberRemoved) != 0 {
+		if m := mc.Cur(); isFieldKind(m.Kind) && mc.Flags&(ast.MemberAdded|ast.MemberRemoved) != 0 {
 			rc.Unkeyed = idx.unkeyedLiterals(c.Old.Name, pkg)
 		}
 		out = append(out, rc)
 	}
 	return out
 }
+
+// newMemberChange converts what a member change says about the member
+// itself: its kind, names, declarations and whether it is exported.
+func newMemberChange(mc ast.MemberChange) MemberChange {
+	cur := mc.Cur()
+	rc := MemberChange{Flags: mc.Flags, Member: cur.Kind.String(), Name: cur.Name}
+	if o := mc.Old; o != nil {
+		rc.OldDecl = o.String()
+		rc.Exported = o.Exported
+		if mc.Flags.Has(ast.MemberRenamed) {
+			rc.OldName = o.Name
+		}
+	}
+	if n := mc.New; n != nil {
+		rc.NewDecl = n.String()
+		rc.Exported = rc.Exported || n.Exported
+	}
+	return rc
+}
+
+// isFieldKind reports whether a member of kind k is a struct field,
+// embedded or not.
+func isFieldKind(k ast.MemberKind) bool { return k == ast.MemberField || k == ast.MemberEmbedded }
 
 // breaks says whose code a member change of an exported type breaks, or
 // returns "" when it breaks no one outside the package.
