@@ -214,7 +214,7 @@ const LOOK_KIND = {
 // the code the change adds or edits that reaches outside the process, the
 // exported API it breaks, the edits of existing code, the largest reaching
 // most first, the imports it starts and the warnings about the types it
-// touches. The code reaching outside that leaves the repository's code by
+// touches. The code reaching outside that leaves the changed code by
 // the same call is listed under it. Past the first few, the edits and the
 // code reaching outside fold away. Above them it says whether capslock is
 // still tracing, and below them what it found when it found nothing, or
@@ -288,18 +288,21 @@ function lookItem(f) {
     h('div', { class: 'look-body' }, ...lookBody(f, false)));
 }
 
-// lookGroup lists the items reaching outside the process by the same call
+// lookGroup lists the items leaving the changed code by the same call
 // under it: the call, what it leads to and where it is made, how many of
-// the changes (total) reach outside through it, then each item shown, its
+// the changes (total) reach outside through it and, when the path leaves
+// the repository's code further on, where, then each item shown, its
 // paths by that call stopping there.
 function lookGroup(fs, total) {
   const c = fs[0].capabilities[0], exit = fs[0].exit;
+  const leave = c.leaves !== c.leavesChange ? c.path[c.leaves] : null;
   return h('li', { class: 'look-item l-external look-group' },
     h('span', { class: 'look-kind' }, LOOK_KIND.external),
     h('div', { class: 'look-body' },
-      h('div', { class: 'look-head' }, h('span', { class: 'cap-path' }, ...pathNodes(c.path.slice(c.leaves), c.elided)),
+      h('div', { class: 'look-head' }, h('span', { class: 'cap-path' }, ...pathNodes(c.path.slice(c.leavesChange), c.elided)),
         h('span', { class: 'muted code' }, `${exit.path}:${exit.line}`)),
-      h('div', { class: 'look-what' }, `${plural(total, 'change')} reach outside through this call`),
+      h('div', { class: 'look-what' }, `${plural(total, 'change')} reach outside through this call`,
+        leave ? h('span', { class: 'muted' }, ', leaving the repository’s code at ', h('code', {}, `${leave.path}:${leave.line}`)) : null),
       h('ul', { class: 'look-members' }, ...fs.map((f) => h('li', { class: 'look-member' }, ...lookBody(f, true))))));
 }
 
@@ -332,11 +335,12 @@ function lookBody(f, grouped) {
 // capabilityLine says how an item reaches outside the process: "network
 // new  http.Get → … → net.(*Dialer).DialContext  payments/payments.go:6",
 // the place being where the call leaving the repository's code is made.
-// Grouped under that call, the path stops there.
+// Grouped under the call it leaves the changed code by, the path stops
+// there.
 function capabilityLine(f, c, grouped) {
   let steps = c.path, elided = c.elided, leave = c.leaves >= 0 ? c.path[c.leaves] : null;
-  if (grouped && sameCall(leave, f.exit)) {
-    steps = c.path.slice(0, c.leaves + 1);
+  if (grouped && c.leavesChange >= 0 && sameCall(c.path[c.leavesChange], f.exit)) {
+    steps = c.path.slice(0, c.leavesChange + 1);
     elided = 0;
     leave = null;
   }

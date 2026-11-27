@@ -88,7 +88,7 @@ func (m *markdown) focus(rv *review.Review) {
 			continue
 		}
 		text, loc := exitText(r, codeName)
-		m.printf("- **%s** %s at %s: %s\n", focusLabel(review.FocusExternal), text, code(loc), exitDetail(r))
+		m.printf("- **%s** %s at %s: %s\n", focusLabel(review.FocusExternal), text, code(loc), exitDetail(r, codeName))
 		for _, f := range r.items {
 			m.focusItem(rv, f, "  ", true)
 		}
@@ -102,7 +102,7 @@ func (m *markdown) focus(rv *review.Review) {
 }
 
 // focusItem lists a focus item indented by in: its kind, unless it is
-// grouped under the call it leaves the repository's code by, what it does to
+// grouped under the call it leaves the changed code by, what it does to
 // its paths, what changed and what it reaches, and how it reaches outside
 // the process.
 func (m *markdown) focusItem(rv *review.Review, f review.Focus, in string, grouped bool) {

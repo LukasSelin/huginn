@@ -147,6 +147,9 @@ func TestTrace(t *testing.T) {
 	if i := c.Leaves(); i != 2 || c.Path[i].Path != "payments/payments.go" || c.Path[i].Line != 6 {
 		t.Errorf("leaves at step %d of %+v, want http.Get at payments/payments.go:6", i, c.Path)
 	}
+	if c.LastChanged != 1 || c.LeavesChange() != 2 {
+		t.Errorf("last changed at step %d, leaves the change at %d; want Authorize, which the change edits, and its call", c.LastChanged, c.LeavesChange())
+	}
 	if refund := rv.Focus[2]; refund.What != "new func · 1 stmt · cyclomatic 1" || !refund.Capabilities[0].New {
 		t.Errorf("Refund: what %q, capabilities %+v", refund.What, refund.Capabilities)
 	}
@@ -254,5 +257,42 @@ func TestTraceCapslock(t *testing.T) {
 	}
 	if c := rv.Focus[0].Capabilities[0]; c.Path[c.Leaves()].Path != "conf/conf.go" || c.Path[c.Leaves()].Line != 6 {
 		t.Errorf("Load leaves at %+v, want conf/conf.go:6", c.Path)
+	}
+}
+
+// TestLastChanged finds the last function on a path that the change adds
+// or edits before the path leaves the repository's code: an edited
+// handler's function literal counts as the handler, and the unchanged
+// config code below the edited service does not count. The group of
+// items reaching outside by that path is then the service's call to the
+// config code, not the config code's own call out.
+func TestLastChanged(t *testing.T) {
+	path := []capslock.Call{
+		{Package: "example.com/m/api", Name: "Handle.func1"},
+		{Package: "example.com/m/hub", Name: "(*Service).Submit", Path: "api/api.go", Line: 4},
+		{Package: "example.com/m/config", Name: "Get", Path: "hub/hub.go", Line: 9},
+		{Package: "os", Name: "Setenv", Path: "config/config.go", Line: 12},
+		{Package: "example.com/m/hub", Name: "(*Service).Submit"}, // reached again outside: not counted
+	}
+	inRepo := func(pkg string) bool { return strings.HasPrefix(pkg, "example.com/m/") }
+	submit := capslock.Func{Package: "example.com/m/hub", Name: "(*Service).Submit"}
+	changed := map[capslock.Func]bool{{Package: "example.com/m/api", Name: "Handle"}: true, submit: true}
+	if got := lastChanged(path, inRepo, changed); got != 1 {
+		t.Errorf("lastChanged = %d, want 1, the service", got)
+	}
+	delete(changed, submit)
+	if got := lastChanged(path, inRepo, changed); got != 0 {
+		t.Errorf("lastChanged without the service = %d, want 0, the handler's literal", got)
+	}
+
+	c := shorten(capslock.Capability{Name: "MODIFY_SYSTEM_STATE/ENV", Path: path[:4]}, inRepo, func(p string) string { return p[strings.LastIndex(p, "/")+1:] })
+	c.LastChanged = 1
+	exit, ok := c.Exit()
+	if c.Leaves() != 3 || c.LeavesChange() != 2 || !ok || exit.Name != "config.Get" || exit.Path != "hub/hub.go" || exit.Line != 9 {
+		t.Errorf("leaves the repository at %d, the change at %d by %+v", c.Leaves(), c.LeavesChange(), exit)
+	}
+	c.LastChanged = 3 // past the call leaving the repository: held there
+	if c.LeavesChange() != 3 {
+		t.Errorf("LeavesChange past the repository = %d, want 3", c.LeavesChange())
 	}
 }
