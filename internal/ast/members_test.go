@@ -283,7 +283,7 @@ func (s *Server) Run(c cfg.Options) {
 	}
 }
 
-func TestFieldWrites(t *testing.T) {
+func TestFieldWriteForms(t *testing.T) {
 	f := mustParse(t, "a.go", `package a
 
 type S struct{}
@@ -316,7 +316,7 @@ func (s *S) Run(xs []int, k string, v any) {
 		got = append(got, fmt.Sprintf("%s.%s %d/%d %v", r.Type, r.Name, r.Writes, r.Count, r.Methods))
 	}
 	want := []string{
-		".d 1/1 []", // s.c.d: d of an unknown type
+		".d 0/1 []", // s.c.d = v writes c, the field at its root
 		"S.a 1/1 []",
 		"S.b 1/1 []",
 		"S.c 1/1 []",

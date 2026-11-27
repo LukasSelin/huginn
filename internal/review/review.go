@@ -12,6 +12,7 @@ import (
 	"strings"
 
 	"huginn/internal/git"
+	"huginn/internal/lineage"
 	"huginn/internal/semdiff"
 )
 
@@ -33,6 +34,10 @@ type Options struct {
 	// Getenv reads the environment, where a CI may name the target branch.
 	// When nil the environment is not consulted.
 	Getenv func(string) string
+
+	// History, if not nil, is the indexed history, from which the review
+	// tells which methods of a type change together.
+	History *lineage.History
 }
 
 // Review is a merge request's report, with what it was compared against.
@@ -45,6 +50,10 @@ type Review struct {
 	Scope     []string // as given; empty for the whole repository
 	Module    string   // the module path in the root go.mod at the head, if any
 	Report    *semdiff.Report
+
+	// Types are the seams of the struct types the change touches, before
+	// and after it, the largest first.
+	Types []TypeReview
 
 	// Warnings are syntax errors that may hide changes or callers.
 	Warnings []string
@@ -96,6 +105,7 @@ func Build(ctx context.Context, repo *git.Repo, opts Options) (*Review, error) {
 		Module:    semdiff.ModulePath(tree.GoMod["go.mod"]),
 		Report:    semdiff.Build(in),
 	}
+	rv.Types = types(rv.Report, in, opts.History)
 	for _, err := range rg.ParseErrors {
 		rv.Warnings = append(rv.Warnings, err.Error())
 	}

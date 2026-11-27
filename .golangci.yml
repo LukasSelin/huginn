@@ -33,8 +33,10 @@ linters:
       #
       #   foundation  internal/ast, internal/git, internal/modpath, internal/cochange
       #   history     internal/lineage, internal/knowledge, internal/codemap
-      #   analyses    internal/journey, internal/health, internal/semdiff
-      #   reports     internal/story, internal/silos, internal/review, internal/affinity
+      #   analyses    internal/journey, internal/health, internal/semdiff,
+      #               internal/cohesion
+      #   reports     internal/story, internal/silos, internal/review,
+      #               internal/affinity
       #   ui          internal/web
       #   cmd         cmd/huginn (may use anything)
       #
@@ -84,6 +86,7 @@ linters:
             - "**/internal/journey/*.go"
             - "**/internal/health/*.go"
             - "**/internal/semdiff/*.go"
+            - "**/internal/cohesion/*.go"
             - "!$test"
           allow:
             - $gostd
@@ -114,6 +117,7 @@ linters:
             - huginn/internal/journey$
             - huginn/internal/health$
             - huginn/internal/semdiff$
+            - huginn/internal/cohesion$
         ui:
           list-mode: strict
           files:
@@ -131,6 +135,7 @@ linters:
             - huginn/internal/journey$
             - huginn/internal/health$
             - huginn/internal/semdiff$
+            - huginn/internal/cohesion$
             - huginn/internal/story$
             - huginn/internal/silos$
             - huginn/internal/review$

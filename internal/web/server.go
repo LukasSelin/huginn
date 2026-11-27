@@ -148,7 +148,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /api/status", s.status)
 	indexRoutes(mux, s.index.Load)
 	mux.HandleFunc("GET /api/commit/{rev...}", s.api.commit(s.index.Load))
-	mux.HandleFunc("GET /api/review", s.api.reviewAPI)
+	mux.HandleFunc("GET /api/review", s.api.reviewAPI(s.index.Load))
 	mux.HandleFunc("GET /api/review/options", s.api.reviewOptions)
 	return mux
 }
