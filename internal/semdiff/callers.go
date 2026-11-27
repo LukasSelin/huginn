@@ -201,10 +201,36 @@ type Use struct {
 
 // Uses returns the declarations referring to s, which lives in package pkg,
 // each once.
-func (x *Index) Uses(s *ast.Symbol, pkg string) []Use {
+func (x *Index) Uses(s *ast.Symbol, pkg string) []Use { return uses(x.idx.sites(s, pkg)) }
+
+// ValueUses returns the declarations using method s, which lives in package
+// pkg, as a value without calling it, f := x.Name, each once. On the
+// receiver of a method of the same type the use is exact; elsewhere only
+// the name is known, so, like a method call, it is matched by name in pkg
+// and in the files that import it, and may be a field of that name. It
+// returns nil for anything but a method.
+func (x *Index) ValueUses(s *ast.Symbol, pkg string) []Use {
+	if s.Kind != ast.KindMethod {
+		return nil
+	}
+	idx := x.idx
+	sites := slices.Clone(idx.fields[symID(pkg, s.Recv+"."+s.Name)])
+	importable := strings.TrimSuffix(pkg, "_test")
+	for _, st := range idx.fieldByName[s.Name] {
+		if st.pkg == pkg || idx.imports[st.file][importable] {
+			sites = append(sites, st)
+		}
+	}
+	return uses(slices.DeleteFunc(sites, func(st site) bool {
+		return st.pkg == pkg && st.caller.Key == s.Key
+	}))
+}
+
+// uses folds sites into one Use per caller, in order of first appearance.
+func uses(sites []site) []Use {
 	at := map[*ast.Symbol]int{}
 	var out []Use
-	for _, st := range x.idx.sites(s, pkg) {
+	for _, st := range sites {
 		i, ok := at[st.caller]
 		if !ok {
 			i = len(out)
