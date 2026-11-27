@@ -123,7 +123,7 @@ The UI is backed by a small JSON API:
 | `GET /api/layers?step=commit\|week\|month` | every frame's live packages with their layer, and the references between them, marking those that run within a cycle; packages carry the journey's map layout |
 | `GET /api/affinity/types?months=n` | the struct types with methods, ranked by how much they seem to do, with edits counted over the last `n` months (12; 0 for all history) |
 | `GET /api/affinity?type=id\|name=dir.Type&months=n` | one type's affinity report, as `huginn affinity -json` prints it: the matrix, blocks, findings, change coupling, clients, names, suggested order and disagreements |
-| `GET /api/review?head=rev&base=rev&path=dir` | a merge request's review, as `huginn review` reports it: `head` defaults to `HEAD`, `base` to the remote's default branch, and `path`, repeated, limits it to folders; works while indexing |
+| `GET /api/review?head=rev&base=rev&path=dir` | a merge request's review, as `huginn review` reports it, with what to look at first under `focus`: `head` defaults to `HEAD`, `base` to the remote's default branch, and `path`, repeated, limits it to folders; works while indexing |
 | `GET /api/review/options?head=rev` | what the review page offers to pick from: the branch checked out, the default target, every branch, and the directories holding Go code at `head` |
 
 ### `huginn silos`
@@ -262,8 +262,8 @@ Suggested order
 Prints the semantic diff of one commit: each changed symbol with its old and
 new signature, statement count and cyclomatic complexity, the declarations
 that call it (`-callers` caps how many are listed), and the blast radius over
-the whole tree. Generated files are left out unless `-include-generated` is
-given.
+the whole tree, production code first with the call sites in tests counted
+apart. Generated files are left out unless `-include-generated` is given.
 
 ```
 $ huginn semdiff -callers 2 665b0d3
@@ -337,12 +337,24 @@ branch (`origin/HEAD`, else `origin/main`, `origin/master`, `main` or
 `master`). Either way the head is compared from the merge base, as the merge
 request's own diff is.
 
-The report puts first what the change reaches, then what it is made of:
+The report puts first what the change does that its diff does not show,
+then what it reaches, then what it is made of:
 
+- **Look here first** lists, most important first, the exported API the
+  change breaks (a deleted, renamed or retyped symbol and its callers, or
+  an interface's new methods and the implementers that lack them), then
+  the existing production code it edits, the largest edits reaching the
+  most call sites first, each with the production code calling it and how
+  many tests do, then the imports between packages it starts, and the
+  warnings about the blocks of the types it touches. New code, pure
+  renames and moves, and tests are left out: the diff shows them whole.
+  Six edits are listed; the rest are counted.
 - **Impact** is the blast radius: the existing declarations anywhere in the
-  repository that use what changed. With folders, it says how much of that
-  lies outside them, and in which packages; such callers are marked
-  `outside`.
+  repository that use what changed. Production code is counted first and
+  listed first, and the call sites in tests are counted apart, since they
+  often outnumber it many times. With folders, it says how much of the
+  production code lies outside them, and in which packages; such callers
+  are marked `outside`.
 - **Relations** are the imports between packages that the merge request
   starts (`+`) and stops (`−`), each with the references along it, from a
   changed declaration to a declaration of the other package, and then the
@@ -366,13 +378,22 @@ scope: internal/web
 +208 −5 lines → 26 semantic changes across 26 symbols
 added 18 · body edit 8
 
+Look here first
+  [edit] web.(*Server).indexRoutes  internal/web/server.go:131
+      +2 stmts · called by web.(*Server).prebuild, web.(*Server).Handler · 1 in tests
+  [edit] web.index  internal/web/server.go:54
+      +1 field · used by web.prebuilt, web.(*Server).prebuild, web.(*Server).Index, 1 more · 2 in tests
+  …
+  [import] huginn/internal/web → huginn/internal/silos  internal/web/server.go:90
+      new import · 4 references · out of the scope
+
 Impact
-  22 call sites (approx.) in 15 declarations, 2 packages
+  11 call sites (approx.) in 9 declarations, 2 packages · 11 more in tests
   outside the scope: 1 call site in 1 declaration, 1 package
     huginn/cmd/huginn
-  web.TestPrebuilt  internal/web/prebuilt_test.go:17  ×5 (approx., test)
   web.(*Server).prebuild  internal/web/prebuilt.go:106  ×2
-  web.TestSavedResponses  internal/web/saved_test.go:14  ×2 (approx., test)
+  web.(*Server).Index  internal/web/server.go:79  ×2
+  main.serve  cmd/huginn/main.go:158  ×1 (approx., outside)
   … and 12 more
 
 Relations
@@ -410,13 +431,19 @@ merge request's branch, the branch it goes into and any folders (each
 field suggests what the repository has), and the page reviews it without
 waiting for the history to be indexed. What it reviews is kept in the
 address, as `/review?head=feature&path=services/billing`, so a review can be
-shared or bookmarked. Under the numbers, a diagram lays the packages out
+shared or bookmarked. The page opens on the same order as the report: the
+key numbers, counting production code, then *Look here first*, whose
+symbols lead to their changes. Under it, a diagram lays the packages out
 in three columns: in the middle what changed (with folders, the packages in
 them), on the left the packages that call into it, and on the right those
 it uses. Its lines are the calls into what changed, weighted by call sites,
 and the imports and references the merge request starts and stops; point
 at a package to trace its lines, and pick it to narrow the callers,
-relations and changes listed below to the ones that involve it.
+relations and changes listed below to the ones that involve it. The
+callers list production code unless asked for the tests too. The changes
+show the edits of existing code in full, a changed type by its members and
+whose code each breaks; the new code, by file, and the changes to tests
+are folded away. The types it touches and the files come last.
 
 #### Affinity matrix of the types it touches
 
@@ -424,7 +451,9 @@ For each struct type the merge request touches (methods or definition, at
 least three methods, the twelve largest), the review reads the type's
 affinity matrix, the technique for finding the seams in a God object, on
 either side of the change, and says first what the change does to it. The
-page shows the whole reading; `huginn review` prints what the change does
+page shows the whole reading, folded away under what the change does, since
+it is for planning a split rather than reviewing the change; warnings also
+go to *Look here first*. `huginn review` prints what the change does
 and where to start.
 
 - **The matrix.** A row per method, private ones too, and a column per

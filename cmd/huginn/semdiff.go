@@ -158,22 +158,32 @@ func (p *printer) changes(r *semdiff.Report) {
 	}
 }
 
-// blast prints the blast radius under title. In a scoped report it also
-// says how much of it lies outside the scope, and lists only those
-// packages.
+// blast prints the blast radius under title: the production code it
+// reaches, then how much more lies in tests, which are counted apart since
+// they often outnumber it many times. In a scoped report it also says how
+// much of the production code lies outside the scope, and lists only those
+// packages. The callers are listed production code first.
 func (p *printer) blast(title string, r *semdiff.Report) {
 	b := r.Blast
+	prod, tests := sumCallers(b.Callers, isProduction), sumCallers(b.Callers, isTest)
 	p.printf("\n%s\n", title)
-	if b.CallSites == 0 {
+	switch {
+	case prod.decls == 0 && tests.decls == 0:
 		p.printf("  no callers outside the change\n")
-	} else {
-		sites := plural(b.CallSites, "call site")
-		if b.Approximate {
+	case prod.decls == 0:
+		p.printf("  no callers outside tests · %s in tests\n", plural(tests.sites, "call site"))
+	default:
+		sites := plural(prod.sites, "call site")
+		if prod.approx {
 			sites += " (approx.)"
 		}
-		p.printf("  %s in %s, %s\n", sites, plural(len(b.Callers), "declaration"), plural(len(b.Packages), "package"))
+		p.printf("  %s in %s, %s", sites, plural(prod.decls, "declaration"), plural(len(prod.pkgs), "package"))
+		if tests.decls > 0 {
+			p.printf(" · %d more in tests", tests.sites)
+		}
+		p.printf("\n")
 		if !p.scoped {
-			for _, pkg := range b.Packages {
+			for _, pkg := range prod.pkgs {
 				p.printf("    %s\n", pkg)
 			}
 		} else if out := outside(b.Callers); out.decls == 0 {
@@ -189,28 +199,56 @@ func (p *printer) blast(title string, r *semdiff.Report) {
 	if b.ExportedAPIChanged() {
 		p.printf("  exported API changed: %s\n", strings.Join(b.APIChanges, ", "))
 	}
-	p.callers("  ", b.Callers, 3*p.maxCallers)
+	p.callers("  ", productionFirst(b.Callers), 3*p.maxCallers)
 }
 
-// outsideCallers sums up the callers outside a report's scope.
-type outsideCallers struct {
+func isProduction(c semdiff.Caller) bool { return !c.Test }
+func isTest(c semdiff.Caller) bool       { return c.Test }
+
+// productionFirst returns callers with those in test files moved last,
+// each part in its order.
+func productionFirst(cs []semdiff.Caller) []semdiff.Caller {
+	out := slices.Clone(cs)
+	slices.SortStableFunc(out, func(a, b semdiff.Caller) int {
+		switch {
+		case a.Test == b.Test:
+			return 0
+		case b.Test:
+			return -1
+		}
+		return 1
+	})
+	return out
+}
+
+// callerSum sums up some of a report's callers.
+type callerSum struct {
 	sites, decls int
 	pkgs         []string // sorted
+	approx       bool
 }
 
-func outside(cs []semdiff.Caller) outsideCallers {
-	var out outsideCallers
+// sumCallers sums up the callers keep holds for.
+func sumCallers(cs []semdiff.Caller, keep func(semdiff.Caller) bool) callerSum {
+	var out callerSum
 	for _, cl := range cs {
-		if cl.Outside {
-			out.sites += cl.Calls
-			out.decls++
-			if !slices.Contains(out.pkgs, cl.Package) {
-				out.pkgs = append(out.pkgs, cl.Package)
-			}
+		if !keep(cl) {
+			continue
+		}
+		out.sites += cl.Calls
+		out.decls++
+		out.approx = out.approx || cl.Approximate
+		if !slices.Contains(out.pkgs, cl.Package) {
+			out.pkgs = append(out.pkgs, cl.Package)
 		}
 	}
 	slices.Sort(out.pkgs)
 	return out
+}
+
+// outside sums up the production callers outside a report's scope.
+func outside(cs []semdiff.Caller) callerSum {
+	return sumCallers(cs, func(c semdiff.Caller) bool { return c.Outside && !c.Test })
 }
 
 // noise lists the files whose changes do not matter semantically.

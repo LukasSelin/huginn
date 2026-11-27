@@ -138,12 +138,119 @@ func (p *printer) review(rv *review.Review) {
 	p.printf("\n")
 	r := rv.Report
 	p.summary(r)
+	p.focus(rv)
 	p.blast("Impact", r)
 	p.relations(r.Relations)
 	p.types(rv.Types)
 	p.files(r)
 	p.changes(r)
 	p.noise(r)
+}
+
+// The focus lists up to focusEdits edits of existing code and counts the
+// rest; each item names up to reachNames of the declarations it reaches.
+const (
+	focusEdits = 6
+	reachNames = 3
+)
+
+// noFocus is what the focus says when there is nothing in it.
+const noFocus = "nothing beyond new code: no existing code is edited and no import between packages starts"
+
+// shownFocus returns the focus items to list and how many edits of
+// existing code it leaves out.
+func shownFocus(fs []review.Focus) (shown []review.Focus, more int) {
+	edits := 0
+	for _, f := range fs {
+		if f.Kind == review.FocusBehavior {
+			if edits++; edits > focusEdits {
+				more++
+				continue
+			}
+		}
+		shown = append(shown, f)
+	}
+	return shown, more
+}
+
+// focusLabel names a focus item's kind as the reports print it.
+func focusLabel(k review.FocusKind) string {
+	switch k {
+	case review.FocusBreaking:
+		return "breaking"
+	case review.FocusBehavior:
+		return "edit"
+	case review.FocusDependency:
+		return "import"
+	case review.FocusStructure:
+		return "blocks"
+	}
+	return k.String()
+}
+
+// focusDetail says what a focus item changed, why it matters and what it
+// reaches, names formatted by name: "+3 stmts · called by a, b and 2 more ·
+// 12 in tests".
+func focusDetail(f review.Focus, r *semdiff.Report, name func(string) string) string {
+	parts := []string{f.What}
+	if f.Why != "" {
+		parts = append(parts, f.Why)
+	}
+	verb := "used by"
+	switch {
+	case f.Implementers:
+		verb = "implemented by"
+	case f.Change >= 0 && (r.Changes[f.Change].Symbol == "func" || r.Changes[f.Change].Symbol == "method"):
+		verb = "called by"
+	}
+	switch {
+	case len(f.Reaches) > 0:
+		var names []string
+		for i, c := range f.Reaches {
+			if i == reachNames {
+				names = append(names, fmt.Sprintf("%d more", len(f.Reaches)-reachNames))
+				break
+			}
+			names = append(names, name(c.Name))
+		}
+		parts = append(parts, verb+" "+strings.Join(names, ", "))
+	case f.Implementers:
+		parts = append(parts, "no implementer found outside the change")
+	case f.Kind == review.FocusBehavior && f.Tests == 0:
+		parts = append(parts, "nothing calls it")
+	case f.Kind == review.FocusBehavior:
+		parts = append(parts, "only tests use it")
+	}
+	if f.Tests > 0 {
+		parts = append(parts, fmt.Sprintf("%d in tests", f.Tests))
+	}
+	return strings.Join(parts, " · ")
+}
+
+// at locates a focus item: "path:line", the path alone, or nothing.
+func at(f review.Focus) string {
+	if f.Line > 0 {
+		return fmt.Sprintf("%s:%d", f.Path, f.Line)
+	}
+	return f.Path
+}
+
+// focus prints what to look at first: what the change does that its diff
+// does not show.
+func (p *printer) focus(rv *review.Review) {
+	p.printf("\nLook here first\n")
+	shown, more := shownFocus(rv.Focus)
+	if len(shown) == 0 {
+		p.printf("  %s\n", noFocus)
+		return
+	}
+	for _, f := range shown {
+		p.printf("  [%s] %s  %s\n", focusLabel(f.Kind), f.Name, at(f))
+		p.printf("      %s\n", focusDetail(f, rv.Report, func(s string) string { return s }))
+	}
+	if more > 0 {
+		p.printf("  … and %s of existing code under Changes\n", plural(more, "more edit"))
+	}
 }
 
 // types prints, for each struct type the change touches, what it does to
