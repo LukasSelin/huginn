@@ -234,6 +234,16 @@ git log / cat-file ──► internal/git ──► internal/ast ──► inter
   (the module path inferred by **internal/modpath**, as the journey does),
   and ranks silos, departures and cross-knowledge coupling.
 
+The packages are stacked in layers, and depguard rules in `.golangci.yml`
+keep them that way: foundation (`ast`, `git`, `modpath`), history
+(`lineage`, `knowledge`, `codemap`), analyses (`journey`, `health`,
+`semdiff`), reports (`story`, `silos`), then `web` and `cmd/huginn`. A
+package may import the layers below its own; analyses don't import each
+other, and neither do reports. Only test files may import
+`internal/gittest`. CI runs `golangci-lint run`, which fails on an import
+that breaks these rules; a new package needs a layer in `.golangci.yml`
+before others can import it.
+
 ### Index cache
 
 `symbols` and `serve` store each walked commit's symbol changes in

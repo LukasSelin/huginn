@@ -1,0 +1,116 @@
+version: "2"
+
+# Only depguard for now: it enforces the layering below. Other linters can be
+# turned on separately without mixing their findings into the boundary rules.
+linters:
+  default: none
+  enable:
+    - depguard
+  settings:
+    depguard:
+      # The packages are stacked in layers, bottom to top:
+      #
+      #   foundation  internal/ast, internal/git, internal/modpath
+      #   history     internal/lineage, internal/knowledge, internal/codemap
+      #   analyses    internal/journey, internal/health, internal/semdiff
+      #   reports     internal/story, internal/silos
+      #   ui          internal/web
+      #   cmd         cmd/huginn (may use anything)
+      #
+      # A package may use the layers below its own. Foundation and history
+      # packages may also use each other; analyses don't use each other, and
+      # neither do reports. Each rule lists everything its layer may import
+      # (strict), so no layer can use a new package until it is given a
+      # layer here; the new package's own imports go unchecked until then.
+      #
+      # Test files are left out: tests may reach across layers.
+      # A trailing $ matches that package only, not every path it prefixes
+      # (internal/git would also match internal/gittest).
+      rules:
+        foundation:
+          list-mode: strict
+          files:
+            - "**/internal/ast/*.go"
+            - "**/internal/git/*.go"
+            - "**/internal/modpath/*.go"
+            - "!$test"
+          allow:
+            - $gostd
+            - huginn/internal/ast$
+            - huginn/internal/git$
+            - huginn/internal/modpath$
+        history:
+          list-mode: strict
+          files:
+            - "**/internal/lineage/*.go"
+            - "**/internal/knowledge/*.go"
+            - "**/internal/codemap/*.go"
+            - "!$test"
+          allow:
+            - $gostd
+            - huginn/internal/ast$
+            - huginn/internal/git$
+            - huginn/internal/modpath$
+            - huginn/internal/lineage$
+            - huginn/internal/knowledge$
+            - huginn/internal/codemap$
+        analyses:
+          list-mode: strict
+          files:
+            - "**/internal/journey/*.go"
+            - "**/internal/health/*.go"
+            - "**/internal/semdiff/*.go"
+            - "!$test"
+          allow:
+            - $gostd
+            - huginn/internal/ast$
+            - huginn/internal/git$
+            - huginn/internal/modpath$
+            - huginn/internal/lineage$
+            - huginn/internal/knowledge$
+            - huginn/internal/codemap$
+        reports:
+          list-mode: strict
+          files:
+            - "**/internal/story/*.go"
+            - "**/internal/silos/*.go"
+            - "!$test"
+          allow:
+            - $gostd
+            - huginn/internal/ast$
+            - huginn/internal/git$
+            - huginn/internal/modpath$
+            - huginn/internal/lineage$
+            - huginn/internal/knowledge$
+            - huginn/internal/codemap$
+            - huginn/internal/journey$
+            - huginn/internal/health$
+            - huginn/internal/semdiff$
+        ui:
+          list-mode: strict
+          files:
+            - "**/internal/web/*.go"
+            - "!$test"
+          allow:
+            - $gostd
+            - huginn/internal/ast$
+            - huginn/internal/git$
+            - huginn/internal/modpath$
+            - huginn/internal/lineage$
+            - huginn/internal/knowledge$
+            - huginn/internal/codemap$
+            - huginn/internal/journey$
+            - huginn/internal/health$
+            - huginn/internal/semdiff$
+            - huginn/internal/story$
+            - huginn/internal/silos$
+        # internal/gittest builds throwaway repositories for tests; nothing
+        # else may depend on it.
+        test-helpers-only-in-tests:
+          files:
+            - "$all"
+            - "!$test"
+            - "!**/internal/gittest/*.go"
+          deny:
+            - pkg: huginn/internal/gittest
+              desc: internal/gittest is for tests only
