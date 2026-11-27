@@ -74,6 +74,7 @@ func (idx *index) implementers(old, cur *ast.Symbol, pkg string) []Caller {
 			Line:        ts.sym.StartLine,
 			Approximate: true,
 			Test:        strings.HasSuffix(ts.file.Path, "_test.go"),
+			Outside:     idx.isOutside(ts.file.Path),
 		})
 	}
 	sortCallers(out)

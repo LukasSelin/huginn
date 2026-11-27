@@ -30,7 +30,12 @@ type index struct {
 	types       []typeSite             // type declarations, for implementer search
 	methodSets  map[string]methodSet   // methods by symID of the receiver base type
 	methodFiles map[string][]*ast.File // files declaring them, by the same id
+
+	outside func(path string) bool // whether a file is outside Input.Scope; nil without one
 }
+
+// isOutside reports whether the file at path is outside Input.Scope.
+func (idx *index) isOutside(path string) bool { return idx.outside != nil && idx.outside(path) }
 
 // symID identifies a symbol across a tree: its package import path and its
 // key without the "#n" suffix for repeated names.
@@ -142,6 +147,7 @@ func (idx *index) callers(s *ast.Symbol, pkg string, record func(callerID, Calle
 				Path:    st.file.Path,
 				Line:    st.caller.StartLine,
 				Test:    strings.HasSuffix(st.file.Path, "_test.go"),
+				Outside: idx.isOutside(st.file.Path),
 			}
 			byCaller[id] = c
 			order = append(order, id)
