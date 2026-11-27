@@ -133,22 +133,27 @@ func (m *markdown) impact(b semdiff.BlastRadius, scoped bool) {
 			m.printf("| … and %d more | | |\n", len(b.Callers)-limit)
 			break
 		}
-		var notes []string
-		if cl.Approximate {
-			notes = append(notes, "approx.")
-		}
-		if cl.Test {
-			notes = append(notes, "test")
-		}
-		if cl.Outside {
-			notes = append(notes, "**outside**")
-		}
-		note := ""
-		if len(notes) > 0 {
-			note = " " + strings.Join(notes, ", ")
-		}
-		m.printf("| %s | %s | ×%d%s |\n", code(cl.Name), code(fmt.Sprintf("%s:%d", cl.Path, cl.Line)), cl.Calls, note)
+		m.printf("| %s | %s | ×%d%s |\n", code(cl.Name), code(fmt.Sprintf("%s:%d", cl.Path, cl.Line)), cl.Calls, callerNote(cl))
 	}
+}
+
+// callerNote is what the Uses column adds after a caller's count: whether
+// the caller is approximate, a test or outside the scope.
+func callerNote(cl semdiff.Caller) string {
+	var notes []string
+	if cl.Approximate {
+		notes = append(notes, "approx.")
+	}
+	if cl.Test {
+		notes = append(notes, "test")
+	}
+	if cl.Outside {
+		notes = append(notes, "**outside**")
+	}
+	if len(notes) == 0 {
+		return ""
+	}
+	return " " + strings.Join(notes, ", ")
 }
 
 func (m *markdown) relations(rel semdiff.Relations) {
