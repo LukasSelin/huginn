@@ -91,6 +91,25 @@ func TestFocusJSON(t *testing.T) {
 	if fs[1].Exit != nil {
 		t.Errorf("an edit's exit = %+v", fs[1].Exit)
 	}
+	if fs[0].Through != nil || c.ThroughAt != -1 {
+		t.Errorf("an item alone meets at %+v, step %d", fs[0].Through, c.ThroughAt)
+	}
+
+	// Listed with others, an item says where their paths meet, and where
+	// its own path passes there.
+	grouped := review.Focus{
+		Kind: review.FocusExternal, Name: "billing.Charge", Change: 2,
+		Through: review.Step{Package: "example.com/shop/payments", Name: "payments.Authorize"},
+		Capabilities: []review.Capability{{Name: "NETWORK", Path: []review.Step{
+			{Package: "example.com/shop/billing", Name: "billing.Charge"},
+			{Package: "example.com/shop/payments", Name: "payments.Authorize", Path: "billing/billing.go", Line: 6},
+			{Package: "net/http", Name: "http.Get", Path: "payments/payments.go", Line: 6},
+		}}},
+	}
+	g := focusesJSON([]review.Focus{grouped})[0]
+	if g.Through == nil || g.Through.Name != "payments.Authorize" || g.Through.Path != "" || g.Capabilities[0].ThroughAt != 1 {
+		t.Errorf("grouped: through %+v, at step %d", g.Through, g.Capabilities[0].ThroughAt)
+	}
 }
 
 func TestReviewOptions(t *testing.T) {

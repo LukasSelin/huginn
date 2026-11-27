@@ -127,7 +127,7 @@ The UI is backed by a small JSON API:
 | `GET /api/layers?step=commit\|week\|month` | every frame's live packages with their layer, and the references between them, marking those that run within a cycle; packages carry the journey's map layout |
 | `GET /api/affinity/types?months=n` | the struct types with methods, ranked by how much they seem to do, with edits counted over the last `n` months (12; 0 for all history) |
 | `GET /api/affinity?type=id\|name=dir.Type&months=n` | one type's affinity report, as `huginn affinity -json` prints it: the matrix, blocks, findings, change coupling, clients, names, suggested order and disagreements |
-| `GET /api/review?head=rev&base=rev&path=dir` | a merge request's review, as `huginn review` reports it, with what to look at first under `focus`: `head` defaults to `HEAD`, `base` to the remote's default branch, and `path`, repeated, limits it to folders; works while indexing. With `caps=1`, and capslock on `PATH`, it also traces what the change reaches outside the process, under each item's `capabilities`, with the call the first of them leaves the changed code by under `exit` (items leaving by the same call come one after another), and on each capability `leavesChange` and `leaves`, the steps of its path leaving the changed code and the repository's, and says so in `traced` |
+| `GET /api/review?head=rev&base=rev&path=dir` | a merge request's review, as `huginn review` reports it, with what to look at first under `focus`: `head` defaults to `HEAD`, `base` to the remote's default branch, and `path`, repeated, limits it to folders; works while indexing. With `caps=1`, and capslock on `PATH`, it also traces what the change reaches outside the process, under each item's `capabilities`, with the call the first of them leaves the changed code by under `exit` (items leaving by the same call come one after another), where the group's paths meet under `through`, and on each capability `leavesChange` and `leaves`, the steps of its path leaving the changed code and the repository's, and `throughAt`, the step passing where they meet, and says so in `traced` |
 | `GET /api/review/options?head=rev` | what the review page offers to pick from: the branch checked out, the default target, every branch, and the directories holding Go code at `head` |
 
 ### `huginn silos`
@@ -457,36 +457,39 @@ base: existing code that now reaches somewhere new comes first, then new
 code, then edits of code that already did.
 
 Several of the changed functions often reach outside through the same
-changed line: a helper the change edits, and the entry points calling it.
-The line that matters is where a path leaves the code the change adds or
-edits, the call the last changed function on it makes, rather than the
-call deep in unchanged code that finally leaves the repository. The
-functions leaving the changed code by the same call, the same function
-called on the same line, are listed together under it, where the first
-of them would be. The call, what it leads to and where it is made are
-named once, with where the path leaves the repository when that is
-further on, and each function's path stops at the call:
+changed code: entry points calling a helper the change adds or edits. The
+functions whose paths leave the changed code by the same call, the one
+the last changed function on them makes rather than the call deep in
+unchanged code that finally leaves the repository, are listed together,
+where the first of them would be. The group starts where their paths
+meet: the first function on the path that all its entry points pass
+through, those no other function in the group calls on its way out. From
+there the path is named once, with where that function is declared, how
+many changes reach outside through it, and where the path leaves the
+changed code and the repository's. Each function's own path stops where
+they meet:
 
 ```
 Look here first
-  [external] client.Do → http.Get → … → net.(*Dialer).DialContext  payments/payments.go:6
-      3 changes reach outside through this call, leaving the repository's code at client/client.go:9
-      billing.Charge  billing/billing.go:5
-          +2 stmts · cyclomatic 1 → 2 · called by sync.Nightly
-          network (new): payments.Authorize → client.Do
+  [external] payments.Authorize → client.Do → http.Get  payments/payments.go:5
+      3 changes reach outside through it, leaving the changed code at payments/payments.go:6 and the repository's at client/client.go:6
       payments.Authorize  payments/payments.go:5
-          +1 stmt · cyclomatic 1 → 2 · called by billing.Charge, billing.Refund
-          network (new): client.Do
+          cyclomatic 1 → 2 · called by billing.Charge, billing.Refund
+          network (new)
+      billing.Charge  billing/billing.go:5
+          +2 stmts · cyclomatic 1 → 2 · nothing calls it
+          network (new): payments.Authorize
       billing.Refund  billing/billing.go:12
           new func · 1 stmt · cyclomatic 1 · nothing calls it
-          network (new): payments.Authorize → client.Do
+          network (new): payments.Authorize
 ```
 
 A function is grouped by the call its first capability leaves the changed
 code by, the capability the change makes or, of those, the furthest out;
 its other ways out are listed in full. `-format json` gives each item's
-call under `Exit`, and each capability's `LastChanged`, the index on its
-path of the last function the change adds or edits.
+call under `Exit` and where the group's paths meet under `Through`, and
+each capability's `LastChanged`, the index on its path of the last
+function the change adds or edits.
 
 To tell, huginn checks out the head and the merge base into temporary
 clones that borrow the repository's objects, and runs capslock on the

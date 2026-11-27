@@ -176,35 +176,34 @@ const noFocus = "nothing beyond new code: no existing code is edited and no impo
 const noneOutside = "traced with capslock: nothing the change adds or edits reaches the network, files or other programs"
 
 // focusRun is a focus item alone, or the FocusExternal items leaving the
-// changed code by the same call, which the focus lists together:
-// items are those shown, of total.
+// changed code by the same call, which the focus lists together: all of
+// them, of which items are shown.
 type focusRun struct {
-	items []review.Focus
-	total int
+	items, all []review.Focus
 }
 
-// grouped reports whether the run lists items under the call they leave
-// the changed code by.
-func (r focusRun) grouped() bool { return r.total > 1 }
+// grouped reports whether the run lists items together, under where their
+// paths meet.
+func (r focusRun) grouped() bool { return len(r.all) > 1 }
 
 // focusRuns cuts the focus into runs: each FocusExternal item with those
 // right after it sharing its exit, and every other item alone.
 func focusRuns(fs []review.Focus) []focusRun {
 	var out []focusRun
 	for _, f := range fs {
-		if n := len(out); n > 0 && out[n-1].items[0].SameExit(f) {
-			out[n-1].items = append(out[n-1].items, f)
-			out[n-1].total++
+		if n := len(out); n > 0 && out[n-1].all[0].SameExit(f) {
+			out[n-1].all = append(out[n-1].all, f)
+			out[n-1].items = out[n-1].all
 			continue
 		}
-		out = append(out, focusRun{items: []review.Focus{f}, total: 1})
+		out = append(out, focusRun{items: []review.Focus{f}, all: []review.Focus{f}})
 	}
 	return out
 }
 
 // shownFocus returns the focus runs to list and how many changes reaching
 // outside the process and edits of existing code it leaves out. A run of
-// changes reaching outside keeps its total when only some of its items fit.
+// changes reaching outside keeps all its items when only some of them fit.
 func shownFocus(fs []review.Focus) (shown []focusRun, moreOutside, moreEdits int) {
 	outside, edits := 0, 0
 	for _, r := range focusRuns(fs) {
@@ -251,9 +250,10 @@ func tracedNothing(rv *review.Review) bool {
 // capabilityText says how a focus item reaches outside the process,
 // "network (new): payments.Authorize → http.Get → … → net.(*Dialer).Dial",
 // names formatted by name, and where the call leaving the repository's code
-// is made: "payments/payments.go:6", or "". Listed under the call it leaves
-// the changed code by (grouped), a path leaving by that call stops there,
-// and the rest is left to the group to say.
+// is made: "payments/payments.go:6", or "". Listed with the items sharing
+// its exit (grouped), a path leaving by that call stops where their paths
+// meet, or at the call when it does not pass there, and the rest is left
+// to the group to say.
 func capabilityText(f review.Focus, c review.Capability, name func(string) string, grouped bool) (text, where string) {
 	text = c.Label()
 	if c.New {
@@ -263,6 +263,9 @@ func capabilityText(f review.Focus, c review.Capability, name func(string) strin
 	exit, ok := c.Exit()
 	if shared, sharedOK := f.Exit(); grouped && ok && sharedOK && exit == shared {
 		steps, elided, at = c.Path[:c.LeavesChange()+1], 0, -1
+		if t := f.ThroughAt(c); t >= 0 {
+			steps = c.Path[:t+1]
+		}
 	}
 	if len(steps) > 0 && steps[0].Name == f.Name {
 		steps = steps[1:] // the item itself, unless the path starts in a function literal of it
@@ -276,28 +279,55 @@ func capabilityText(f review.Focus, c review.Capability, name func(string) strin
 	return text, where
 }
 
-// exitText says how the items of a run leave the changed code: by the call
-// they share and what it leads to, "client.Do → http.Get → … →
-// net.(*Dialer).DialContext", names formatted by name, made at
-// "payments/payments.go:6".
+// exitText says how the items of a run reach outside: from the function
+// where their paths meet, the first they share, on to the capability,
+// "billing.(*Service).build → payments.Authorize → client.Do → … →
+// net.(*Dialer).DialContext", names formatted by name, and where that
+// function is declared when it is one of them, else where the call
+// leaving the changed code is made. Without a meeting function, the path
+// starts at that call.
 func exitText(r focusRun, name func(string) string) (text, where string) {
-	c := r.items[0].Capabilities[0]
-	i := c.LeavesChange()
-	return pathText(c.Path[i:], c.Elided, name), fmt.Sprintf("%s:%d", c.Path[i].Path, c.Path[i].Line)
+	first := r.all[0].Capabilities[0]
+	from, elided := first.Path[first.LeavesChange():], first.Elided
+	where = site(from[0])
+	met := false
+	for _, f := range r.all {
+		c := f.Capabilities[0]
+		t := f.ThroughAt(c)
+		if t == 0 {
+			where = at(f)
+		}
+		if t >= 0 && !met {
+			from, elided, met = c.Path[t:], c.Elided, true
+		}
+	}
+	return pathText(from, elided, name), where
 }
 
-// exitDetail says how many changes reach outside through a run's call and,
-// when the path leaves the repository's code further on, where, formatted
-// by code: "2 changes reach outside through this call, leaving the
-// repository's code at client/client.go:9".
+// exitDetail says how many changes reach outside through a run, and where
+// their path leaves the changed code and the repository's, formatted by
+// code: "3 changes reach outside through it, leaving the changed code at
+// billing/service.go:12 and the repository's at client/client.go:9".
 func exitDetail(r focusRun, code func(string) string) string {
-	text := plural(r.total, "change") + " reach outside through this call"
-	c := r.items[0].Capabilities[0]
-	if i := c.Leaves(); i != c.LeavesChange() {
-		text += ", leaving the repository's code at " + code(fmt.Sprintf("%s:%d", c.Path[i].Path, c.Path[i].Line))
+	c := r.all[0].Capabilities[0]
+	change, repo := site(c.Path[c.LeavesChange()]), site(c.Path[c.Leaves()])
+	text := plural(len(r.all), "change") + " reach outside through "
+	switch {
+	case r.all[0].Through.Name == "":
+		text += "this call"
+		if repo != change {
+			text += ", leaving the repository's code at " + code(repo)
+		}
+	case repo != change:
+		text += "it, leaving the changed code at " + code(change) + " and the repository's at " + code(repo)
+	default:
+		text += "it, leaving the repository's code at " + code(repo)
 	}
 	return text
 }
+
+// site says where a call is made: "payments/payments.go:6".
+func site(s review.Step) string { return fmt.Sprintf("%s:%d", s.Path, s.Line) }
 
 // pathText joins the names of a path's steps with arrows, names formatted
 // by name, "…" standing for the elided calls before the last and for the

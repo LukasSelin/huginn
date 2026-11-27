@@ -85,6 +85,12 @@ type Focus struct {
 	// Capabilities are the ways a FocusExternal item reaches outside the
 	// process, those the change makes first.
 	Capabilities []Capability
+
+	// Through, for a FocusExternal item listed with others leaving the
+	// changed code by the same call, names the function where their paths
+	// meet (see meet), with no Path or Line; it is zero for an item listed
+	// alone. The group is shown from it.
+	Through Step
 }
 
 // Exit returns the call by which a FocusExternal item's first capability
@@ -99,12 +105,31 @@ func (f Focus) Exit() (Step, bool) {
 	return f.Capabilities[0].Exit()
 }
 
-// SameExit reports whether f and g leave the repository's code by the same
+// SameExit reports whether f and g leave the changed code by the same
 // call: the same function, called on the same line.
 func (f Focus) SameExit(g Focus) bool {
 	x, okF := f.Exit()
 	y, okG := g.Exit()
 	return okF && okG && x == y
+}
+
+// ThroughAt returns the index on the path of c, one of f's capabilities, of
+// the function f.Through names: 0 when f is that function, and -1 when the
+// path does not pass through it or f is listed alone.
+func (f Focus) ThroughAt(c Capability) int {
+	if f.Through.Name == "" || len(c.Path) == 0 {
+		return -1
+	}
+	if (Step{Package: c.Path[0].Package, Name: f.Name}) == f.Through {
+		return 0
+	}
+	return slices.IndexFunc(c.Path, func(s Step) bool { return function(s) == f.Through })
+}
+
+// function names the function a step of a path is in, a function literal
+// counting as the function declaring it, without where it is called.
+func function(s Step) Step {
+	return Step{Package: s.Package, Name: declaredName(s.Name)}
 }
 
 // MarshalJSON encodes an item's fields and, under "Exit", the call Exit
@@ -168,7 +193,9 @@ func focus(r *semdiff.Report, types []TypeReview, caps map[int][]Capability) []F
 		return cmp.Or(cmp.Compare(novelty(r, b), novelty(r, a)), byWeight(a, b))
 	})
 
-	out := append(byExit(external), breaking...)
+	external = byExit(external)
+	meet(external)
+	out := append(external, breaking...)
 	out = append(out, behavior...)
 	out = append(out, dependencies(r.Relations)...)
 	for _, t := range types {
@@ -201,6 +228,61 @@ func byExit(fs []Focus) []Focus {
 		out[k] = fs[i]
 	}
 	return out
+}
+
+// meet sets Through on the items of each group byExit put together: the
+// function where their paths meet, which the group is shown from.
+func meet(fs []Focus) {
+	for i := 0; i < len(fs); {
+		j := i + 1
+		for j < len(fs) && fs[i].SameExit(fs[j]) {
+			j++
+		}
+		if s, ok := meeting(fs[i:j]); ok && j-i > 1 {
+			for k := i; k < j; k++ {
+				fs[k].Through = s
+			}
+		}
+		i = j
+	}
+}
+
+// meeting returns the function where the paths of items leaving the
+// changed code by the same call meet: of the items no other one's path
+// passes through, the entry points, the first function on the first
+// entry point's path that all of theirs pass through. Entry points calling
+// a changed builder that goes on to the call meet at the builder, the
+// first function they share, rather than at the call itself.
+func meeting(items []Focus) (Step, bool) {
+	paths := make([][]Step, len(items)) // each item's first path, to where it leaves the changed code
+	self := make([]Step, len(items))
+	for i, f := range items {
+		c := f.Capabilities[0]
+		paths[i] = c.Path[:c.LeavesChange()+1]
+		self[i] = Step{Package: c.Path[0].Package, Name: f.Name}
+	}
+	passes := func(path []Step, fn Step) bool {
+		return slices.ContainsFunc(path[1:], func(s Step) bool { return function(s) == fn })
+	}
+	var entries [][]Step
+	for i := range items {
+		reached := false
+		for j := range items {
+			reached = reached || (j != i && passes(paths[j], self[i]))
+		}
+		if !reached {
+			entries = append(entries, paths[i])
+		}
+	}
+	if len(entries) == 0 {
+		return Step{}, false
+	}
+	for _, s := range entries[0][1:] {
+		if fn := function(s); !slices.ContainsFunc(entries, func(p []Step) bool { return !passes(p, fn) }) {
+			return fn, true
+		}
+	}
+	return Step{}, false
 }
 
 // novelty ranks an item reaching outside the process: 2 for existing code

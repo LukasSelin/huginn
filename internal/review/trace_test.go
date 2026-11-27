@@ -150,6 +150,15 @@ func TestTrace(t *testing.T) {
 	if c.LastChanged != 1 || c.LeavesChange() != 2 {
 		t.Errorf("last changed at step %d, leaves the change at %d; want Authorize, which the change edits, and its call", c.LastChanged, c.LeavesChange())
 	}
+	// Charge and Refund call Authorize, so the three meet there.
+	for _, f := range rv.Focus[:3] {
+		if f.Through != (Step{Package: "example.com/shop/payments", Name: "payments.Authorize"}) {
+			t.Errorf("%s meets the others at %+v, want payments.Authorize", f.Name, f.Through)
+		}
+	}
+	if rv.Focus[3].Through != (Step{}) {
+		t.Errorf("store.Load, alone, meets at %+v", rv.Focus[3].Through)
+	}
 	if refund := rv.Focus[2]; refund.What != "new func · 1 stmt · cyclomatic 1" || !refund.Capabilities[0].New {
 		t.Errorf("Refund: what %q, capabilities %+v", refund.What, refund.Capabilities)
 	}

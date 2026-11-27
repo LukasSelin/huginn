@@ -190,9 +190,11 @@ func TestReviewCapabilities(t *testing.T) {
 }
 
 // TestReviewCapabilitiesGrouped lists the changes reaching outside the
-// process under the call by which they leave the changed code, Authorize's
-// call to an unchanged client that goes on to the network, their paths
-// stopping at that call; and the change leaving elsewhere on its own.
+// process together when they leave the changed code by the same call,
+// Authorize's call to an unchanged client that goes on to the network:
+// from that call, or from where their paths meet when the review found it,
+// their own paths stopping there; and the change leaving elsewhere on its
+// own.
 func TestReviewCapabilitiesGrouped(t *testing.T) {
 	network := func(lastChanged int, steps ...review.Step) review.Capability {
 		return review.Capability{Name: "NETWORK", New: true, Elided: 1, LastChanged: lastChanged, Path: append(steps,
@@ -250,8 +252,39 @@ func TestReviewCapabilitiesGrouped(t *testing.T) {
 		t.Errorf("markdown:\n%s\nwant\n%s", md.String(), wantMD)
 	}
 
-	// Past focusEdits items, a group shows those that fit and keeps its
-	// total, and the rest are counted.
+	// Where their paths meet, at Authorize, which Charge calls, the group
+	// starts there, and each path stops there: Authorize's is all above.
+	for i := range 2 {
+		rv.Focus[i].Through = review.Step{Name: "payments.Authorize"}
+	}
+	text.Reset()
+	(&printer{w: &text}).focus(rv)
+	want = "  [external] payments.Authorize → client.Do → http.Get → … → net.(*Dialer).DialContext  payments/payments.go:5\n" +
+		"      2 changes reach outside through it, leaving the changed code at payments/payments.go:6 and the repository's at client/client.go:9\n" +
+		"      payments.Authorize  payments/payments.go:5\n" +
+		"          +1 stmt · called by billing.Charge\n" +
+		"          network (new)\n" +
+		"      billing.Charge  billing/billing.go:5\n" +
+		"          +2 stmts · nothing calls it\n" +
+		"          network (new): payments.Authorize\n" +
+		"          files: os.ReadFile  billing/billing.go:8\n"
+	if !strings.Contains(text.String(), want) {
+		t.Errorf("text where the paths meet:\n%s\nwant\n%s", text.String(), want)
+	}
+	md.Reset()
+	(&markdown{w: &md}).focus(rv)
+	wantMD = "- **external** `payments.Authorize` → `client.Do` → `http.Get` → … → `net.(*Dialer).DialContext` at `payments/payments.go:5`: " +
+		"2 changes reach outside through it, leaving the changed code at `payments/payments.go:6` and the repository's at `client/client.go:9`\n" +
+		"  - `payments.Authorize` at `payments/payments.go:5`: +1 stmt · called by `billing.Charge`\n" +
+		"    - network (new)\n" +
+		"  - `billing.Charge` at `billing/billing.go:5`: +2 stmts · nothing calls it\n" +
+		"    - network (new): `payments.Authorize`\n"
+	if !strings.Contains(md.String(), wantMD) {
+		t.Errorf("markdown where the paths meet:\n%s\nwant\n%s", md.String(), wantMD)
+	}
+
+	// Past focusEdits items, a group shows those that fit and keeps all of
+	// them for its header, and the rest are counted.
 	authorize := rv.Focus[0]
 	rv.Focus = nil
 	for range focusEdits + 2 {
@@ -261,8 +294,8 @@ func TestReviewCapabilitiesGrouped(t *testing.T) {
 	if len(shown) != 1 {
 		t.Fatalf("shown %d runs, want 1", len(shown))
 	}
-	if len(shown[0].items) != focusEdits || shown[0].total != focusEdits+2 || moreOutside != 2 {
-		t.Errorf("shown %d runs, the first %d items of %d, %d more", len(shown), len(shown[0].items), shown[0].total, moreOutside)
+	if len(shown[0].items) != focusEdits || len(shown[0].all) != focusEdits+2 || moreOutside != 2 {
+		t.Errorf("shown %d runs, the first %d items of %d, %d more", len(shown), len(shown[0].items), len(shown[0].all), moreOutside)
 	}
 }
 
