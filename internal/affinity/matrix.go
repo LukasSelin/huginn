@@ -83,26 +83,8 @@ func (a *Analyzer) newBuild(typ *ast.Symbol, opts Options) *build {
 		Columns: []Column{}, Rows: []Row{}, Blocks: []Block{}, Findings: []Finding{}, Steps: []Step{}, Notes: []Note{}}
 	b.r = r
 
-	colOf := map[string]int{}
-	var embedded []int
-	for _, m := range typ.Members {
-		if m.Kind != ast.MemberField && m.Kind != ast.MemberEmbedded || m.Name == "_" {
-			continue
-		}
-		j := len(r.Columns)
-		colOf[m.Name] = j
-		if m.Kind == ast.MemberEmbedded {
-			embedded = append(embedded, j)
-		}
-		r.Columns = append(r.Columns, Column{Name: m.Name, Type: m.Type, Embedded: m.Kind == ast.MemberEmbedded,
-			Decl: j, Group: m.Group, Line: m.Line, Block: -1})
-	}
-	rowOf := map[string]int{}
-	for i, s := range b.syms {
-		rowOf[s.Name] = i
-		r.Rows = append(r.Rows, Row{Sym: a.sym(s), Method: s.Name, Signature: s.Signature, Exported: s.Exported,
-			Decl: i, Stmts: s.Stmts, Cells: []Cell{}, Calls: []Call{}, Block: -1, Notes: []string{}})
-	}
+	t := b.addColumns()
+	t.rowOf = b.addRows()
 	nr, nc := len(r.Rows), len(r.Columns)
 	b.cell = make([][]use, nr)
 	b.call = make([][]int, nr)
@@ -112,52 +94,9 @@ func (a *Analyzer) newBuild(typ *ast.Symbol, opts Options) *build {
 		b.call[i] = make([]int, nr)
 		b.val[i] = make([]bool, nr)
 	}
-	mutex := -1
-	for _, j := range embedded {
-		if t := strings.TrimPrefix(r.Columns[j].Type, "*"); t == "sync.Mutex" || t == "sync.RWMutex" {
-			mutex = j
-		}
-	}
-
 	for i, s := range b.syms {
-		for _, fr := range s.FieldRefs {
-			if fr.Pkg != "" || fr.Type != typ.Name || fr.Name == "" {
-				continue
-			}
-			if j, ok := colOf[fr.Name]; ok {
-				b.mark(i, j, fr.Count, fr.Writes, fr.Methods, "")
-				continue
-			}
-			if k, ok := rowOf[fr.Name]; ok {
-				b.call[i][k] += fr.Count
-				b.val[i][k] = true
-				continue
-			}
-			if len(embedded) == 1 {
-				b.mark(i, embedded[0], fr.Count, fr.Writes, nil, "promoted")
-				continue
-			}
-			r.Unattributed += fr.Count
-		}
-		for _, ref := range s.Refs {
-			if ref.Kind != ast.RefMethod || ref.Recv != typ.Name {
-				continue
-			}
-			k, isMethod := rowOf[ref.Name]
-			j, isField := colOf[ref.Name]
-			switch {
-			case isMethod:
-				b.call[i][k] += ref.Count
-			case isField:
-				b.mark(i, j, ref.Count, 0, nil, "") // calls a func-typed field
-			case lockMethods[ref.Name] && mutex >= 0:
-				b.mark(i, mutex, ref.Count, 0, nil, ref.Name)
-			case len(embedded) == 1:
-				b.mark(i, embedded[0], ref.Count, 0, nil, "promoted")
-			default:
-				r.Unattributed += ref.Count
-			}
-		}
+		b.markFieldRefs(i, s, t)
+		b.markMethodRefs(i, s, t)
 	}
 	ctor := a.ctor[typeKey{r.Package, typ.Name}]
 	for j := range r.Columns {
@@ -165,6 +104,104 @@ func (a *Analyzer) newBuild(typ *ast.Symbol, opts Options) *build {
 	}
 	b.classify()
 	return b
+}
+
+// refTargets is what a name in a method body can stand for: a column or a
+// row by name, and the embedded columns a promoted name goes to. mutex is
+// the embedded sync.Mutex or sync.RWMutex, -1 when there is none.
+type refTargets struct {
+	colOf, rowOf map[string]int
+	embedded     []int
+	mutex        int
+}
+
+// addColumns adds a column for every named field of the type. It returns
+// the targets the columns make: by name, the embedded ones and the mutex;
+// the rows by name come from addRows.
+func (b *build) addColumns() refTargets {
+	r := b.r
+	t := refTargets{colOf: map[string]int{}, mutex: -1}
+	for _, m := range b.typ.Members {
+		if m.Kind != ast.MemberField && m.Kind != ast.MemberEmbedded || m.Name == "_" {
+			continue
+		}
+		j := len(r.Columns)
+		t.colOf[m.Name] = j
+		if m.Kind == ast.MemberEmbedded {
+			t.embedded = append(t.embedded, j)
+		}
+		r.Columns = append(r.Columns, Column{Name: m.Name, Type: m.Type, Embedded: m.Kind == ast.MemberEmbedded,
+			Decl: j, Group: m.Group, Line: m.Line, Block: -1})
+	}
+	for _, j := range t.embedded {
+		if typ := strings.TrimPrefix(r.Columns[j].Type, "*"); typ == "sync.Mutex" || typ == "sync.RWMutex" {
+			t.mutex = j
+		}
+	}
+	return t
+}
+
+// addRows adds a row for every method of the type and returns them by
+// name.
+func (b *build) addRows() map[string]int {
+	rowOf := map[string]int{}
+	for i, s := range b.syms {
+		rowOf[s.Name] = i
+		b.r.Rows = append(b.r.Rows, Row{Sym: b.a.sym(s), Method: s.Name, Signature: s.Signature, Exported: s.Exported,
+			Decl: i, Stmts: s.Stmts, Cells: []Cell{}, Calls: []Call{}, Block: -1, Notes: []string{}})
+	}
+	return rowOf
+}
+
+// markFieldRefs marks what row i, the method s, selects on the type: a
+// field it uses, a method it uses as a value, or else a field promoted
+// from the one embedded field. The rest is counted as unattributed.
+func (b *build) markFieldRefs(i int, s *ast.Symbol, t refTargets) {
+	for _, fr := range s.FieldRefs {
+		if fr.Pkg != "" || fr.Type != b.typ.Name || fr.Name == "" {
+			continue
+		}
+		if j, ok := t.colOf[fr.Name]; ok {
+			b.mark(i, j, fr.Count, fr.Writes, fr.Methods, "")
+			continue
+		}
+		if k, ok := t.rowOf[fr.Name]; ok {
+			b.call[i][k] += fr.Count
+			b.val[i][k] = true
+			continue
+		}
+		if len(t.embedded) == 1 {
+			b.mark(i, t.embedded[0], fr.Count, fr.Writes, nil, "promoted")
+			continue
+		}
+		b.r.Unattributed += fr.Count
+	}
+}
+
+// markMethodRefs marks the methods of the type that row i, the method s,
+// calls: one of the rows, a func-typed field, a lock method of the
+// embedded mutex, or else a method promoted from the one embedded field.
+// The rest is counted as unattributed.
+func (b *build) markMethodRefs(i int, s *ast.Symbol, t refTargets) {
+	for _, ref := range s.Refs {
+		if ref.Kind != ast.RefMethod || ref.Recv != b.typ.Name {
+			continue
+		}
+		k, isMethod := t.rowOf[ref.Name]
+		j, isField := t.colOf[ref.Name]
+		switch {
+		case isMethod:
+			b.call[i][k] += ref.Count
+		case isField:
+			b.mark(i, j, ref.Count, 0, nil, "") // calls a func-typed field
+		case lockMethods[ref.Name] && t.mutex >= 0:
+			b.mark(i, t.mutex, ref.Count, 0, nil, ref.Name)
+		case len(t.embedded) == 1:
+			b.mark(i, t.embedded[0], ref.Count, 0, nil, "promoted")
+		default:
+			b.r.Unattributed += ref.Count
+		}
+	}
 }
 
 // mark records that row i uses column j: n times, w of them as writes, and
@@ -267,58 +304,78 @@ func (b *build) isCollaborator(typ string) bool {
 
 // classify gives every column its class and marks the hubs.
 func (b *build) classify() {
-	r := b.r
 	reach := b.closures()
-	for j := range r.Columns {
-		c := &r.Columns[j]
-		var touch, write []int
-		for i := range r.Rows {
-			u := b.cell[i][j]
-			if u.any() {
-				touch = append(touch, i)
-			}
-			if u.wr {
-				write = append(write, i)
-			}
-			if u.r {
-				c.Readers++
-			}
+	for j := range b.r.Columns {
+		b.classifyColumn(j, reach)
+	}
+	b.markHubs()
+}
+
+// classifyColumn counts the readers and writers of column j and gives it
+// its class, with the reason; reach is what each row reaches through
+// calls.
+func (b *build) classifyColumn(j int, reach [][]bool) {
+	c := &b.r.Columns[j]
+	var touch, write []int
+	for i := range b.r.Rows {
+		u := b.cell[i][j]
+		if u.any() {
+			touch = append(touch, i)
 		}
-		c.Writers = len(write)
-		temp := -1
-		if len(touch) >= 2 {
-			for _, w := range write {
-				if !slices.ContainsFunc(touch, func(i int) bool { return !reach[w][i] }) {
-					temp = w
-					break
-				}
-			}
+		if u.wr {
+			write = append(write, i)
 		}
-		switch {
-		case isInfra(c):
-			c.Class = Infra
-			c.Reason = "a lock, logger or the like: infrastructure, which each new type gets its own of"
-		case len(touch) == 0:
-			c.Class = Unused
-			c.Reason = "no method uses it"
-		case temp >= 0:
-			c.Class = Temporary
-			c.Reason = fmt.Sprintf("written by %s and used only by what it calls: the state of one operation", b.syms[temp].Name)
-		case len(write) > 0:
-			c.Class = Entity
-			c.Reason = "written by " + b.rowNames(write, 3)
-		case b.isCollaborator(c.Type):
-			c.Class = Collaborator
-			c.Reason = "never written by a method, and a handle on something else: a collaborator"
-		default:
-			c.Class = Config
-			c.Reason = "never written by a method: configuration"
-		}
-		if c.Ctor && (c.Class == Config || c.Class == Collaborator) {
-			c.Reason += ", set where the type is constructed"
+		if u.r {
+			c.Readers++
 		}
 	}
+	c.Writers = len(write)
+	temp := temporaryWriter(touch, write, reach)
+	switch {
+	case isInfra(c):
+		c.Class = Infra
+		c.Reason = "a lock, logger or the like: infrastructure, which each new type gets its own of"
+	case len(touch) == 0:
+		c.Class = Unused
+		c.Reason = "no method uses it"
+	case temp >= 0:
+		c.Class = Temporary
+		c.Reason = fmt.Sprintf("written by %s and used only by what it calls: the state of one operation", b.syms[temp].Name)
+	case len(write) > 0:
+		c.Class = Entity
+		c.Reason = "written by " + b.rowNames(write, 3)
+	case b.isCollaborator(c.Type):
+		c.Class = Collaborator
+		c.Reason = "never written by a method, and a handle on something else: a collaborator"
+	default:
+		c.Class = Config
+		c.Reason = "never written by a method: configuration"
+	}
+	if c.Ctor && (c.Class == Config || c.Class == Collaborator) {
+		c.Reason += ", set where the type is constructed"
+	}
+}
 
+// temporaryWriter returns the first of a field's writers that reaches
+// every row touching it, which makes the field the state of one
+// operation; -1 when there is none or fewer than two rows touch it.
+func temporaryWriter(touch, write []int, reach [][]bool) int {
+	if len(touch) < 2 {
+		return -1
+	}
+	for _, w := range write {
+		if !slices.ContainsFunc(touch, func(i int) bool { return !reach[w][i] }) {
+			return w
+		}
+	}
+	return -1
+}
+
+// markHubs marks the configuration and collaborators used by more than
+// HubShare of the methods that use fields other than infrastructure, once
+// there are at least four such methods.
+func (b *build) markHubs() {
+	r := b.r
 	var fieldRows int
 	for i := range r.Rows {
 		if b.touchesNonInfra(i) {
@@ -406,16 +463,31 @@ func (b *build) entitySide(i int) bool {
 
 // cluster forms the blocks and places every row.
 func (b *build) cluster() {
-	r := b.r
-	nr, nc := len(r.Rows), len(r.Columns)
+	nr, nc := len(b.r.Rows), len(b.r.Columns)
 	b.rowBlock = fill(nr, -1)
 	b.why = make([]why, nr)
 	b.readsAt = make([][]int, nr)
 	colBlock := fill(nc, -1)
 
-	// State: the fields written together, linked by the rows on their side.
+	b.formStateBlocks(colBlock)
+	b.formServiceBlocks(colBlock)
+	b.placeFieldRows(colBlock)
+	b.mergeHelpers()
+
+	// Rows needing only hubs, and rows that only call others.
+	sharedBy := map[string]int{}
+	kind := b.placeLeafRows(sharedBy)
+	b.placeCallingRows(kind, sharedBy)
+	b.settleRowKinds(kind)
+	b.setColumnBlocks()
+}
+
+// formStateBlocks makes the blocks of state: the fields written together,
+// linked by the rows on their side. Shared state is split off first. Each
+// column's block goes in colBlock.
+func (b *build) formStateBlocks(colBlock []int) {
 	var entityCols []int
-	for j := range nc {
+	for j := range b.r.Columns {
 		if b.isEntity(j) {
 			entityCols = append(entityCols, j)
 		}
@@ -428,7 +500,7 @@ func (b *build) cluster() {
 			work = append(parts, work...)
 			if at.both {
 				b.shared = append(b.shared, at)
-				r.Columns[at.col].Shared = true
+				b.r.Columns[at.col].Shared = true
 			}
 			continue
 		}
@@ -438,11 +510,14 @@ func (b *build) cluster() {
 		}
 		b.blocks = append(b.blocks, bl)
 	}
+}
 
-	// Services: configuration, collaborators and temporaries, linked by any
-	// row using two of them.
+// formServiceBlocks makes the blocks of services: configuration,
+// collaborators and temporaries, linked by any row using two of them. Each
+// column's block goes in colBlock.
+func (b *build) formServiceBlocks(colBlock []int) {
 	var serviceCols []int
-	for j := range nc {
+	for j := range b.r.Columns {
 		if b.isService(j) {
 			serviceCols = append(serviceCols, j)
 		}
@@ -453,32 +528,14 @@ func (b *build) cluster() {
 		}
 		b.blocks = append(b.blocks, &blk{kind: Service, cols: comp})
 	}
+}
 
-	// Place the rows that use fields of a block.
-	for i := range nr {
-		var reads, writes, services, sharedOnly []int
-		for j, u := range b.cell[i] {
-			switch {
-			case !u.any():
-			case b.isEntity(j) && r.Columns[j].Shared:
-				sharedOnly = append(sharedOnly, j)
-			case b.isEntity(j) && u.wr:
-				writes = append(writes, j)
-				reads = append(reads, j)
-			case b.isEntity(j):
-				reads = append(reads, j)
-			case b.isService(j):
-				services = append(services, j)
-			}
-		}
-		if len(reads) == 0 && len(sharedOnly) > 0 {
-			for _, j := range sharedOnly {
-				reads = append(reads, j)
-				if b.cell[i][j].wr {
-					writes = append(writes, j)
-				}
-			}
-		}
+// placeFieldRows places the rows that use fields of a block: with the
+// state they write most, else with the first service they use, else with
+// the state they read most.
+func (b *build) placeFieldRows(colBlock []int) {
+	for i := range b.r.Rows {
+		reads, writes, services := b.fieldUses(i)
 		switch {
 		case len(writes) > 0:
 			bl := b.most(i, writes, func(u use) int { return u.w }, colBlock)
@@ -495,104 +552,170 @@ func (b *build) cluster() {
 			b.place(i, bl, why{rule: "reads", cols: inBlock(reads, colBlock, bl)})
 		}
 	}
+}
 
-	b.mergeHelpers()
-
-	// Rows needing only hubs, and rows that only call others.
-	sharedBy := map[string]int{}
-	joinShared := func(i int, hubs []int) {
-		key := fmt.Sprint(hubs)
-		bl, ok := sharedBy[key]
-		if !ok {
-			bl = len(b.blocks)
-			sharedBy[key] = bl
-			b.blocks = append(b.blocks, &blk{kind: Shared, hubs: hubs})
+// fieldUses returns the state row i uses, the state it writes and the
+// services it uses, hubs and infrastructure left out. Shared state counts
+// only for a row using no other state.
+func (b *build) fieldUses(i int) (reads, writes, services []int) {
+	var sharedOnly []int
+	for j, u := range b.cell[i] {
+		switch {
+		case !u.any():
+		case b.isEntity(j) && b.r.Columns[j].Shared:
+			sharedOnly = append(sharedOnly, j)
+		case b.isEntity(j) && u.wr:
+			writes = append(writes, j)
+			reads = append(reads, j)
+		case b.isEntity(j):
+			reads = append(reads, j)
+		case b.isService(j):
+			services = append(services, j)
 		}
-		b.place(i, bl, why{rule: "shared", cols: hubs})
 	}
-	hubsOf := func(i int) (hubs, infra []int) {
-		for j, u := range b.cell[i] {
-			if u.any() && r.Columns[j].Hub {
-				hubs = append(hubs, j)
-			} else if u.any() && r.Columns[j].Class == Infra {
-				infra = append(infra, j)
+	if len(reads) == 0 && len(sharedOnly) > 0 {
+		for _, j := range sharedOnly {
+			reads = append(reads, j)
+			if b.cell[i][j].wr {
+				writes = append(writes, j)
 			}
 		}
-		return hubs, infra
 	}
-	kind := make([]RowKind, nr)
-	for i := range nr {
+	return reads, writes, services
+}
+
+// placeLeafRows returns the kind of every row the fields placed, members,
+// and of every other row that calls no other: a member of a shared block
+// when it uses hubs, else free. The rows that call others are left
+// without a kind.
+func (b *build) placeLeafRows(sharedBy map[string]int) []RowKind {
+	kind := make([]RowKind, len(b.r.Rows))
+	for i := range kind {
 		if b.rowBlock[i] >= 0 {
 			kind[i] = Member
 			continue
 		}
-		hubs, infra := hubsOf(i)
 		if len(b.callees(i)) > 0 {
 			continue
 		}
+		hubs, infra := b.hubsOf(i)
 		if len(hubs) > 0 {
-			joinShared(i, hubs)
+			b.joinShared(i, hubs, sharedBy)
 			kind[i] = Member
 			continue
 		}
 		kind[i] = Free
 		b.why[i] = why{rule: "free", infra: infra}
 	}
+	return kind
+}
+
+// joinShared places row i in the shared block of exactly hubs, making it
+// when it is the first row to need them; sharedBy holds those blocks by
+// their hubs.
+func (b *build) joinShared(i int, hubs []int, sharedBy map[string]int) {
+	key := fmt.Sprint(hubs)
+	bl, ok := sharedBy[key]
+	if !ok {
+		bl = len(b.blocks)
+		sharedBy[key] = bl
+		b.blocks = append(b.blocks, &blk{kind: Shared, hubs: hubs})
+	}
+	b.place(i, bl, why{rule: "shared", cols: hubs})
+}
+
+// hubsOf returns the hubs and the infrastructure row i uses.
+func (b *build) hubsOf(i int) (hubs, infra []int) {
+	for j, u := range b.cell[i] {
+		if u.any() && b.r.Columns[j].Hub {
+			hubs = append(hubs, j)
+		} else if u.any() && b.r.Columns[j].Class == Infra {
+			infra = append(infra, j)
+		}
+	}
+	return hubs, infra
+}
+
+// placeCallingRows gives the rows that only call others their kind, each
+// once all its callees have one, pass after pass until a pass gives none.
+func (b *build) placeCallingRows(kind []RowKind, sharedBy map[string]int) {
 	for changed := true; changed; {
 		changed = false
-		for i := range nr {
-			if kind[i] != "" {
-				continue
-			}
-			callees := b.callees(i)
-			var groups []int
-			bridge, ready := false, true
-			for _, k := range callees {
-				switch kind[k] {
-				case "":
-					ready = false
-				case Bridge:
-					bridge = true
-				case Member:
-					if !slices.Contains(groups, b.rowBlock[k]) {
-						groups = append(groups, b.rowBlock[k])
-					}
-				case Free:
-					// A free callee belongs to no block.
-				}
-			}
-			if !ready {
-				continue
-			}
-			changed = true
-			slices.Sort(groups)
-			switch hubs, infra := hubsOf(i); {
-			case bridge || len(groups) >= 2:
-				kind[i] = Bridge
-				b.why[i] = why{rule: "bridge", blocks: groups, callees: callees}
-			case len(groups) == 1:
-				kind[i] = Member
-				b.place(i, groups[0], why{rule: "delegate", blocks: groups, callees: callees})
-			case len(hubs) > 0:
-				kind[i] = Member
-				joinShared(i, hubs)
-			default:
-				kind[i] = Free
-				b.why[i] = why{rule: "freeCalls", callees: callees, infra: infra}
+		for i := range kind {
+			if kind[i] == "" && b.placeCallingRow(i, kind, sharedBy) {
+				changed = true
 			}
 		}
 	}
-	for i := range nr {
+}
+
+// placeCallingRow gives row i its kind by what it calls, and reports
+// whether it could: not while a callee has no kind yet. Calling into two
+// blocks or a bridge makes a bridge, into one block a member delegating
+// to it, and into none it goes by its hubs, or else is free.
+func (b *build) placeCallingRow(i int, kind []RowKind, sharedBy map[string]int) bool {
+	callees := b.callees(i)
+	groups, bridge, ready := b.calleeBlocks(callees, kind)
+	if !ready {
+		return false
+	}
+	switch hubs, infra := b.hubsOf(i); {
+	case bridge || len(groups) >= 2:
+		kind[i] = Bridge
+		b.why[i] = why{rule: "bridge", blocks: groups, callees: callees}
+	case len(groups) == 1:
+		kind[i] = Member
+		b.place(i, groups[0], why{rule: "delegate", blocks: groups, callees: callees})
+	case len(hubs) > 0:
+		kind[i] = Member
+		b.joinShared(i, hubs, sharedBy)
+	default:
+		kind[i] = Free
+		b.why[i] = why{rule: "freeCalls", callees: callees, infra: infra}
+	}
+	return true
+}
+
+// calleeBlocks returns the blocks of the callees that are members, sorted,
+// whether one is a bridge, and whether all have a kind yet.
+func (b *build) calleeBlocks(callees []int, kind []RowKind) (groups []int, bridge, ready bool) {
+	ready = true
+	for _, k := range callees {
+		switch kind[k] {
+		case "":
+			ready = false
+		case Bridge:
+			bridge = true
+		case Member:
+			if !slices.Contains(groups, b.rowBlock[k]) {
+				groups = append(groups, b.rowBlock[k])
+			}
+		case Free:
+			// A free callee belongs to no block.
+		}
+	}
+	slices.Sort(groups)
+	return groups, bridge, ready
+}
+
+// settleRowKinds makes bridges of the rows still without a kind, which
+// call each other in a cycle, and gives every row its kind.
+func (b *build) settleRowKinds(kind []RowKind) {
+	for i := range kind {
 		if kind[i] == "" {
 			kind[i] = Bridge
 			b.why[i] = why{rule: "cycle", callees: b.callees(i)}
 		}
-		r.Rows[i].Kind = kind[i]
+		b.r.Rows[i].Kind = kind[i]
 	}
+}
+
+// setColumnBlocks gives every column the block it ended up in.
+func (b *build) setColumnBlocks() {
 	for x, bl := range b.blocks {
 		if !bl.dead {
 			for _, j := range bl.cols {
-				r.Columns[j].Block = x
+				b.r.Columns[j].Block = x
 			}
 		}
 	}
@@ -642,44 +765,58 @@ func (b *build) splitShared(comp []int) (parts [][]int, at sharedAt, ok bool) {
 		if len(parts) < 2 || slices.ContainsFunc(parts, func(p []int) bool { return !b.hasSideRow(p) }) {
 			continue
 		}
-		top, best := -1, use{}
-		for i := range b.r.Rows {
-			u := b.cell[i][c]
-			if u.wr && (top < 0 || u.w > best.w || u.w == best.w && u.n > best.n) {
-				top, best = i, u
-			}
-		}
-		own := 0
-		for p, cols := range parts {
-			if top >= 0 && slices.ContainsFunc(cols, func(j int) bool { return b.cell[top][j].any() }) {
-				own = p
-				break
-			}
-		}
-		sides := map[int]bool{}
-		for i := range b.r.Rows {
-			if !b.cell[i][c].wr {
-				continue
-			}
-			side := own
-			for p, cols := range parts {
-				if slices.ContainsFunc(cols, func(j int) bool { return b.cell[i][j].any() }) {
-					side = p
-					break
-				}
-			}
-			sides[side] = true
-		}
-		parts[own] = append(parts[own], c)
-		slices.Sort(parts[own])
-		parts[0], parts[own] = parts[own], parts[0]
-		at = sharedAt{col: c, both: len(sides) >= 2}
-		for _, p := range parts {
-			at.parts = append(at.parts, slices.Clone(p))
-		}
+		parts, at = b.splitAtShared(c, parts)
 		return parts, at, true
 	}
 	return nil, at, false
+}
+
+// splitAtShared puts the shared column c back into the part its top
+// writer uses, moves that part first, and records the split: the columns
+// on each side, and whether rows on two sides write c.
+func (b *build) splitAtShared(c int, parts [][]int) ([][]int, sharedAt) {
+	own := 0
+	if top := b.topWriter(c); top >= 0 {
+		own = b.partUsedBy(top, parts, 0)
+	}
+	sides := map[int]bool{}
+	for i := range b.r.Rows {
+		if b.cell[i][c].wr {
+			sides[b.partUsedBy(i, parts, own)] = true
+		}
+	}
+	parts[own] = append(parts[own], c)
+	slices.Sort(parts[own])
+	parts[0], parts[own] = parts[own], parts[0]
+	at := sharedAt{col: c, both: len(sides) >= 2}
+	for _, p := range parts {
+		at.parts = append(at.parts, slices.Clone(p))
+	}
+	return parts, at
+}
+
+// topWriter returns the row writing column c most, by writes and then by
+// uses, the first on a tie; -1 when no row writes it.
+func (b *build) topWriter(c int) int {
+	top, best := -1, use{}
+	for i := range b.r.Rows {
+		u := b.cell[i][c]
+		if u.wr && (top < 0 || u.w > best.w || u.w == best.w && u.n > best.n) {
+			top, best = i, u
+		}
+	}
+	return top
+}
+
+// partUsedBy returns the first of parts with a column row i uses, or
+// otherwise when there is none.
+func (b *build) partUsedBy(i int, parts [][]int, otherwise int) int {
+	for p, cols := range parts {
+		if slices.ContainsFunc(cols, func(j int) bool { return b.cell[i][j].any() }) {
+			return p
+		}
+	}
+	return otherwise
 }
 
 func (b *build) hasSideRow(cols []int) bool {
@@ -756,38 +893,55 @@ func (b *build) mergeHelpers() {
 			if bl.dead || bl.kind != Service || len(bl.rows) == 0 {
 				continue
 			}
-			var callers []int
-			for _, k := range bl.rows {
-				for _, i := range b.callers(k) {
-					if b.rowBlock[i] != x && !slices.Contains(callers, i) {
-						callers = append(callers, i)
-					}
-				}
+			callers := b.helperCallers(x)
+			if target := b.helperHost(callers); target >= 0 {
+				b.mergeHelper(x, target, callers)
+				changed = true
 			}
-			target := -1
-			for _, i := range callers {
-				y := b.rowBlock[i]
-				if y < 0 || b.blocks[y].kind != Service || target >= 0 && y != target {
-					target = -2
-					break
-				}
-				target = y
-			}
-			if len(callers) == 0 || target < 0 {
-				continue
-			}
-			into := b.blocks[target]
-			into.cols = append(into.cols, bl.cols...)
-			into.rows = append(into.rows, bl.rows...)
-			slices.Sort(callers)
-			into.merged = append(into.merged, merge{rows: slices.Clone(bl.rows), callers: callers})
-			for _, i := range bl.rows {
-				b.rowBlock[i] = target
-			}
-			bl.dead = true
-			changed = true
 		}
 	}
+}
+
+// helperCallers returns the rows outside block x that call its rows, in
+// the order met.
+func (b *build) helperCallers(x int) []int {
+	var callers []int
+	for _, k := range b.blocks[x].rows {
+		for _, i := range b.callers(k) {
+			if b.rowBlock[i] != x && !slices.Contains(callers, i) {
+				callers = append(callers, i)
+			}
+		}
+	}
+	return callers
+}
+
+// helperHost returns the service block all of callers are in, -1 when
+// there are no callers or they are not all in one service block.
+func (b *build) helperHost(callers []int) int {
+	target := -1
+	for _, i := range callers {
+		y := b.rowBlock[i]
+		if y < 0 || b.blocks[y].kind != Service || target >= 0 && y != target {
+			return -1
+		}
+		target = y
+	}
+	return target
+}
+
+// mergeHelper merges service block x into block target, which holds all
+// of callers, the rows calling it from outside.
+func (b *build) mergeHelper(x, target int, callers []int) {
+	bl, into := b.blocks[x], b.blocks[target]
+	into.cols = append(into.cols, bl.cols...)
+	into.rows = append(into.rows, bl.rows...)
+	slices.Sort(callers)
+	into.merged = append(into.merged, merge{rows: slices.Clone(bl.rows), callers: callers})
+	for _, i := range bl.rows {
+		b.rowBlock[i] = target
+	}
+	bl.dead = true
 }
 
 // order picks the core, letters the blocks and puts rows and columns in
