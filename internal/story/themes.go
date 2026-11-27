@@ -207,12 +207,7 @@ func themes(msgs []message, from, to int, df map[string]int, chapters int) Theme
 	t.Types = top(types, 1, nil)
 	t.Scopes = top(scopes, 2, nil)
 	if len(t.Types) > 0 {
-		lead := t.Types[0].Name
-		for k, n := range typeScopes {
-			if k[0] == lead && (n > t.LeadScopeCount || n == t.LeadScopeCount && k[1] < t.LeadScope) {
-				t.LeadScope, t.LeadScopeCount = k[1], n
-			}
-		}
+		t.LeadScope, t.LeadScopeCount = leadScope(typeScopes, t.Types[0].Name)
 	}
 	// A term must recur: in two commits at least, and in one of every 50.
 	least := max(2, (to-from+49)/50)
@@ -222,6 +217,18 @@ func themes(msgs []message, from, to int, df map[string]int, chapters int) Theme
 	// Chosen for being distinctive, told most common first.
 	slices.SortStableFunc(t.Terms, func(a, b Theme) int { return cmp.Compare(b.Count, a.Count) })
 	return t
+}
+
+// leadScope returns the most common scope among the commits of type kind,
+// the first by name among equals, and how many of them had it. typeScopes
+// counts the commits per type and scope.
+func leadScope(typeScopes map[[2]string]int, kind string) (scope string, n int) {
+	for k, c := range typeScopes {
+		if k[0] == kind && (c > n || c == n && k[1] < scope) {
+			scope, n = k[1], c
+		}
+	}
+	return scope, n
 }
 
 // foldPlurals counts "tests" as "test" when both occur.
