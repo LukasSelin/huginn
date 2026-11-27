@@ -59,12 +59,12 @@ type ownerJSON struct {
 	Symbols int    `json:"symbols"`
 }
 
-// health serves trends over the whole history, the hotspot files and who
+// healthAPI serves trends over the whole history, the hotspot files and who
 // owns the live code.
-func (s *Server) health(ix *index, w http.ResponseWriter, r *http.Request) {
+func (ix *index) healthAPI(w http.ResponseWriter, r *http.Request) {
 	rep := ix.health
 	out := healthJSON{
-		Tests: s.opts.Tests, Buckets: []bucketJSON{}, Hotspots: []hotspotJSON{}, Owners: []ownerJSON{},
+		Tests: ix.tests, Buckets: []bucketJSON{}, Hotspots: []hotspotJSON{}, Owners: []ownerJSON{},
 		Authors: rep.Authors, BusFactor: rep.BusFactor,
 	}
 	for _, b := range rep.Buckets {

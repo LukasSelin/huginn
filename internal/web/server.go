@@ -34,41 +34,60 @@ var static embed.FS
 
 // Server indexes one repository and serves it.
 type Server struct {
-	repo  *git.Repo
-	opts  lineage.BuildOptions
-	name  string
-	index atomic.Pointer[index]
-	done  atomic.Int64 // commits applied so far while indexing
-	err   atomic.Pointer[error]
+	repo     *git.Repo
+	opts     lineage.BuildOptions
+	name     string
+	index    atomic.Pointer[index]
+	progress *progress
+	ui       assets // the pages and their scripts
 
-	settled   chan struct{} // closed once the index is published or failed
-	settle    sync.Once
-	ui        fs.FS
-	uiEncoded map[string]*encoded // the static files, compressed
-
-	reports *reportCache                                       // commit reports by hash
-	build   func(context.Context, string) (*commitJSON, error) // buildReport, or a test's stand-in
+	api   *repoAPI     // commit reports and reviews, which need no index
+	saved responseFile // where the prebuilt responses are kept between runs
 }
 
-// index is the read-only view the API serves once indexing is done.
+// progress is how far indexing has got, as /api/status reports it.
+type progress struct {
+	commits atomic.Int64 // applied so far
+	err     atomic.Pointer[error]
+	settled chan struct{} // closed once the index is published or indexing failed
+	once    sync.Once
+}
+
+func newProgress() *progress { return &progress{settled: make(chan struct{})} }
+
+// settle marks indexing as over, failed with err unless it is nil. Only
+// the first call counts.
+func (p *progress) settle(err error) {
+	p.once.Do(func() {
+		if err != nil {
+			p.err.Store(&err)
+		}
+		close(p.settled)
+	})
+}
+
+// index is the read-only view the API serves once indexing is done, with
+// the routes that serve it; see indexRoutes.
 type index struct {
 	h      *lineage.History
 	cmap   *codemap.Map
 	health *health.Report
 	silos  *silos.Report
 	took   time.Duration
+	tests  bool // the history keeps the symbols of test files
 
-	journeys journeys // built with the prebuilt responses, or on first request
-	pre      sync.Map // request key → *encoded, see prebuilt.go
+	// tags reads the tags the story marks its releases with.
+	tags func(context.Context) ([]git.Tag, error)
+
+	journeys journeys      // built with the prebuilt responses, or on first request
+	affinity affinityState // reports made on request
+	pre      sync.Map      // request key → *encoded, see prebuilt.go
 }
 
 // New returns a server for repo. name labels it in the UI.
 func New(repo *git.Repo, name string, opts lineage.BuildOptions) *Server {
-	s := &Server{repo: repo, name: name, opts: opts, reports: newReportCache(reportCacheSize), settled: make(chan struct{})}
-	s.build = s.buildReport
-	s.ui, _ = fs.Sub(static, "static")
-	s.uiEncoded = staticFiles(s.ui)
-	return s
+	return &Server{repo: repo, name: name, opts: opts, progress: newProgress(), ui: newAssets(),
+		api: newRepoAPI(repo, opts.IncludeGenerated), saved: savedFile(opts.Cache)}
 }
 
 // Index builds the history and the responses the pages ask for, then
@@ -77,37 +96,39 @@ func New(repo *git.Repo, name string, opts lineage.BuildOptions) *Server {
 // blocks until all are done; run it in a goroutine to serve progress
 // meanwhile.
 func (s *Server) Index(ctx context.Context) error {
-	defer s.settle.Do(func() { close(s.settled) })
+	defer s.progress.settle(nil)
 	start := time.Now()
 	opts := s.opts
-	opts.Progress = func(n int) { s.done.Store(int64(n)) }
+	opts.Progress = func(n int) { s.progress.commits.Store(int64(n)) }
 	h, err := lineage.Build(ctx, s.repo, opts)
 	if err != nil {
-		s.err.Store(&err)
-		s.settle.Do(func() { close(s.settled) })
+		s.progress.settle(err)
 		return err
 	}
-	ix := &index{h: h, cmap: codemap.Build(h), health: health.Build(h, health.Options{}), silos: silos.Build(h, silos.Options{})}
+	ix := &index{h: h, cmap: codemap.Build(h), health: health.Build(h, health.Options{}), silos: silos.Build(h, silos.Options{}),
+		tests: s.opts.Tests, tags: func(ctx context.Context) ([]git.Tag, error) {
+			return s.repo.Tags(ctx, git.Options{Branch: s.opts.Branch})
+		}}
 	// The responses saved for this history are loaded rather than built
 	// again. They were saved once all were built, the detail ones too.
 	// Without a key they are neither loaded nor saved.
-	key, _ := s.historyKey(ctx)
-	saved := s.loadSaved(key)
+	key, _ := historyKey(ctx, s.repo, s.opts)
+	saved := s.saved.load(key)
 	for k, e := range saved {
 		ix.pre.Store(k, e)
 	}
-	s.prebuild(ctx, ix, s.pageURLs(ix))
+	ix.prebuild(ctx, ix.pageURLs())
 	ix.took = time.Since(start)
 	s.index.Store(ix)
-	s.settle.Do(func() { close(s.settled) })
+	s.progress.settle(nil)
 	if len(saved) > 0 {
 		return nil
 	}
-	s.prebuild(ctx, ix, s.detailURLs(ix))
+	ix.prebuild(ctx, ix.detailURLs())
 	if ctx.Err() != nil {
 		return ctx.Err()
 	}
-	if err := s.save(key, ix); err != nil {
+	if err := s.saved.save(key, ix); err != nil {
 		return fmt.Errorf("save responses: %w", err)
 	}
 	return nil
@@ -116,43 +137,58 @@ func (s *Server) Index(ctx context.Context) error {
 // Handler returns the UI and API routes.
 func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
-	mux.Handle("GET /", s.file(""))
-	mux.Handle("GET /{$}", s.file("journey.html"))
-	mux.Handle("GET /journey", s.file("journey.html"))
-	mux.Handle("GET /map", s.file("index.html"))
-	mux.Handle("GET /health", s.file("health.html"))
-	mux.Handle("GET /layers", s.file("layers.html"))
-	mux.Handle("GET /review", s.file("review.html"))
+	mux.Handle("GET /", s.ui.file(""))
+	mux.Handle("GET /{$}", s.ui.file("journey.html"))
+	mux.Handle("GET /journey", s.ui.file("journey.html"))
+	mux.Handle("GET /map", s.ui.file("index.html"))
+	mux.Handle("GET /health", s.ui.file("health.html"))
+	mux.Handle("GET /layers", s.ui.file("layers.html"))
+	mux.Handle("GET /review", s.ui.file("review.html"))
+	mux.Handle("GET /affinity", s.ui.file("affinity.html"))
 	mux.HandleFunc("GET /api/status", s.status)
-	s.indexRoutes(mux, s.index.Load)
-	mux.HandleFunc("GET /api/commit/{rev...}", s.commit)
-	mux.HandleFunc("GET /api/review", s.reviewAPI)
-	mux.HandleFunc("GET /api/review/options", s.reviewOptions)
+	indexRoutes(mux, s.index.Load)
+	mux.HandleFunc("GET /api/commit/{rev...}", s.api.commit(s.index.Load))
+	mux.HandleFunc("GET /api/review", s.api.reviewAPI(s.index.Load))
+	mux.HandleFunc("GET /api/review/options", s.api.reviewOptions)
 	return mux
 }
 
 // indexRoutes adds the routes served from the index that load returns.
-func (s *Server) indexRoutes(mux *http.ServeMux, load func() *index) {
+func indexRoutes(mux *http.ServeMux, load func() *index) {
 	ready := func(fn func(*index, http.ResponseWriter, *http.Request)) http.HandlerFunc {
 		return ready(load, fn)
 	}
-	mux.HandleFunc("GET /api/symbol/{id}", ready(s.symbol))
-	mux.HandleFunc("GET /api/map", ready(prebuilt(s.codeMap)))
-	mux.HandleFunc("GET /api/map/{dir...}", ready(prebuilt(s.mapDir)))
-	mux.HandleFunc("GET /api/health", ready(prebuilt(s.health)))
-	mux.HandleFunc("GET /api/silos", ready(prebuilt(s.silosAPI)))
-	mux.HandleFunc("GET /api/silos/leave", ready(s.silosLeave))
-	mux.HandleFunc("GET /api/journey", ready(prebuilt(s.journeyAPI)))
-	mux.HandleFunc("GET /api/journey/package/{dir...}", ready(prebuilt(s.journeyPackage)))
-	mux.HandleFunc("GET /api/journey/links/{dir...}", ready(s.journeyLinks))
-	mux.HandleFunc("GET /api/journey/symbols", ready(s.journeySymbols))
-	mux.HandleFunc("GET /api/layers", ready(prebuilt(s.layersAPI)))
+	mux.HandleFunc("GET /api/symbol/{id}", ready((*index).symbol))
+	mux.HandleFunc("GET /api/map", ready(prebuilt((*index).codeMap)))
+	mux.HandleFunc("GET /api/map/{dir...}", ready(prebuilt((*index).mapDir)))
+	mux.HandleFunc("GET /api/health", ready(prebuilt((*index).healthAPI)))
+	mux.HandleFunc("GET /api/silos", ready(prebuilt((*index).silosAPI)))
+	mux.HandleFunc("GET /api/silos/leave", ready((*index).silosLeave))
+	mux.HandleFunc("GET /api/journey", ready(prebuilt((*index).journeyAPI)))
+	mux.HandleFunc("GET /api/journey/package/{dir...}", ready(prebuilt((*index).journeyPackage)))
+	mux.HandleFunc("GET /api/journey/links/{dir...}", ready((*index).journeyLinks))
+	mux.HandleFunc("GET /api/journey/symbols", ready((*index).journeySymbols))
+	mux.HandleFunc("GET /api/layers", ready(prebuilt((*index).layersAPI)))
+	mux.HandleFunc("GET /api/affinity/types", ready((*index).affinityTypes))
+	mux.HandleFunc("GET /api/affinity", ready((*index).affinityAPI))
+}
+
+// assets are the UI's static files, embedded, with the compressed copies
+// they are served from.
+type assets struct {
+	files   fs.FS
+	encoded map[string]*encoded // by path under static
+}
+
+func newAssets() assets {
+	files, _ := fs.Sub(static, "static")
+	return assets{files: files, encoded: staticFiles(files)}
 }
 
 // file serves the static file name, or the one the request names when name
 // is empty, from its compressed copy.
-func (s *Server) file(name string) http.Handler {
-	files := http.FileServerFS(s.ui)
+func (a assets) file(name string) http.Handler {
+	files := http.FileServerFS(a.files)
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		p := name
 		if p == "" {
@@ -161,7 +197,7 @@ func (s *Server) file(name string) http.Handler {
 				p += "index.html"
 			}
 		}
-		if e := s.uiEncoded[p]; e != nil {
+		if e := a.encoded[p]; e != nil {
 			e.serve(w, r)
 			return
 		}
@@ -212,14 +248,14 @@ const statusWait = 2 * time.Second
 func (s *Server) status(w http.ResponseWriter, r *http.Request) {
 	if r.URL.Query().Get("wait") == "1" {
 		select {
-		case <-s.settled:
+		case <-s.progress.settled:
 		case <-time.After(statusWait):
 		case <-r.Context().Done():
 			return
 		}
 	}
-	st := statusJSON{Repo: s.name, Commits: s.done.Load()}
-	if err := s.err.Load(); err != nil {
+	st := statusJSON{Repo: s.name, Commits: s.progress.commits.Load()}
+	if err := s.progress.err.Load(); err != nil {
 		st.Error = (*err).Error()
 	}
 	if ix := s.index.Load(); ix != nil {
@@ -267,7 +303,7 @@ type eventJSON struct {
 	OldName   string `json:"oldName,omitempty"`
 }
 
-func (s *Server) symbol(ix *index, w http.ResponseWriter, r *http.Request) {
+func (ix *index) symbol(w http.ResponseWriter, r *http.Request) {
 	id, _ := strconv.ParseInt(r.PathValue("id"), 10, 64)
 	sym := ix.h.Symbol(lineage.ID(id))
 	if sym == nil {

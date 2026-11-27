@@ -135,36 +135,39 @@ func refsJSON(rs []semdiff.Reference) []refJSON {
 
 // reviewAPI serves the review of the merge request from ?head= (default
 // HEAD) into ?base= (default the remote's default branch), limited to the
-// repository paths in ?path=, repeated. It does not need the index.
-func (s *Server) reviewAPI(w http.ResponseWriter, r *http.Request) {
-	q := r.URL.Query()
-	var scope []string
-	for _, p := range q["path"] {
-		if p = strings.TrimSpace(p); p != "" {
-			scope = append(scope, p)
+// repository paths in ?path=, repeated. It does not need the index; once
+// load returns one, the types it touches get their change coupling.
+func (a *repoAPI) reviewAPI(load func() *index) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		q := r.URL.Query()
+		var scope []string
+		for _, p := range q["path"] {
+			if p = strings.TrimSpace(p); p != "" {
+				scope = append(scope, p)
+			}
 		}
-	}
-	opts := review.Options{
-		Base:             strings.TrimSpace(q.Get("base")),
-		Head:             strings.TrimSpace(q.Get("head")),
-		Scope:            scope,
-		IncludeGenerated: s.opts.IncludeGenerated,
-	}
-	ix := s.index.Load()
-	if ix != nil {
-		opts.History = ix.h
-	}
-	rv, err := review.Build(r.Context(), s.repo, opts)
-	if err != nil {
-		if errors.Is(err, context.Canceled) {
+		opts := review.Options{
+			Base:             strings.TrimSpace(q.Get("base")),
+			Head:             strings.TrimSpace(q.Get("head")),
+			Scope:            scope,
+			IncludeGenerated: a.generated,
+		}
+		ix := load()
+		if ix != nil {
+			opts.History = ix.h
+		}
+		rv, err := review.Build(r.Context(), a.repo, opts)
+		if err != nil {
+			if errors.Is(err, context.Canceled) {
+				return
+			}
+			http.Error(w, err.Error(), http.StatusBadRequest)
 			return
 		}
-		http.Error(w, err.Error(), http.StatusBadRequest)
-		return
+		out := newReviewJSON(rv)
+		out.Indexed = ix != nil
+		writeJSON(w, out)
 	}
-	out := newReviewJSON(rv)
-	out.Indexed = ix != nil
-	writeJSON(w, out)
 }
 
 // reviewOptionsJSON is what the review page offers to pick from.
@@ -175,17 +178,17 @@ type reviewOptionsJSON struct {
 	Dirs     []string `json:"dirs"` // holding Go files at ?head=, or at the head
 }
 
-func (s *Server) reviewOptions(w http.ResponseWriter, r *http.Request) {
+func (a *repoAPI) reviewOptions(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 	out := reviewOptionsJSON{Head: "HEAD", Branches: []string{}, Dirs: []string{}}
-	if b, err := s.repo.CurrentBranch(ctx); err == nil && b != "" {
+	if b, err := a.repo.CurrentBranch(ctx); err == nil && b != "" {
 		out.Head = b
 	}
-	out.Target, _ = review.Target(ctx, s.repo, "", nil)
-	if bs, err := s.repo.Branches(ctx); err == nil {
+	out.Target, _ = review.Target(ctx, a.repo, "", nil)
+	if bs, err := a.repo.Branches(ctx); err == nil {
 		out.Branches = bs
 	}
-	dirs, err := s.repo.GoDirs(ctx, cmp.Or(strings.TrimSpace(r.URL.Query().Get("head")), "HEAD"))
+	dirs, err := a.repo.GoDirs(ctx, cmp.Or(strings.TrimSpace(r.URL.Query().Get("head")), "HEAD"))
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return

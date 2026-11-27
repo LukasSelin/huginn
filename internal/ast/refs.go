@@ -85,11 +85,17 @@ type FieldRef struct {
 	Line  int // first occurrence
 
 	// Writes counts the occurrences that may change the field: as the
-	// target of an assignment or of ++ or --, with its address taken, or
-	// passed to delete or clear, directly or through an index or a field
-	// of it (x.items[i] = v writes items). Calls of its methods count as
+	// target of an assignment or of ++ or --, with its address taken, as the
+	// channel of a send, as a range key or value assigned with =, or passed
+	// to delete, clear or close, directly or through an index or a field of
+	// it (x.items[i] = v writes items). Calls of its methods count as
 	// reads; they may change it too.
 	Writes int
+
+	// Methods are the methods called on the field, x.f.M(), sorted; nil
+	// when none. Whether they change it depends on its type, which is not
+	// known here.
+	Methods []string
 }
 
 // Approximate reports that the struct type is unknown and the reference may
@@ -176,6 +182,7 @@ func funcRefs(fset *token.FileSet, imports map[string]string, d *goast.FuncDecl)
 		refs:     map[refKey]*Ref{},
 		fields:   map[refKey]*FieldRef{},
 		written:  map[*goast.SelectorExpr]bool{},
+		methods:  map[*goast.SelectorExpr][]string{},
 	}
 	if d.Recv != nil && len(d.Recv.List) > 0 {
 		r.recvType, _ = recvBase(d.Recv.List[0].Type)
@@ -198,6 +205,8 @@ func funcRefs(fset *token.FileSet, imports map[string]string, d *goast.FuncDecl)
 
 	var fields []FieldRef
 	for _, f := range r.fields {
+		slices.Sort(f.Methods)
+		f.Methods = slices.Compact(f.Methods)
 		fields = append(fields, *f)
 	}
 	slices.SortFunc(fields, func(a, b FieldRef) int {
@@ -221,8 +230,9 @@ type refCollector struct {
 	skip     map[*goast.Ident]bool // identifiers that are not references
 	called   map[goast.Expr]bool   // callees of call expressions
 	refs     map[refKey]*Ref
-	fields   map[refKey]*FieldRef // kind is unused; recv holds the struct type
-	written  map[*goast.SelectorExpr]bool
+	fields   map[refKey]*FieldRef             // kind is unused; recv holds the struct type
+	written  map[*goast.SelectorExpr]bool     // fields written, see write
+	methods  map[*goast.SelectorExpr][]string // fields with methods called on them, x.f.M()
 }
 
 // write records that e is written, which writes the field selected at its
@@ -271,12 +281,14 @@ func (r *refCollector) declare(n goast.Node) bool {
 		if x.Op == token.AND {
 			r.write(x.X)
 		}
+	case *goast.SendStmt:
+		r.write(x.Chan)
 	case *goast.RangeStmt:
-		if x.Tok == token.DEFINE {
-			for _, e := range []goast.Expr{x.Key, x.Value} {
-				if id, ok := e.(*goast.Ident); ok {
-					r.declared[id.Name] = true
-				}
+		for _, e := range []goast.Expr{x.Key, x.Value} {
+			if x.Tok == token.ASSIGN {
+				r.write(e)
+			} else if id, ok := e.(*goast.Ident); ok && x.Tok == token.DEFINE {
+				r.declared[id.Name] = true
 			}
 		}
 	case *goast.ValueSpec:
@@ -317,12 +329,30 @@ func (r *refCollector) declare(n goast.Node) bool {
 			}
 		}
 	case *goast.CallExpr:
-		r.called[callee(x.Fun)] = true
-		if id, ok := x.Fun.(*goast.Ident); ok && (id.Name == "delete" || id.Name == "clear") && len(x.Args) > 0 {
-			r.write(x.Args[0])
+		fn := callee(x.Fun)
+		r.called[fn] = true
+		switch fn := fn.(type) {
+		case *goast.Ident:
+			if (fn.Name == "delete" || fn.Name == "clear" || fn.Name == "close") && len(x.Args) > 0 {
+				r.write(x.Args[0])
+			}
+		case *goast.SelectorExpr:
+			if on, ok := unparen(fn.X).(*goast.SelectorExpr); ok {
+				r.methods[on] = append(r.methods[on], fn.Sel.Name)
+			}
 		}
 	}
 	return true
+}
+
+func unparen(e goast.Expr) goast.Expr {
+	for {
+		p, ok := e.(*goast.ParenExpr)
+		if !ok {
+			return e
+		}
+		e = p.X
+	}
 }
 
 func (r *refCollector) declareFields(fl *goast.FieldList) {
@@ -403,8 +433,11 @@ func (r *refCollector) addField(k refKey, n goast.Node) {
 		r.fields[k] = f
 	}
 	f.Count++
-	if sel, ok := n.(*goast.SelectorExpr); ok && r.written[sel] {
-		f.Writes++
+	if sel, ok := n.(*goast.SelectorExpr); ok {
+		if r.written[sel] {
+			f.Writes++
+		}
+		f.Methods = append(f.Methods, r.methods[sel]...)
 	}
 }
 

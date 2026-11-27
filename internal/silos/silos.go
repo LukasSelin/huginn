@@ -165,7 +165,7 @@ func Build(h *lineage.History, opts Options) *Report {
 	a.model = knowledge.Replay(h, func(s *ast.Symbol) bool { return !isTest(s.Path) })
 	_, a.now = h.Span()
 	a.collect(h)
-	a.depend()
+	a.depend(h)
 
 	r := &Report{Now: a.now, Authors: a.model.Authors(), Departed: []string{}, a: a}
 	for i, name := range r.Authors {
@@ -223,36 +223,16 @@ func (a *analysis) collect(h *lineage.History) {
 
 // depend resolves who refers to each live symbol, and through them to each
 // package from the others.
-func (a *analysis) depend() {
+func (a *analysis) depend(h *lineage.History) {
 	all := make([]*ast.Symbol, len(a.syms))
 	at := map[*ast.Symbol]int{}
-	files := map[string]*ast.File{}
-	var tree []*ast.File
 	for i, u := range a.syms {
 		all[i] = u.sym
 		at[u.sym] = i
-		f := files[u.Path]
-		if f == nil {
-			f = &ast.File{Path: u.Path, Package: u.sym.Package}
-			files[u.Path] = f
-			tree = append(tree, f)
-		}
-		f.Symbols = append(f.Symbols, u.sym)
-	}
-	// The history keeps no imports, but every import a file uses shows in
-	// the references of its symbols.
-	for _, f := range tree {
-		for _, s := range f.Symbols {
-			for _, ref := range s.Refs {
-				if ref.Kind == ast.RefImport && !slices.ContainsFunc(f.Imports, func(im ast.Import) bool { return im.Path == ref.Pkg }) {
-					f.Imports = append(f.Imports, ast.Import{Path: ref.Pkg})
-				}
-			}
-		}
 	}
 	mods := modpath.Infer(all)
-	pkgOf := func(p, _ string) string { return mods.ImportPath(path.Dir(p)) }
-	idx := semdiff.NewIndex(tree, pkgOf)
+	pkgOf := mods.PackageOf
+	idx := semdiff.NewIndex(h.LiveFiles(func(s *ast.Symbol) bool { return !isTest(s.Path) }), pkgOf)
 
 	type from struct {
 		pkg, caller int

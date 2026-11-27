@@ -99,7 +99,7 @@ type lossJSON struct {
 
 // silosAPI serves the knowledge silos of the live code and the pairs coupled
 // across knowledge boundaries.
-func (s *Server) silosAPI(ix *index, w http.ResponseWriter, r *http.Request) {
+func (ix *index) silosAPI(w http.ResponseWriter, r *http.Request) {
 	rep := ix.silos
 	out := silosJSON{
 		Now: rep.Now.Unix(), Authors: rep.Authors, Departed: rep.Departed, Knowers: knowersJSON(rep.Knowers),
@@ -112,7 +112,7 @@ func (s *Server) silosAPI(ix *index, w http.ResponseWriter, r *http.Request) {
 
 // silosLeave serves what would be left if the authors named by the author
 // parameters left.
-func (s *Server) silosLeave(ix *index, w http.ResponseWriter, r *http.Request) {
+func (ix *index) silosLeave(w http.ResponseWriter, r *http.Request) {
 	names := r.URL.Query()["author"]
 	if len(names) == 0 {
 		http.Error(w, "want at least one author", http.StatusBadRequest)

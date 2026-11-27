@@ -22,7 +22,7 @@ func TestPrebuilt(t *testing.T) {
 	ix := srv.index.Load()
 	h := srv.Handler()
 
-	urls := append(srv.pageURLs(ix), srv.detailURLs(ix)...)
+	urls := append(ix.pageURLs(), ix.detailURLs()...)
 	for _, u := range urls {
 		r := httptest.NewRequest(http.MethodGet, u, nil)
 		e, ok := ix.pre.Load(requestKey(r))
@@ -33,8 +33,8 @@ func TestPrebuilt(t *testing.T) {
 		// The prebuilt body is what the handler computes.
 		live := httptest.NewRecorder()
 		mux := http.NewServeMux()
-		fresh := &index{h: ix.h, cmap: ix.cmap, health: ix.health, silos: silos.Build(ix.h, silos.Options{})}
-		srv.indexRoutes(mux, func() *index { return fresh })
+		fresh := &index{h: ix.h, cmap: ix.cmap, health: ix.health, silos: silos.Build(ix.h, silos.Options{}), tests: ix.tests, tags: ix.tags}
+		indexRoutes(mux, func() *index { return fresh })
 		mux.ServeHTTP(live, r)
 		if !bytes.Equal(e.(*encoded).body, live.Body.Bytes()) {
 			t.Errorf("%s: prebuilt body differs from a fresh one", u)

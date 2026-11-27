@@ -105,9 +105,9 @@ func prebuilt(fn func(*index, http.ResponseWriter, *http.Request)) func(*index, 
 
 // prebuild runs each of urls against ix and keeps the successful responses.
 // It stops early when ctx is done.
-func (s *Server) prebuild(ctx context.Context, ix *index, urls []string) {
+func (ix *index) prebuild(ctx context.Context, urls []string) {
 	mux := http.NewServeMux()
-	s.indexRoutes(mux, func() *index { return ix })
+	indexRoutes(mux, func() *index { return ix })
 	for _, u := range urls {
 		if ctx.Err() != nil {
 			return
@@ -166,13 +166,13 @@ var steps = []journey.Step{journey.Commit, journey.Week, journey.Month}
 
 // pageURLs are what the pages ask for when they open. They are built before
 // the index is published, so no page waits on them.
-func (s *Server) pageURLs(ix *index) []string {
+func (ix *index) pageURLs() []string {
 	urls := []string{"/api/health", "/api/silos"}
 	for _, st := range steps {
 		urls = append(urls, "/api/journey?step="+st.String(), "/api/layers?step="+st.String())
 	}
 	tests := []bool{false}
-	if s.opts.Tests {
+	if ix.tests {
 		tests = append(tests, true)
 	}
 	for _, t := range tests {
@@ -189,10 +189,10 @@ func (s *Server) pageURLs(ix *index) []string {
 // detailURLs are what the pages ask for when drilling into a directory or a
 // package. There is one per directory and step, so they are built after the
 // index is published, while the first page draws.
-func (s *Server) detailURLs(ix *index) []string {
+func (ix *index) detailURLs() []string {
 	var urls []string
 	for _, st := range steps {
-		for _, p := range s.journey(ix, st).Packages {
+		for _, p := range ix.journey(st).Packages {
 			urls = append(urls, "/api/journey/package/"+escDir(p.Path)+"?step="+st.String())
 		}
 	}

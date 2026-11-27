@@ -7,7 +7,9 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"reflect"
 	"slices"
+	"strings"
 	"testing"
 
 	"huginn/internal/git"
@@ -107,6 +109,22 @@ func TestCache(t *testing.T) {
 	}
 }
 
+func TestCacheShape(t *testing.T) {
+	type a struct{ X, Y int }
+	type b struct{ X, Z int }
+	type c struct {
+		X int
+		Y []string
+	}
+	shape := func(v any) string { return typeShape(reflect.TypeOf(v), map[reflect.Type]bool{}) }
+	if shape(a{}) == shape(b{}) || shape(a{}) == shape(c{}) {
+		t.Errorf("shapes alike: %s, %s, %s", shape(a{}), shape(b{}), shape(c{}))
+	}
+	if !strings.Contains(typeShape(reflect.TypeOf(cacheBody{}), map[reflect.Type]bool{}), "Methods slice(string)") {
+		t.Error("the shape of a cache body leaves out FieldRef.Methods")
+	}
+}
+
 func TestCacheDiscarded(t *testing.T) {
 	r := gittest.New(t)
 	r.Commit("root", map[string]string{"a.go": "package a\n\nfunc A() {}\n"})
@@ -119,7 +137,16 @@ func TestCacheDiscarded(t *testing.T) {
 			if err != nil {
 				return err
 			}
-			err = gob.NewEncoder(f).Encode(cacheHeader{Version: cacheVersion + 1})
+			err = gob.NewEncoder(f).Encode(cacheHeader{Version: cacheVersion + 1, Shape: cacheShape})
+			return errors.Join(err, f.Close())
+		},
+		// Another branch's build at the same version, with other ast types.
+		"shape": func(path string) error {
+			f, err := os.Create(path)
+			if err != nil {
+				return err
+			}
+			err = gob.NewEncoder(f).Encode(cacheHeader{Version: cacheVersion, Shape: "another"})
 			return errors.Join(err, f.Close())
 		},
 		"truncated": func(path string) error {

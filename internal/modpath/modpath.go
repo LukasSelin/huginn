@@ -120,6 +120,11 @@ func (r *Resolver) Targets(s *ast.Symbol) []string {
 	return out
 }
 
+// PackageOf returns the import path of the package declared by the file at
+// path in the repository; the package name is not needed. It has the shape
+// semdiff.NewIndex asks for.
+func (r *Resolver) PackageOf(file, _ string) string { return r.ImportPath(path.Dir(file)) }
+
 // ImportPath returns the import path of the package in directory dir: the
 // first module path under which the symbols import it, or under which they
 // could when none do. Without a module it is dir itself, which still tells

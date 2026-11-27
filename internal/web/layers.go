@@ -28,13 +28,13 @@ type layerFrameJSON struct {
 
 // layersAPI serves the packages of every frame of ?step=commit|week|month
 // (week by default) in layers, by journey.Layers.
-func (s *Server) layersAPI(ix *index, w http.ResponseWriter, r *http.Request) {
+func (ix *index) layersAPI(w http.ResponseWriter, r *http.Request) {
 	step, ok := journey.ParseStep(cmp.Or(r.URL.Query().Get("step"), "week"))
 	if !ok {
 		http.Error(w, "step must be commit, week or month", http.StatusBadRequest)
 		return
 	}
-	j := s.journey(ix, step)
+	j := ix.journey(step)
 	out := layersJSON{Step: step.String(), Packages: packagesJSON(j.Packages), Frames: make([]layerFrameJSON, 0, len(j.Frames))}
 	for _, f := range j.Frames {
 		layer, cyclic := journey.Layers(len(j.Packages), f.Deps)

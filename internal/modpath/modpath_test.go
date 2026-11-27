@@ -39,3 +39,15 @@ func TestResolverRenamedModule(t *testing.T) {
 		}
 	}
 }
+
+func TestPackageOf(t *testing.T) {
+	r := Infer([]*ast.Symbol{
+		fn("main.go", "Main", "example.com/app/store"),
+		fn("store/store.go", "Get"),
+	})
+	for file, want := range map[string]string{"main.go": "example.com/app", "store/store.go": "example.com/app/store", "store/x_test.go": "example.com/app/store"} {
+		if got := r.PackageOf(file, "ignored"); got != want {
+			t.Errorf("PackageOf(%q) = %q, want %q", file, got, want)
+		}
+	}
+}

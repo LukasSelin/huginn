@@ -1,0 +1,109 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>huginn · affinity</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600&amp;family=JetBrains+Mono:wght@400;600&amp;family=Newsreader:opsz,wght@6..72,400;6..72,500&amp;display=swap" rel="stylesheet">
+<link rel="stylesheet" href="app.css">
+<link rel="stylesheet" href="health.css">
+<link rel="stylesheet" href="affinity.css">
+</head>
+<body>
+<header class="top">
+  <div class="brand">
+    <svg width="26" height="26" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 12c3-5 6-7 9-7s6 2 9 7c-3 5-6 7-9 7s-6-2-9-7z"></path><circle cx="12" cy="12" r="3"></circle></svg>
+    <span class="mono">huginn</span>
+    <span class="repo" id="repo"></span>
+  </div>
+  <nav aria-label="Views" class="views">
+    <a href="/">Journey</a>
+    <a href="/layers">Layers</a>
+    <a href="/map">Map</a>
+    <a href="/health">Health</a>
+    <a href="/review">Review</a>
+    <a href="/affinity" aria-current="page">Affinity</a>
+  </nav>
+</header>
+
+<div id="loading" class="loading" role="status">Starting…</div>
+
+<div id="app" class="aff" hidden>
+  <aside class="picker" aria-labelledby="pickTitle">
+    <div class="titlerow">
+      <h2 class="h2" id="pickTitle">Types that may do too much</h2>
+    </div>
+    <span class="muted small">score = blocks × log methods × log fields × log edits</span>
+    <div class="seg" role="group" aria-label="Window of history" id="monthSeg"></div>
+    <input type="search" id="filter" class="filter" placeholder="Filter types" aria-label="Filter types" autocomplete="off">
+    <ol class="types" id="types"></ol>
+  </aside>
+
+  <main class="report" id="report" aria-live="polite">
+    <section class="summary" aria-label="Summary">
+      <p class="eyebrow" id="where"></p>
+      <h1 class="headline" id="headline"></h1>
+      <p class="lede" id="lede"></p>
+      <div class="stats" id="stats"></div>
+    </section>
+
+    <section class="panel matrix-panel" aria-labelledby="matTitle">
+      <div class="titlerow">
+        <h2 class="h2" id="matTitle">Methods × fields</h2>
+        <div class="seg" role="group" aria-label="Order" id="orderSeg"></div>
+      </div>
+      <div class="legend" id="legend"></div>
+      <div class="matrix-scroll"><table class="matrix" id="matrix"></table></div>
+      <p class="muted small hint">Point at a method to light up its fields and the methods it calls; at a field, the methods using it. Shaded cells are a method using a field of its own block.</p>
+    </section>
+
+    <section class="blocks" id="blocks" aria-label="Blocks"></section>
+
+    <div class="pair">
+      <section class="panel side" aria-labelledby="findTitle">
+        <h2 class="h2" id="findTitle">Findings</h2>
+        <ul class="findings" id="findings"></ul>
+      </section>
+      <section class="panel side" aria-labelledby="stepTitle">
+        <h2 class="h2" id="stepTitle">Suggested order</h2>
+        <ol class="steps" id="steps"></ol>
+        <h3 class="h2 sub" id="noteTitle">Where the signals disagree</h3>
+        <ul class="notes" id="notes"></ul>
+      </section>
+    </div>
+
+    <section class="panel" aria-labelledby="coTitle">
+      <div class="titlerow">
+        <h2 class="h2" id="coTitle">Change coupling</h2>
+        <span class="muted small" id="coSub"></span>
+      </div>
+      <div class="pair">
+        <div class="heat-scroll"><table class="heat" id="heat"></table></div>
+        <div class="co-side">
+          <ul class="pairs" id="pairs"></ul>
+        </div>
+      </div>
+    </section>
+
+    <section class="panel" aria-labelledby="clTitle">
+      <div class="titlerow">
+        <h2 class="h2" id="clTitle">Clients</h2>
+        <span class="muted small">packages, and files of the type's own package, calling its methods · ~ matched by name only</span>
+      </div>
+      <div class="scroll"><table class="data clients" id="clients"></table></div>
+      <ol class="roles" id="roles"></ol>
+      <ul class="uncalled" id="uncalled"></ul>
+      <div id="ifaces"></div>
+    </section>
+
+    <section class="panel" aria-labelledby="nameTitle">
+      <h2 class="h2" id="nameTitle">Names</h2>
+      <div id="names"></div>
+    </section>
+  </main>
+</div>
+<script src="common.js"></script>
+<script src="affinity.js"></script>
+</body>
+</html>

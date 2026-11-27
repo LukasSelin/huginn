@@ -2,6 +2,7 @@ package ast
 
 import (
 	"fmt"
+	"strings"
 	"testing"
 )
 
@@ -279,5 +280,99 @@ func (s *Server) Run(c cfg.Options) {
 	}
 	if fmt.Sprint(got) != fmt.Sprint(want) {
 		t.Errorf("field refs:\n got %q\nwant %q", got, want)
+	}
+}
+
+func TestFieldWriteForms(t *testing.T) {
+	f := mustParse(t, "a.go", `package a
+
+type S struct{}
+
+func (s *S) Run(xs []int, k string, v any) {
+	s.a = 1
+	s.b[k] = v
+	s.c.d = v
+	s.e += 1
+	s.f++
+	p := &s.g
+	delete(s.h, k)
+	clear(s.i)
+	close(s.j)
+	s.k <- v
+	for s.l = range xs {
+	}
+	x := s.m
+	s.n.Store(v)
+	s.o.Load()
+	s.n.Store(v)
+	(s.o).Swap(v)
+	s.q = append(s.q, 1)
+	_ = S{p: 1}
+	use(p, x)
+}
+`)
+	var got []string
+	for _, r := range symbol(t, f, "S.Run").FieldRefs {
+		got = append(got, fmt.Sprintf("%s.%s %d/%d %v", r.Type, r.Name, r.Writes, r.Count, r.Methods))
+	}
+	want := []string{
+		".d 0/1 []", // s.c.d = v writes c, the field at its root
+		"S.a 1/1 []",
+		"S.b 1/1 []",
+		"S.c 1/1 []",
+		"S.e 1/1 []",
+		"S.f 1/1 []",
+		"S.g 1/1 []",
+		"S.h 1/1 []",
+		"S.i 1/1 []",
+		"S.j 1/1 []",
+		"S.k 1/1 []",
+		"S.l 1/1 []",
+		"S.m 0/1 []",
+		"S.n 0/2 [Store]",
+		"S.o 0/2 [Load Swap]",
+		"S.p 0/1 []", // a literal key
+		"S.q 1/2 []",
+	}
+	if fmt.Sprint(got) != fmt.Sprint(want) {
+		t.Errorf("field writes:\n got %q\nwant %q", got, want)
+	}
+}
+
+func TestMemberGroups(t *testing.T) {
+	f := mustParse(t, "a.go", `package a
+
+type S struct {
+	a, b int // trailing
+	// doc for c
+	c int
+
+	// doc for d, after a blank line
+	d int
+	io.Reader
+
+	// a floating section comment
+
+	e int
+	f int
+}
+
+type I interface {
+	A()
+
+	B()
+}
+`)
+	for key, want := range map[string]string{
+		"S": "a:0 b:0 c:0 d:1 Reader:1 e:2 f:2",
+		"I": "A:0 B:1",
+	} {
+		var got []string
+		for _, m := range symbol(t, f, key).Members {
+			got = append(got, fmt.Sprintf("%s:%d", m.Name, m.Group))
+		}
+		if s := strings.Join(got, " "); s != want {
+			t.Errorf("%s groups = %q, want %q", key, s, want)
+		}
 	}
 }

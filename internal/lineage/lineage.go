@@ -188,6 +188,47 @@ func (h *History) Lookup(path, key string) *Symbol {
 	return h.Symbol(id)
 }
 
+// LiveFiles returns the files that declare the live symbols keep accepts (all
+// of them when keep is nil), ordered by the ID of their first symbol, each
+// with its symbols' latest declarations in ID order.
+//
+// The history keeps no imports, so each file's are inferred from its
+// symbols' references: every import a file uses shows in them, by path but
+// without its explicit name. The symbols are the history's own and must not
+// be changed.
+func (h *History) LiveFiles(keep func(*ast.Symbol) bool) []*ast.File {
+	byPath := map[string]*ast.File{}
+	var out []*ast.File
+	for _, sym := range h.symbols {
+		if !sym.Alive() {
+			continue
+		}
+		cur := sym.Latest()
+		if keep != nil && !keep(cur) {
+			continue
+		}
+		f := byPath[cur.Path]
+		if f == nil {
+			f = &ast.File{Path: cur.Path, Package: cur.Package}
+			byPath[cur.Path] = f
+			out = append(out, f)
+		}
+		f.Symbols = append(f.Symbols, cur)
+	}
+	for _, f := range out {
+		seen := map[string]bool{}
+		for _, s := range f.Symbols {
+			for _, ref := range s.Refs {
+				if ref.Kind == ast.RefImport && !seen[ref.Pkg] {
+					seen[ref.Pkg] = true
+					f.Imports = append(f.Imports, ast.Import{Path: ref.Pkg})
+				}
+			}
+		}
+	}
+	return out
+}
+
 // Find returns the symbols whose latest qualified name is name, e.g.
 // "(*Indexer).Visit", live ones first, then by ID.
 func (h *History) Find(name string) []*Symbol {

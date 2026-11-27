@@ -39,6 +39,7 @@ huginn serve [-C dir] [-branch rev] [-tests] [-no-cache] [-addr host:port]
 huginn semdiff [-C dir] [-include-generated] [-callers n] rev
 huginn review [-C dir] [-base rev] [-head rev] [-format text|markdown|json] [-callers n] [folder ...]
 huginn silos [-C dir] [-branch rev] [-no-cache] [-n count] [-leaves name,...]
+huginn affinity [-C dir] [-branch rev] [-tests] [-no-cache] [-months n] [-hub share] [-min-co n] [-n count] [-json] [type]
 ```
 
 `-C` points at the repository (default: the current directory), `-branch`
@@ -62,9 +63,10 @@ indexed 210 live symbols in 249ms (0 commits cached, 4 walked)
 ### `huginn serve`
 
 Indexes the history in the background and serves the journey, layers, map,
-health and review pages at `http://localhost:7878`, opening on the journey;
-the others are at `/layers`, `/map`, `/health` and `/review` (see
-[`huginn review`](#huginn-review)). While indexing, the pages show
+health, review and affinity pages at `http://localhost:7878`, opening on
+the journey; the others are at `/layers`, `/map`, `/health`, `/review` (see
+[`huginn review`](#huginn-review)) and `/affinity` (see
+[`huginn affinity`](#huginn-affinity)). While indexing, the pages show
 progress. Once the history is indexed, the server encodes and gzips the
 responses the pages open with (the journey and the layers at every
 step, the health report and knowledge silos, the map's preset windows)
@@ -93,6 +95,16 @@ share a layer and the references between them are drawn red. Drag to turn
 the view, scroll to zoom, and point at or pick a package to light up what
 it refers to and what refers to it.
 
+The affinity page shows what `huginn affinity` prints for one type, picked
+from the types that look like they do too much: the methods against the
+fields, shaded where a method uses a field of its own block, with a toggle
+back to the order they were declared in to see the blocks scatter; point at
+a method to light up its fields and the methods it calls. Below come the
+blocks, the findings, the suggested order, the change coupling as a grid
+of the methods that changed together, the clients with the interfaces they
+could declare, and the names. A followed type or method on the journey
+links to it. The report is built when first asked for and kept.
+
 ```
 $ huginn serve
 huginn: serving http://127.0.0.1:7878
@@ -109,6 +121,8 @@ The UI is backed by a small JSON API:
 | `GET /api/silos` | knowledge silos: packages and symbols ranked by concentration × criticality, each with its reasons, everyone's share of the live code, and pairs coupled across knowledge boundaries |
 | `GET /api/silos/leave?author=name` | what would be orphaned or rest on one person if the named authors (repeat `author` for several) left now, ranked as a hand-over list |
 | `GET /api/layers?step=commit\|week\|month` | every frame's live packages with their layer, and the references between them, marking those that run within a cycle; packages carry the journey's map layout |
+| `GET /api/affinity/types?months=n` | the struct types with methods, ranked by how much they seem to do, with edits counted over the last `n` months (12; 0 for all history) |
+| `GET /api/affinity?type=id\|name=dir.Type&months=n` | one type's affinity report, as `huginn affinity -json` prints it: the matrix, blocks, findings, change coupling, clients, names, suggested order and disagreements |
 | `GET /api/review?head=rev&base=rev&path=dir` | a merge request's review, as `huginn review` reports it: `head` defaults to `HEAD`, `base` to the remote's default branch, and `path`, repeated, limits it to folders; works while indexing |
 | `GET /api/review/options?head=rev` | what the review page offers to pick from: the branch checked out, the default target, every branch, and the directories holding Go code at `head` |
 
@@ -147,6 +161,99 @@ Package silos (2 of 11)
           Lukas Selin holds 100% · bus factor 1 · 392 call sites from 45 callers in 8 other packages (8 approx.) · cyclomatic 315 · 110 edits
    267.4  internal/journey
           Lukas Selin holds 100% · bus factor 1 · 33 call sites from 8 callers in 2 other packages (2 approx.) · cyclomatic 360 · 122 edits
+…
+```
+
+### `huginn affinity`
+
+Looks for the seams inside a type that does too much, by asking what is
+already grouped together in it from four sides. Where they agree, there is
+a type to extract.
+
+- **The affinity matrix.** Every method against every field, marked R or W
+  for read and written; atomic, `sync.Map`, `bytes.Buffer` and
+  `strings.Builder` fields count as written through their mutating methods
+  (`Store`, `Add`, `WriteString`, …). Each field gets a class: *state*
+  (written by methods), *configuration* (never written), *collaborator* (a
+  pointer, func, channel or interface never written), *temporary* (used
+  only within one writer's calls), *infrastructure* (locks, loggers) or
+  *unused*. A configuration or collaborator field most methods use is a
+  *hub* and is set aside, as it would join everything. The state written
+  by the same methods forms the core and other blocks of state; the other
+  fields form service blocks with the methods that use them, and a service
+  block called only from another is merged into it. A method writing state
+  stays with it, a method reading state while using a service goes with the
+  service (it can take the state as parameters), a method that only calls
+  others joins their block if they share one and is a *bridge* otherwise,
+  and one touching no field and calling no method is *free*. Every
+  placement says why, and the rows and columns are reordered block by
+  block.
+- **Findings.** Glue methods (writing state and using a service: split them
+  first), state written from two blocks, methods without which a block
+  falls in two, bridges, free methods and the parameter type they share,
+  hubs, methods needing only a hub, temporaries, fields always used
+  together, getters through which code elsewhere works on a field, and
+  unused fields. LCOM4 counts the groups of methods linked by a field or a
+  call before the hubs and bridges are set aside; the block count is the
+  same after.
+- **Change coupling.** Which methods changed in the same commits in the
+  last `-months` (12; 0 for all history), each commit weighted by 1/(n−1)
+  for the n methods it changed. The commit that added the type and those
+  changing more than half its methods (at least five), such as a receiver
+  rename, are left out. Pairs that changed together at least `-min-co`
+  times (2) across blocks are explained: one reaches the other through its
+  calls (the boundary may be wrong), both read the same field (a rule may
+  be duplicated), or neither (a concept is missing). Each block also lists
+  the symbols elsewhere that changed with it in small commits.
+- **Clients.** The packages, and the files of the type's own package, that
+  call its methods or use them as values, grouped into roles by the
+  methods they share. A client using one block is clean; one spanning
+  several is a use case for a facade. Each package gets the interface it
+  could declare for what it uses, so it depends on those methods only.
+  Methods nothing calls are listed, with the interface they may implement.
+- **Names.** Words the members' names share, fields used by exactly the
+  same methods, fields that look like modes, and whether the groups the
+  fields were declared in fall within one block.
+
+It ends with an order of extractions (free methods first, then the blocks
+that own their writes, most changed first) and the places where the
+signals disagree. Without a type, it ranks the struct types by how much
+they seem to do. `-json` prints the same report as the web page reads. Run
+against this repository:
+
+```
+$ huginn affinity Server
+type internal/web.Server  internal/web/server.go:36
+28 methods · 12 fields · LCOM4 1 → 4 blocks · 16 commits in 12 months
+
+                   index
+                   ┆  done
+                   ┆  ┆  err
+                   ┆  ┆  ┆  settled
+                   ┆  ┆  ┆  ┆  │ repo
+                   ┆  ┆  ┆  ┆  │ ┆  reports
+                   ┆  ┆  ┆  ┆  │ ┆  ┆  build
+                   ┆  ┆  ┆  ┆  │ ┆  ┆  ┆  │ name
+                   ┆  ┆  ┆  ┆  │ ┆  ┆  ┆  │ ┆  │ ui
+                   ┆  ┆  ┆  ┆  │ ┆  ┆  ┆  │ ┆  │ ┆  uiEncoded
+                   ┆  ┆  ┆  ┆  │ ┆  ┆  ┆  │ ┆  │ ┆  ┆  ║ opts (hub)
+                   ┆  ┆  ┆  ┆  │ ┆  ┆  ┆  │ ┆  │ ┆  ┆  ║ ┆  settle (infra)
+A  Index           W  W  W  W  │ R  ·  ·  │ ·  │ ·  ·  ║ R  R   → historyKey, pageURLs, detailURLs, loadSaved, +2
+A  Handler         R  ·  ·  ·  │ ·  ·  ·  │ ·  │ ·  ·  ║ ·  ·   → commit (value), status (value), file, indexRoutes
+B  buildReport     ·  ·  ·  ·  │ R  ·  ·  │ ·  │ ·  ·  ║ R  ·
+B  commit          R  ·  ·  ·  │ R  R  R  │ ·  │ ·  ·  ║ ·  ·
+…
+E  health          ·  ·  ·  ·  │ ·  ·  ·  │ ·  │ ·  ·  ║ R  ·
+…
+br journeyAPI      ·  ·  ·  ·  │ ·  ·  ·  │ ·  │ ·  ·  ║ ·  ·   → story, journey
+…
+fn silosLeave      ·  ·  ·  ·  │ ·  ·  ·  │ ·  │ ·  ·  ║ ·  ·
+…
+Suggested order
+  1. Move out journeySymbols, symbol, silosAPI and silosLeave: they touch no field and call no method
+     all take *index
+  2. Extract B (report): repo, reports and build with buildReport, commit, story and historyKey
+     owns its writes · 5 edits in 4 commits · changes together 16% · its client uses only it · named report · 3 crossings
 …
 ```
 
@@ -422,7 +529,14 @@ git log / cat-file ──► internal/git ──► internal/ast ──► inter
   per package frame by frame; **internal/silos** reads it at the last
   revision, resolves callers among the live symbols with semdiff's index
   (the module path inferred by **internal/modpath**, as the journey does),
-  and ranks silos, departures and cross-knowledge coupling.
+  and ranks silos, departures and cross-knowledge coupling. Both resolve
+  callers over the history's live tree (`History.LiveFiles`), and count
+  changes made together with **internal/cochange**.
+- **internal/affinity** analyzes one type at the last revision: its
+  methods' field references, now told apart into reads and writes by
+  internal/ast, clustered into blocks; its methods' co-changes from the
+  lineage; and its callers, from semdiff's index over the live tree (with
+  method values, `Index.ValueUses`).
 
 The packages are stacked in layers, and depguard rules in `.golangci.yml`
 keep them that way: foundation (`ast`, `git`, `modpath`), history
@@ -480,3 +594,16 @@ size of the files they touched.
   counts as one commit, diffed against its first parent, so the changes of a
   merged branch are attributed to the merge commit, its author and its date.
   Commits on the merged branch do not appear in a symbol's timeline.
+- **Affinity is syntactic too.** Writes are seen in assignments, `++`,
+  `&x.f`, sends, `delete`, `clear` and `close`, and through methods only
+  for atomic, `sync.Map`, `bytes.Buffer` and `strings.Builder` fields;
+  `&x.f` counts as a write. Aliases (`p := s.items; p[0] = v`) and
+  `*s = T{}` are not followed, uses of other values of the type are not
+  attributed to it, and promoted members only when the type embeds one
+  field or a mutex. Classes are heuristics: a field read through a pointer
+  is a collaborator, a field written only by one method and the methods it
+  calls a temporary. Callers outside the receiver are matched by method
+  name, from files that import the type's package or name it in a
+  signature; interfaces a method may implement are matched by name only.
+  Declaration groups and lines are those of the type's last semantic
+  change, since a blank line alone changes nothing.

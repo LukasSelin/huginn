@@ -2032,10 +2032,24 @@
       h('div', { class: `muted small${now.state === 'live' ? '' : ' fol-off'}` }, where),
       h('div', { class: 'fol-links small' },
         now.dir && (!state.drill || state.drill.dir !== now.dir)
-          ? h('button', { type: 'button', class: 'linkish', onclick: () => drill(now.dir).catch(fail) }, `Look inside ${base(now.dir)}`) : null),
+          ? h('button', { type: 'button', class: 'linkish', onclick: () => drill(now.dir).catch(fail) }, `Look inside ${base(now.dir)}`) : null,
+        affinityLink(now, sym)),
       h('ol', { class: 'fol-events' }, sym.events.map((x) => h('li', { class: x.rev <= r ? (x === e ? 'now' : 'past') : 'future' },
         h('button', { type: 'button', onclick: () => { stop(); seekRev(x.rev); } },
           mark(x.kind), h('span', { class: 'mono small' }, fmtShort(x.t)), h('span', { class: 'small' }, x.summary || x.kind))))));
+  }
+
+  // affinityLink links a live type, or a live method's receiver type, to
+  // its affinity matrix.
+  function affinityLink(now, sym) {
+    if (now.state !== 'live') return null;
+    let hash = null;
+    if (sym.kind === 'type') hash = `type=${state.follow.id}`;
+    else if (sym.kind === 'method') {
+      const recv = now.e.name.replace(/^\(\*?/, '').split(/[).]/)[0];
+      hash = `name=${encodeURIComponent(`${now.dir}.${recv}`)}`;
+    }
+    return hash && h('a', { class: 'linkish', href: `/affinity#${hash}` }, sym.kind === 'type' ? 'Affinity matrix' : 'Its type\'s affinity matrix');
   }
 
   // While following, the opened package follows the symbol when it moves

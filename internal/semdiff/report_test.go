@@ -2,6 +2,7 @@ package semdiff
 
 import (
 	"fmt"
+	"path"
 	"strings"
 	"testing"
 
@@ -391,5 +392,57 @@ func TestImportPath(t *testing.T) {
 	}
 	if got := (modules{}).importPath("a/b"); got != "a/b" {
 		t.Errorf("without go.mod: %q", got)
+	}
+}
+
+func TestValueUses(t *testing.T) {
+	tree := []*ast.File{
+		parse(t, "srv/srv.go", `package srv
+
+type Server struct{ build func() }
+
+func New() *Server {
+	s := &Server{}
+	s.build = s.buildReport
+	return s
+}
+
+func (s *Server) buildReport() {}
+
+func (s *Server) routes() { use(s.buildReport, s.buildReport) }
+`),
+		parse(t, "app/app.go", `package app
+
+import "example.com/m/srv"
+
+func Run(s *srv.Server) { use(s.buildReport) }
+`),
+		parse(t, "other/other.go", `package other
+
+func Run(x any) { use(x.buildReport) }
+`),
+	}
+	pkgOf := func(p, _ string) string { return "example.com/m/" + path.Dir(p) }
+	idx := NewIndex(tree, pkgOf)
+	var target *ast.Symbol
+	for _, s := range tree[0].Symbols {
+		if s.Key == "Server.buildReport" {
+			target = s
+		}
+	}
+	var got []string
+	for _, u := range idx.ValueUses(target, "example.com/m/srv") {
+		got = append(got, fmt.Sprintf("%s %s %d approx=%v", u.Package, u.Caller.Key, u.Calls, u.Approximate))
+	}
+	want := []string{
+		"example.com/m/srv Server.routes 2 approx=false",
+		"example.com/m/srv New 1 approx=true",
+		"example.com/m/app Run 1 approx=true",
+	}
+	if fmt.Sprint(got) != fmt.Sprint(want) {
+		t.Errorf("value uses:\n got %q\nwant %q", got, want)
+	}
+	if u := idx.ValueUses(tree[0].Symbols[1], "example.com/m/srv"); u != nil {
+		t.Errorf("value uses of a func: %+v", u)
 	}
 }

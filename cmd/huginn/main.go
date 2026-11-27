@@ -37,6 +37,13 @@
 // ranks the packages and symbols few people know that much depends on, and
 // the pairs coupled across who knows what; with -leaves, what the named
 // authors would leave orphaned or resting on one person.
+//
+//	huginn affinity [-C dir] [-branch rev] [-tests] [-no-cache] [-months n] [-hub share] [-min-co n] [-n count] [-json] [type]
+//
+// prints a type's methods against its fields, clustered into the blocks
+// that could become types of their own, with how the methods change
+// together, who calls them and what their names share; without a type, the
+// types that look like they do too much.
 package main
 
 import (
@@ -62,16 +69,18 @@ const usage = `usage:
   huginn story [-C dir] [-branch rev] [-tests] [-no-cache] [-moments]
   huginn semdiff [-C dir] [-include-generated] [-callers n] rev
   huginn review [-C dir] [-base rev] [-head rev] [-format text|markdown|json] [-callers n] [folder ...]
-  huginn silos [-C dir] [-branch rev] [-no-cache] [-n count] [-leaves name,...]`
+  huginn silos [-C dir] [-branch rev] [-no-cache] [-n count] [-leaves name,...]
+  huginn affinity [-C dir] [-branch rev] [-tests] [-no-cache] [-months n] [-hub share] [-min-co n] [-n count] [-json] [type]`
 
 func main() {
 	cmds := map[string]func(context.Context, io.Writer, io.Writer, []string) error{
-		"symbols": symbols,
-		"serve":   serve,
-		"semdiff": semanticDiff,
-		"review":  reviewMergeRequest,
-		"story":   tell,
-		"silos":   listSilos,
+		"symbols":  symbols,
+		"serve":    serve,
+		"semdiff":  semanticDiff,
+		"review":   reviewMergeRequest,
+		"story":    tell,
+		"silos":    listSilos,
+		"affinity": showAffinity,
 	}
 	if len(os.Args) < 2 || cmds[os.Args[1]] == nil {
 		fmt.Fprintln(os.Stderr, usage)
