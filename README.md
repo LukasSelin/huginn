@@ -69,6 +69,16 @@ step, the health report and knowledge silos, the map's preset windows)
 before it reports ready, then the per-directory views in the background, so
 the pages draw from memory.
 
+The journey can also be watched as an architecture being built: switch its
+view from *Map* to *Architecture* (or press `A`, and `M` to go back) and
+playback stacks the packages in 3D instead, as the layers page draws them.
+It starts above, where the stack is the journey map, and comes down to the
+side as layers appear, turning slowly while it plays; each package drops
+onto its layer as it is born and flashes when it moves to another. Story
+mode, chapters, key moments, the Edits and Knowledge colours, the author
+filter and the video export all work in it; drag to turn it yourself, or
+pick *Auto* to hand the camera back.
+
 The layers page stacks the packages in 3D, frame by frame: a package that
 refers to no other package of the repository sits on the bottom layer, and
 every other one a layer above the highest package it refers to, so every

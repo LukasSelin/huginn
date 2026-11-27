@@ -234,6 +234,19 @@
 .ov-br { right: 20px; bottom: 18px; display: flex; align-items: center; gap: 6px; }
 .ov-zoom { right: 20px; top: 50%; transform: translateY(-50%); display: flex; flex-direction: column; gap: 6px; pointer-events: auto; cursor: auto; }
 .icon.zb { width: 30px; height: 30px; border-radius: 8px; }
+
+/* The architecture view: the history building the packages' layers in 3D,
+   drawn on a canvas over the map, which hides beneath it. */
+#arch { position: absolute; inset: 0; width: 100%; height: 100%; display: block; touch-action: none; cursor: grab; }
+#arch[hidden] { display: none; }
+#arch.dragging { cursor: grabbing; }
+#arch.over { cursor: pointer; }
+.stage.arch .world, .stage.arch .foltag { visibility: hidden; }
+.ov-cam { right: 20px; top: 84px; display: flex; flex-direction: column; align-items: flex-end; gap: 8px; pointer-events: auto; cursor: auto; }
+.legend.lines { display: flex; gap: 10px; font-size: 11px; color: var(--text-2); }
+.legend.lines span { display: inline-flex; align-items: center; gap: 5px; }
+.legend.lines .sw { display: inline-block; width: 14px; height: 3px; border-radius: 2px; }
+.sw.out { background: var(--accent); } .sw.in { background: var(--moved); } .sw.cyc { background: var(--deleted); }
 .icon.zb:disabled { opacity: .35; cursor: default; }
 .icon.zb:focus-visible { outline: 2px solid var(--text); outline-offset: 2px; }
 .swatches { display: flex; gap: 2px; }
@@ -411,6 +424,8 @@
   .counters dd { font-size: 15px; }
   .stage { height: 440px; }
   .ov-br { display: none; }
+  .ov-cam { top: 64px; }
+  .legend.lines { display: none; }
   .card { max-height: calc(100% - 150px); }
   .card-text { font-size: 15px; }
 }

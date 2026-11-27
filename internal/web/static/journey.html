@@ -44,6 +44,7 @@
           <div class="tags" id="tags" aria-hidden="true"></div>
         </div>
       </div>
+      <canvas id="arch" aria-hidden="true" hidden></canvas>
       <div class="foltag" id="folTag" aria-hidden="true" hidden></div>
       <div class="ov tip" id="tip" role="tooltip" hidden></div>
       <div class="ov ov-tl">
@@ -62,7 +63,21 @@
         <div><dt>Commits</dt><dd id="cCommits">0</dd></div>
         <div><dt>Live symbols</dt><dd id="cLive">0</dd></div>
         <div><dt>Packages</dt><dd id="cPkgs">0</dd></div>
+        <div id="cLayersBox" hidden><dt>Layers</dt><dd id="cLayers">0</dd></div>
       </dl>
+      <div class="ov ov-cam" id="camBox" hidden>
+        <div class="seg" role="group" aria-label="Look from" id="camera">
+          <button type="button" data-v="auto" title="Start above, on the map, and come down to the side as layers appear; turn slowly while playing">Auto</button>
+          <button type="button" data-v="side" title="Look from the side: the layers edge on">Side</button>
+          <button type="button" data-v="angle" title="Look from above at an angle">Angle</button>
+          <button type="button" data-v="top" title="Look from above: the journey map">Top</button>
+        </div>
+        <div class="legend lines" aria-label="Line colours">
+          <span><i class="sw out"></i>refers to</span>
+          <span><i class="sw in"></i>referred to by</span>
+          <span><i class="sw cyc"></i>in a cycle</span>
+        </div>
+      </div>
       <div class="ov ov-zoom" role="group" aria-label="Zoom">
         <button type="button" class="icon zb" id="zoomIn" aria-label="Zoom in" title="Zoom in (+, or scroll)">
           <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" aria-hidden="true"><path d="M12 5v14M5 12h14"></path></svg>
@@ -121,6 +136,10 @@
           <button type="button" class="icon" id="nextMoment" aria-label="Next key moment" title="Next key moment ( ] or Shift+→ )">
             <svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M18 5h2v14h-2zM11 5v14l6.5-7zM3 5v14l6.5-7z"></path></svg>
           </button>
+        </div>
+        <div class="seg" role="group" aria-label="View" id="viewBy">
+          <button type="button" data-v="map" title="The packages on the map (M)">Map</button>
+          <button type="button" data-v="arch" title="Watch the history build the architecture: each package stacked above what it refers to (A)">Architecture</button>
         </div>
         <div class="seg" role="group" aria-label="Speed" id="speed">
           <button type="button" data-v="1">1×</button>
@@ -202,6 +221,7 @@
 <script src="common.js"></script>
 <script src="gif.js"></script>
 <script src="video.js"></script>
+<script src="stack3d.js"></script>
 <script src="journey.js"></script>
 </body>
 </html>
