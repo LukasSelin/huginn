@@ -13,7 +13,7 @@ linters:
       #   foundation  internal/ast, internal/git, internal/modpath
       #   history     internal/lineage, internal/knowledge, internal/codemap
       #   analyses    internal/journey, internal/health, internal/semdiff
-      #   reports     internal/story, internal/silos
+      #   reports     internal/story, internal/silos, internal/review
       #   ui          internal/web
       #   cmd         cmd/huginn (may use anything)
       #
@@ -74,6 +74,7 @@ linters:
           files:
             - "**/internal/story/*.go"
             - "**/internal/silos/*.go"
+            - "**/internal/review/*.go"
             - "!$test"
           allow:
             - $gostd
@@ -104,6 +105,7 @@ linters:
             - huginn/internal/semdiff$
             - huginn/internal/story$
             - huginn/internal/silos$
+            - huginn/internal/review$
         # internal/gittest builds throwaway repositories for tests; nothing
         # else may depend on it.
         test-helpers-only-in-tests:

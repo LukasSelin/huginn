@@ -122,9 +122,12 @@ func (s *Server) Handler() http.Handler {
 	mux.Handle("GET /map", s.file("index.html"))
 	mux.Handle("GET /health", s.file("health.html"))
 	mux.Handle("GET /layers", s.file("layers.html"))
+	mux.Handle("GET /review", s.file("review.html"))
 	mux.HandleFunc("GET /api/status", s.status)
 	s.indexRoutes(mux, s.index.Load)
 	mux.HandleFunc("GET /api/commit/{rev...}", s.commit)
+	mux.HandleFunc("GET /api/review", s.reviewAPI)
+	mux.HandleFunc("GET /api/review/options", s.reviewOptions)
 	return mux
 }
 

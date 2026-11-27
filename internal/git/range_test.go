@@ -73,6 +73,31 @@ func TestDiffRange(t *testing.T) {
 	}
 }
 
+func TestBranchesAndGoDirs(t *testing.T) {
+	r, _ := mergeRequestRepo(t)
+	repo := r.open()
+	ctx := context.Background()
+	clone := filepath.Join(t.TempDir(), "clone")
+	r.Git("clone", "-q", r.Dir, clone)
+	cr, err := Open(clone)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// master was committed to last; origin/HEAD is left out.
+	got, err := cr.Branches(ctx)
+	if want := []string{"master", "origin/master", "origin/feature"}; err != nil || !slices.Equal(got, want) {
+		t.Errorf("Branches = %q, %v; want %q", got, err, want)
+	}
+
+	got, err = repo.GoDirs(ctx, "feature")
+	if want := []string{".", "a", "c"}; err != nil || !slices.Equal(got, want) {
+		t.Errorf("GoDirs(feature) = %q, %v; want %q", got, err, want)
+	}
+	if _, err := repo.GoDirs(ctx, "nope"); err == nil {
+		t.Error("GoDirs(nope): no error")
+	}
+}
+
 func TestMergeBaseUnrelated(t *testing.T) {
 	r, _ := mergeRequestRepo(t)
 	r.Git("checkout", "-q", "--orphan", "lonely")

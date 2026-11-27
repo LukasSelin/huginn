@@ -7,8 +7,8 @@
 //
 //	huginn serve [-C dir] [-branch rev] [-tests] [-no-cache] [-addr host:port]
 //
-// indexes the history and serves the map, health and journey pages in a
-// browser.
+// indexes the history and serves the journey, layers, map, health and
+// review pages in a browser.
 //
 //	huginn story [-C dir] [-branch rev] [-tests] [-no-cache] [-moments]
 //
@@ -69,7 +69,7 @@ func main() {
 		"symbols": symbols,
 		"serve":   serve,
 		"semdiff": semanticDiff,
-		"review":  review,
+		"review":  reviewMergeRequest,
 		"story":   tell,
 		"silos":   listSilos,
 	}

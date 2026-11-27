@@ -61,11 +61,12 @@ indexed 210 live symbols in 249ms (0 commits cached, 4 walked)
 
 ### `huginn serve`
 
-Indexes the history in the background and serves the journey, layers, map
-and health pages at `http://localhost:7878`, opening on the journey; the
-others are at `/layers`, `/map` and `/health`. While indexing, the pages
-show progress. Once the history is indexed, the server encodes and gzips
-the responses the pages open with (the journey and the layers at every
+Indexes the history in the background and serves the journey, layers, map,
+health and review pages at `http://localhost:7878`, opening on the journey;
+the others are at `/layers`, `/map`, `/health` and `/review` (see
+[`huginn review`](#huginn-review)). While indexing, the pages show
+progress. Once the history is indexed, the server encodes and gzips the
+responses the pages open with (the journey and the layers at every
 step, the health report and knowledge silos, the map's preset windows)
 before it reports ready, then the per-directory views in the background, so
 the pages draw from memory.
@@ -108,6 +109,8 @@ The UI is backed by a small JSON API:
 | `GET /api/silos` | knowledge silos: packages and symbols ranked by concentration × criticality, each with its reasons, everyone's share of the live code, and pairs coupled across knowledge boundaries |
 | `GET /api/silos/leave?author=name` | what would be orphaned or rest on one person if the named authors (repeat `author` for several) left now, ranked as a hand-over list |
 | `GET /api/layers?step=commit\|week\|month` | every frame's live packages with their layer, and the references between them, marking those that run within a cycle; packages carry the journey's map layout |
+| `GET /api/review?head=rev&base=rev&path=dir` | a merge request's review, as `huginn review` reports it: `head` defaults to `HEAD`, `base` to the remote's default branch, and `path`, repeated, limits it to folders; works while indexing |
+| `GET /api/review/options?head=rev` | what the review page offers to pick from: the branch checked out, the default target, every branch, and the directories holding Go code at `head` |
 
 ### `huginn silos`
 
@@ -295,6 +298,19 @@ huginn-review:
     - glab mr note "$CI_MERGE_REQUEST_IID" --message "$(cat review.md)"
 ```
 
+`huginn serve` has the same review as a page, at `/review`. Pick the
+merge request's branch, the branch it goes into and any folders (each
+field suggests what the repository has), and the page reviews it without
+waiting for the history to be indexed. What it reviews is kept in the
+address, as `/review?head=feature&path=services/billing`, so a review can be
+shared or bookmarked. Under the numbers, a diagram lays the packages out
+in three columns: in the middle what changed (with folders, the packages in
+them), on the left the packages that call into it, and on the right those
+it uses. Its lines are the calls into what changed, weighted by call sites,
+and the imports and references the merge request starts and stops; point
+at a package to trace its lines, and pick it to narrow the callers,
+relations and changes listed below to the ones that involve it.
+
 ## Architecture
 
 ```
@@ -332,7 +348,9 @@ git log / cat-file ──► internal/git ──► internal/ast ──► inter
   the blast radius, and the relations between packages it starts and stops,
   optionally limited to a scope of folders. The tree before the change is
   the tree after it with the changed files' old sides put back, so only
-  one tree is read.
+  one tree is read. **internal/review** finds a merge request's target and
+  merge base and builds that report over its range, for `huginn review` and
+  the review page.
 - **internal/knowledge** is the knowledge model: each author's decayed weight
   in each live symbol, and who counts as departed. The journey rolls it up
   per package frame by frame; **internal/silos** reads it at the last
@@ -343,7 +361,7 @@ git log / cat-file ──► internal/git ──► internal/ast ──► inter
 The packages are stacked in layers, and depguard rules in `.golangci.yml`
 keep them that way: foundation (`ast`, `git`, `modpath`), history
 (`lineage`, `knowledge`, `codemap`), analyses (`journey`, `health`,
-`semdiff`), reports (`story`, `silos`), then `web` and `cmd/huginn`. A
+`semdiff`), reports (`story`, `silos`, `review`), then `web` and `cmd/huginn`. A
 package may import the layers below its own; analyses don't import each
 other, and neither do reports. Only test files may import
 `internal/gittest`. CI runs `golangci-lint run`, which fails on an import

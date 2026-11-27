@@ -9,7 +9,6 @@ import (
 	"strings"
 	"testing"
 
-	"huginn/internal/git"
 	"huginn/internal/gittest"
 )
 
@@ -39,7 +38,7 @@ func shop(t *testing.T) *gittest.Repo {
 func runReview(t *testing.T, args ...string) string {
 	t.Helper()
 	var out, errOut bytes.Buffer
-	if err := review(context.Background(), &out, &errOut, args); err != nil {
+	if err := reviewMergeRequest(context.Background(), &out, &errOut, args); err != nil {
 		t.Fatalf("review %q: %v\n%s", args, err, errOut.String())
 	}
 	return out.String()
@@ -151,30 +150,5 @@ func TestOpenScoped(t *testing.T) {
 	}
 	if _, _, err := openScoped(ctx, r.Dir, []string{".."}); err == nil || !strings.Contains(err.Error(), "not in the repository") {
 		t.Errorf("folder above the repository: err = %v", err)
-	}
-}
-
-func TestTargetBranch(t *testing.T) {
-	r := shop(t)
-	repo, err := git.Open(r.Dir)
-	if err != nil {
-		t.Fatal(err)
-	}
-	ctx := context.Background()
-	for _, tc := range []struct {
-		name, base string
-		env        map[string]string
-		want       string
-	}{
-		{"given", "release", map[string]string{"GITHUB_BASE_REF": "main"}, "release"},
-		{"GitLab merge request", "", map[string]string{"CI_MERGE_REQUEST_DIFF_BASE_SHA": "abc123", "CI_MERGE_REQUEST_TARGET_BRANCH_NAME": "main"}, "abc123"},
-		{"GitLab without the base", "", map[string]string{"CI_MERGE_REQUEST_TARGET_BRANCH_NAME": "main"}, "origin/main"},
-		{"GitHub pull request", "", map[string]string{"GITHUB_BASE_REF": "develop"}, "origin/develop"},
-		{"default branch", "", nil, "master"},
-	} {
-		got, err := targetBranch(ctx, repo, tc.base, func(k string) string { return tc.env[k] })
-		if err != nil || got != tc.want {
-			t.Errorf("%s: %q, %v; want %q", tc.name, got, err, tc.want)
-		}
 	}
 }
