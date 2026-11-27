@@ -26,6 +26,7 @@ import (
 	"huginn/internal/git"
 	"huginn/internal/health"
 	"huginn/internal/lineage"
+	"huginn/internal/review"
 	"huginn/internal/silos"
 )
 
@@ -89,6 +90,10 @@ func New(repo *git.Repo, name string, opts lineage.BuildOptions) *Server {
 	return &Server{repo: repo, name: name, opts: opts, progress: newProgress(), ui: newAssets(),
 		api: newRepoAPI(repo, opts.IncludeGenerated), saved: savedFile(opts.Cache)}
 }
+
+// SetTracer has the review page trace with t what each merge request
+// reaches outside the process. Call it before serving.
+func (s *Server) SetTracer(t *review.Tracer) { s.api.tracer = t }
 
 // Index builds the history and the responses the pages ask for, then
 // publishes them and builds the per-directory ones. With a cache, the

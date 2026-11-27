@@ -74,13 +74,13 @@ func (m *markdown) types(ts []review.TypeReview) {
 	}
 }
 
-// focus lists what to look at first, exported API it breaks first.
+// focus lists what to look at first, what reaches outside the process
+// first.
 func (m *markdown) focus(rv *review.Review) {
 	m.printf("\n#### Look here first\n\n")
-	shown, more := shownFocus(rv.Focus)
+	shown, moreOutside, moreEdits := shownFocus(rv.Focus)
 	if len(shown) == 0 {
 		m.printf("Nothing beyond new code: no existing code is edited and no import between packages starts.\n")
-		return
 	}
 	for _, f := range shown {
 		name := code(f.Name)
@@ -92,10 +92,21 @@ func (m *markdown) focus(rv *review.Review) {
 		if loc := at(f); loc != "" {
 			where = " at " + code(loc)
 		}
-		m.printf("- **%s** %s%s: %s\n", focusLabel(f.Kind), name, where, focusDetail(f, rv.Report, func(s string) string { return code(s) }))
+		codeName := func(s string) string { return code(s) }
+		m.printf("- **%s** %s%s: %s\n", focusLabel(f.Kind), name, where, focusDetail(f, rv.Report, codeName))
+		for _, c := range f.Capabilities {
+			text, loc := capabilityText(f, c, codeName)
+			if loc != "" {
+				text += " at " + code(loc)
+			}
+			m.printf("  - %s\n", text)
+		}
 	}
-	if more > 0 {
-		m.printf("- … and %s of existing code under Changes\n", plural(more, "more edit"))
+	if more := focusMore(moreOutside, moreEdits); more != "" {
+		m.printf("- … and %s under Changes\n", more)
+	}
+	if tracedNothing(rv) {
+		m.printf("\n%s.\n", strings.ToUpper(noneOutside[:1])+noneOutside[1:])
 	}
 }
 

@@ -8,8 +8,10 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 
+	"huginn/internal/capslock"
 	"huginn/internal/cohesion"
 	"huginn/internal/git"
 	"huginn/internal/review"
@@ -28,6 +30,7 @@ func reviewMergeRequest(ctx context.Context, stdout, stderr io.Writer, args []st
 	format := fs.String("format", "text", "output `format`: text, markdown or json")
 	includeGenerated := fs.Bool("include-generated", false, "diff generated files like hand-written ones")
 	maxCallers := fs.Int("callers", 5, "list at most `n` callers per change and 3n in the impact; 0 for all")
+	caps := fs.Bool("caps", true, "trace with capslock which changed functions reach the network, files or other programs, and list them first")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -39,9 +42,16 @@ func reviewMergeRequest(ctx context.Context, stdout, stderr io.Writer, args []st
 	if err != nil {
 		return err
 	}
-	rv, err := review.Build(ctx, repo, review.Options{
-		Base: *base, Head: *head, Scope: scope, IncludeGenerated: *includeGenerated, Getenv: os.Getenv,
-	})
+	opts := review.Options{Base: *base, Head: *head, Scope: scope, IncludeGenerated: *includeGenerated, Getenv: os.Getenv}
+	if *caps {
+		tool, findErr := capslock.Find()
+		if findErr != nil {
+			fmt.Fprintf(stderr, "note: %v, to see which changes reach outside the process; -caps=false skips this\n", findErr)
+		} else {
+			opts.Tracer = review.NewTracer(tool)
+		}
+	}
+	rv, err := review.Build(ctx, repo, opts)
 	if err != nil {
 		return err
 	}
@@ -147,35 +157,102 @@ func (p *printer) review(rv *review.Review) {
 	p.noise(r)
 }
 
-// The focus lists up to focusEdits edits of existing code and counts the
-// rest; each item names up to reachNames of the declarations it reaches.
+// The focus lists up to focusEdits edits of existing code, and as many
+// changes reaching outside the process, and counts the rest; each item
+// names up to reachNames of the declarations it reaches, and each path out
+// of the process up to pathNames calls.
 const (
 	focusEdits = 6
 	reachNames = 3
+	pathNames  = 6
 )
 
 // noFocus is what the focus says when there is nothing in it.
 const noFocus = "nothing beyond new code: no existing code is edited and no import between packages starts"
 
-// shownFocus returns the focus items to list and how many edits of
-// existing code it leaves out.
-func shownFocus(fs []review.Focus) (shown []review.Focus, more int) {
-	edits := 0
+// noneOutside is what the focus says when capslock traced the change and
+// found nothing reaching outside the process.
+const noneOutside = "traced with capslock: nothing the change adds or edits reaches the network, files or other programs"
+
+// shownFocus returns the focus items to list and how many changes reaching
+// outside the process and edits of existing code it leaves out.
+func shownFocus(fs []review.Focus) (shown []review.Focus, moreOutside, moreEdits int) {
+	outside, edits := 0, 0
 	for _, f := range fs {
-		if f.Kind == review.FocusBehavior {
-			if edits++; edits > focusEdits {
-				more++
+		switch f.Kind {
+		case review.FocusExternal:
+			if outside++; outside > focusEdits {
+				moreOutside++
 				continue
 			}
+		case review.FocusBehavior:
+			if edits++; edits > focusEdits {
+				moreEdits++
+				continue
+			}
+		default:
 		}
 		shown = append(shown, f)
 	}
-	return shown, more
+	return shown, moreOutside, moreEdits
+}
+
+// focusMore says what shownFocus left out: "3 more changes reaching
+// outside the process and 2 more edits of existing code", or "".
+func focusMore(moreOutside, moreEdits int) string {
+	var parts []string
+	if moreOutside > 0 {
+		parts = append(parts, plural(moreOutside, "more change")+" reaching outside the process")
+	}
+	if moreEdits > 0 {
+		parts = append(parts, plural(moreEdits, "more edit")+" of existing code")
+	}
+	return strings.Join(parts, " and ")
+}
+
+// tracedNothing reports whether capslock traced the change and found
+// nothing in it reaching outside the process.
+func tracedNothing(rv *review.Review) bool {
+	return rv.Traced && !slices.ContainsFunc(rv.Focus, func(f review.Focus) bool { return f.Kind == review.FocusExternal })
+}
+
+// capabilityText says how a focus item reaches outside the process,
+// "network (new): payments.Authorize → http.Get → … → net.(*Dialer).Dial",
+// names formatted by name, and where the call leaving the repository's code
+// is made: "payments/payments.go:6", or "".
+func capabilityText(f review.Focus, c review.Capability, name func(string) string) (text, where string) {
+	text = c.Label()
+	if c.New {
+		text += " (new)"
+	}
+	steps := c.Path
+	if len(steps) > 0 && steps[0].Name == f.Name {
+		steps = steps[1:] // the item itself, unless the path starts in a function literal of it
+	}
+	var names []string
+	for i, s := range steps {
+		if c.Elided > 0 && i == len(steps)-1 {
+			names = append(names, "…")
+		}
+		names = append(names, name(s.Name))
+	}
+	if len(names) > pathNames {
+		names = slices.Concat(names[:2], []string{"…"}, names[len(names)-3:])
+	}
+	if len(names) > 0 {
+		text += ": " + strings.Join(names, " → ")
+	}
+	if i := c.Leaves(); i >= 0 {
+		where = fmt.Sprintf("%s:%d", c.Path[i].Path, c.Path[i].Line)
+	}
+	return text, where
 }
 
 // focusLabel names a focus item's kind as the reports print it.
 func focusLabel(k review.FocusKind) string {
 	switch k {
+	case review.FocusExternal:
+		return "external"
 	case review.FocusBreaking:
 		return "breaking"
 	case review.FocusBehavior:
@@ -216,9 +293,9 @@ func focusDetail(f review.Focus, r *semdiff.Report, name func(string) string) st
 		parts = append(parts, verb+" "+strings.Join(names, ", "))
 	case f.Implementers:
 		parts = append(parts, "no implementer found outside the change")
-	case f.Kind == review.FocusBehavior && f.Tests == 0:
+	case (f.Kind == review.FocusBehavior || f.Kind == review.FocusExternal) && f.Tests == 0:
 		parts = append(parts, "nothing calls it")
-	case f.Kind == review.FocusBehavior:
+	case f.Kind == review.FocusBehavior || f.Kind == review.FocusExternal:
 		parts = append(parts, "only tests use it")
 	}
 	if f.Tests > 0 {
@@ -239,17 +316,27 @@ func at(f review.Focus) string {
 // does not show.
 func (p *printer) focus(rv *review.Review) {
 	p.printf("\nLook here first\n")
-	shown, more := shownFocus(rv.Focus)
+	shown, moreOutside, moreEdits := shownFocus(rv.Focus)
 	if len(shown) == 0 {
 		p.printf("  %s\n", noFocus)
-		return
 	}
+	plain := func(s string) string { return s }
 	for _, f := range shown {
 		p.printf("  [%s] %s  %s\n", focusLabel(f.Kind), f.Name, at(f))
-		p.printf("      %s\n", focusDetail(f, rv.Report, func(s string) string { return s }))
+		p.printf("      %s\n", focusDetail(f, rv.Report, plain))
+		for _, c := range f.Capabilities {
+			text, where := capabilityText(f, c, plain)
+			if where != "" {
+				text += "  " + where
+			}
+			p.printf("      %s\n", text)
+		}
 	}
-	if more > 0 {
-		p.printf("  … and %s of existing code under Changes\n", plural(more, "more edit"))
+	if more := focusMore(moreOutside, moreEdits); more != "" {
+		p.printf("  … and %s under Changes\n", more)
+	}
+	if tracedNothing(rv) {
+		p.printf("  %s\n", noneOutside)
 	}
 }
 
