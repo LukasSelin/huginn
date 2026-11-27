@@ -1,11 +1,32 @@
 version: "2"
 
-# Only depguard for now: it enforces the layering below. Other linters can be
-# turned on separately without mixing their findings into the boundary rules.
+# Two kinds of linter are enabled, kept apart below:
+#
+#   boundaries   depguard (layering, and which packages may run programs or
+#                use the network) and forbidigo (calls only cmd/huginn may
+#                make).
+#   correctness  low-noise checks that find bugs rather than style.
+#
+# Every enabled linter is listed explicitly; turn a new one on in its own
+# change so its findings are not mixed with another's.
 linters:
   default: none
   enable:
+    # boundaries
     - depguard
+    - forbidigo
+    # correctness
+    - errcheck
+    - exhaustive
+    - gosec
+    - govet
+    - ineffassign
+    - nolintlint
+    - staticcheck
+    - unused
+    # Tried and left off: forcetypeassert and recvcheck. Every finding was a
+    # deliberate idiom (container/heap, sync.Map and list.List holding one
+    # type; a value type with one pointer-receiver mutator).
   settings:
     depguard:
       # The packages are stacked in layers, bottom to top:
@@ -114,3 +135,91 @@ linters:
           deny:
             - pkg: huginn/internal/gittest
               desc: internal/gittest is for tests only
+        # The layer rules allow all of the standard library ($gostd), so these
+        # two keep side effects where they live today: internal/git is the
+        # only package that runs programs, and internal/web (with cmd/huginn,
+        # which starts it) the only one on the network.
+        exec-only-in-git:
+          files:
+            - "$all"
+            - "!$test"
+            - "!**/internal/git/*.go"
+            - "!**/internal/gittest/*.go"
+          deny:
+            - pkg: os/exec
+              desc: only internal/git runs programs; go through git.Repo
+        network-only-in-web:
+          files:
+            - "$all"
+            - "!$test"
+            - "!**/internal/web/*.go"
+            - "!**/cmd/huginn/*.go"
+          deny:
+            - pkg: net$
+              desc: only internal/web uses the network
+            - pkg: net/http
+              desc: only internal/web uses the network
+
+    forbidigo:
+      # Matched against the resolved package path, so renamed imports are
+      # caught too. cmd/huginn is exempt (see the exclusions below): it owns
+      # the process, its exit code and the root context.
+      analyze-types: true
+      forbid:
+        - pattern: ^os\.Exit$
+          msg: only cmd/huginn may exit; return an error instead
+        - pattern: ^fmt\.Print(f|ln)?$
+          msg: write to an io.Writer the caller passes in
+        - pattern: ^context\.(Background|TODO)$
+          msg: take a context.Context from the caller so it can be cancelled
+        - pattern: ^exec\.Command$
+          pkg: ^os/exec$
+          msg: use exec.CommandContext so the program stops with its context
+
+    errcheck:
+      # Output to the terminal or an HTTP response has nowhere better to
+      # report a failed write.
+      exclude-functions:
+        - fmt.Fprint
+        - fmt.Fprintf
+        - fmt.Fprintln
+
+    exhaustive:
+      # A switch with a default case has chosen what to do with new values.
+      default-signifies-exhaustive: true
+
+    gosec:
+      excludes:
+        - G104 # unchecked errors: errcheck covers these
+        - G115 # integer conversions: the hashing and layout code converts on purpose
+        - G204 # subprocess with variable args: internal/git exists to run git
+
+    govet:
+      enable-all: true
+      disable:
+        - fieldalignment # memory layout, not correctness
+
+    nolintlint:
+      require-explanation: true
+      require-specific: true
+
+    staticcheck:
+      # golangci-lint's defaults, plus QF1010: it takes a slice of a uint8
+      # enum with a String method (semdiff.Kind) for []byte and suggests
+      # printing it as a string.
+      checks: ["all", "-ST1000", "-ST1003", "-ST1016", "-ST1020", "-ST1021", "-ST1022", "-QF1010"]
+
+  exclusions:
+    rules:
+      # cmd/huginn owns the process: it exits, prints and makes the root
+      # context.
+      - path: cmd/huginn/
+        linters: [forbidigo]
+      # internal/gittest builds throwaway repositories for tests.
+      - path: internal/gittest/
+        linters: [forbidigo, gosec]
+      # Tests are the top of their own call tree, like main: they make root
+      # contexts, and a failed assertion or an odd file mode is a test
+      # failure, not a bug.
+      - path: _test\.go
+        linters: [forbidigo, gosec]

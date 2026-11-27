@@ -211,6 +211,7 @@ func TestDependencyMoments(t *testing.T) {
 	st := release().story(t)
 	var got []string
 	for _, m := range st.Moments {
+		//exhaustive:ignore // picks out the dependency moments
 		switch m.Kind {
 		case DepAdded, DepRemoved, CycleIn, CycleOut:
 			got = append(got, fmt.Sprintf("%d %s: %s", m.Rev, m.Kind, m.Text))

@@ -184,6 +184,8 @@ func (rv *revision) targets(s *ast.Symbol, pkg string) map[string]target {
 	var imports map[string]bool
 	for _, ref := range s.Refs {
 		switch ref.Kind {
+		case ast.RefLocal:
+			continue // its own package: not a target in another
 		case ast.RefImport:
 			add(symID(ref.Pkg, ref.Name), ref, false)
 		case ast.RefMethod:

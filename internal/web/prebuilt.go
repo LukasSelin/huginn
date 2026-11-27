@@ -35,9 +35,10 @@ type encoded struct {
 
 func encode(ctype string, body []byte) *encoded {
 	var buf bytes.Buffer
+	// The level is valid and writes to a bytes.Buffer don't fail.
 	zw, _ := gzip.NewWriterLevel(&buf, gzip.BestCompression)
-	zw.Write(body)
-	zw.Close()
+	_, _ = zw.Write(body)
+	_ = zw.Close()
 	sum := sha256.Sum256(body)
 	return &encoded{body: body, gz: buf.Bytes(), ctype: ctype, etag: `"` + hex.EncodeToString(sum[:12]) + `"`}
 }
@@ -65,7 +66,8 @@ func (e *encoded) serve(w http.ResponseWriter, r *http.Request) {
 	}
 	h.Set("Content-Length", strconv.Itoa(len(body)))
 	if r.Method != http.MethodHead {
-		w.Write(body)
+		//nolint:gosec // G705: body is a response this server encoded, not request input
+		_, _ = w.Write(body) // a client that went away needs no answer
 	}
 }
 
@@ -201,9 +203,11 @@ func (s *Server) detailURLs(ix *index) []string {
 }
 
 // staticFiles encodes every embedded UI file, by its path under static.
+// The files are compiled into the binary, so failing to read one is a build
+// bug, not something to serve around.
 func staticFiles(ui fs.FS) map[string]*encoded {
 	out := map[string]*encoded{}
-	fs.WalkDir(ui, ".", func(p string, d fs.DirEntry, err error) error {
+	err := fs.WalkDir(ui, ".", func(p string, d fs.DirEntry, err error) error {
 		if err != nil || d.IsDir() {
 			return err
 		}
@@ -214,6 +218,9 @@ func staticFiles(ui fs.FS) map[string]*encoded {
 		out[p] = encode(contentType(p), body)
 		return nil
 	})
+	if err != nil {
+		panic("web: reading the embedded UI: " + err.Error())
+	}
 	return out
 }
 

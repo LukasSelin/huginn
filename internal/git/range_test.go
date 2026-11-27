@@ -96,12 +96,12 @@ func TestDefaultBranch(t *testing.T) {
 	r.Git("checkout", "-q", "feature")
 	clone := filepath.Join(t.TempDir(), "clone")
 	r.Git("clone", "-q", r.Dir, clone)
-	cr, err := Open(clone)
+	cr, err := Open(context.Background(), clone)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if b, err := cr.DefaultBranch(ctx); err != nil || b != "origin/feature" {
-		t.Errorf("in a clone: %q, %v; want origin/feature", b, err)
+	if b, berr := cr.DefaultBranch(ctx); berr != nil || b != "origin/feature" {
+		t.Errorf("in a clone: %q, %v; want origin/feature", b, berr)
 	}
 
 	top, err := cr.Toplevel(ctx)

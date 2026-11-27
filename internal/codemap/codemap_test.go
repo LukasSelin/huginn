@@ -119,7 +119,7 @@ func TestWeeks(t *testing.T) {
 	}{
 		{"pkg/a", true, []Week{
 			{Start: w10, Edits: kinds(3, 0, 1, 0, 0, 1), Commits: 2, Authors: 2, ComplexityDelta: 1 + 1 + 1 + 2},
-			{Start: w11, Edits: kinds(0, 0, 0, 0, 0, 2), Commits: 2, Authors: 2, ComplexityDelta: 1 - 1},
+			{Start: w11, Edits: kinds(0, 0, 0, 0, 0, 2), Commits: 2, Authors: 2, ComplexityDelta: 0}, // 1 - 1
 		}},
 		{"pkg/a", false, []Week{
 			{Start: w10, Edits: kinds(2, 0, 1, 0, 0, 1), Commits: 2, Authors: 2, ComplexityDelta: 1 + 1 + 2},
@@ -127,7 +127,7 @@ func TestWeeks(t *testing.T) {
 		}},
 		// The move lands in pkg/b, the directory H moved to; pkg/b is born in W11.
 		{"pkg/b", false, []Week{
-			{Start: w11, Edits: kinds(1, 1, 0, 1, 0, 0), Commits: 2, Authors: 2, ComplexityDelta: 1 - 1},
+			{Start: w11, Edits: kinds(1, 1, 0, 1, 0, 0), Commits: 2, Authors: 2, ComplexityDelta: 0}, // 1 - 1
 		}},
 		{"", false, []Week{
 			{Start: w10, Edits: kinds(2, 0, 1, 0, 0, 1), Commits: 2, Authors: 2, ComplexityDelta: 4},

@@ -31,7 +31,7 @@ func listSilos(ctx context.Context, stdout, stderr io.Writer, args []string) err
 		return fmt.Errorf("unexpected arguments: %s", strings.Join(fs.Args(), " "))
 	}
 
-	repo, err := git.Open(*dir)
+	repo, err := git.Open(ctx, *dir)
 	if err != nil {
 		return err
 	}

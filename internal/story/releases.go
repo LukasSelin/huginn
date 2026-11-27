@@ -72,11 +72,13 @@ func parseTag(name string) tag {
 // highest version, then "v1.2.0" before "1.2.0".
 func better(a, b tag) int {
 	rank := func(t tag) int {
-		switch {
-		case t.kind == otherTag:
+		switch t.kind {
+		case otherTag:
 			return 1
-		case t.kind == preRelease:
+		case preRelease:
 			return 2
+		case patchRelease, minorRelease, majorRelease:
+			return 3
 		}
 		return 3
 	}
@@ -102,6 +104,8 @@ func (t tag) boundary() float64 {
 		return 0.3
 	case patchRelease:
 		return 0.2
+	case preRelease:
+		return 0.1
 	}
 	return 0.1
 }
@@ -119,6 +123,8 @@ func (t tag) weight() float64 {
 		return 2.5
 	case patchRelease:
 		return 2
+	case preRelease:
+		return 1.5
 	}
 	return 1.5
 }
