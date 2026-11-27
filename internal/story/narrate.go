@@ -55,10 +55,9 @@ func biggestBirth(f Facts) string {
 func paragraph(f Facts) string {
 	var s []string
 	from, to := f.From.Format("Jan 2, 2006"), f.To.Format("Jan 2, 2006")
-	switch {
-	case from == to:
+	if from == to {
 		s = append(s, fmt.Sprintf("On %s, %s landed.", from, plural(f.Commits, "commit")))
-	default:
+	} else {
 		s = append(s, fmt.Sprintf("Between %s and %s, %s landed.", from, to, plural(f.Commits, "commit")))
 	}
 	if t := themeSentence(f); t != "" {

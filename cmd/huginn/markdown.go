@@ -135,6 +135,7 @@ func (m *markdown) dependency(mark, what string, d semdiff.Dependency, refs []se
 		note = ", **out of the scope**"
 	case semdiff.Inward:
 		note = ", **into the scope**"
+	case semdiff.Within:
 	}
 	m.printf("- **%s** %s → %s (%s%s)\n", mark, code(d.From), code(d.To), what, note)
 	if len(refs) == 0 {

@@ -22,7 +22,7 @@ func shop(t *testing.T) (*gittest.Repo, *git.Repo) {
 		"payments/payments.go": "package payments\n\nfunc Authorize(n int) bool { return n > 0 }\n",
 		"billing/billing.go":   "package billing\n\nimport \"example.com/shop/payments\"\n\nfunc Charge(n int) int {\n\tif !payments.Authorize(n) {\n\t\treturn 0\n\t}\n\treturn n\n}\n",
 	})
-	repo, err := git.Open(r.Dir)
+	repo, err := git.Open(context.Background(), r.Dir)
 	if err != nil {
 		t.Fatal(err)
 	}

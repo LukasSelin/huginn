@@ -14,7 +14,7 @@ import (
 func TestSavedResponses(t *testing.T) {
 	r := gittest.New(t)
 	r.Commit("root", map[string]string{"geo/point.go": "package geo\n\nfunc Move() {}\n"})
-	repo, err := git.Open(r.Dir)
+	repo, err := git.Open(context.Background(), r.Dir)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -72,8 +72,8 @@ func TestSavedResponses(t *testing.T) {
 	if rec := get(srv, journey, "gzip"); rec.Header().Get("Content-Encoding") != "gzip" {
 		t.Errorf("saved %s not served gzipped", journey)
 	}
-	if got := get(srv, journey, "").Body.String(); got != want {
-		t.Errorf("saved %s inflated to %.60q, want %.60q", journey, got, want)
+	if body := get(srv, journey, "").Body.String(); body != want {
+		t.Errorf("saved %s inflated to %.60q, want %.60q", journey, body, want)
 	}
 
 	// A new commit is a new history.

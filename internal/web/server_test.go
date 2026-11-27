@@ -168,7 +168,7 @@ func newHistory(t *testing.T) *history {
 // server returns a test server over the history, indexed if index is set.
 func (hs *history) server(t *testing.T, index bool) (*Server, *httptest.Server) {
 	t.Helper()
-	repo, err := git.Open(hs.repo.dir)
+	repo, err := git.Open(context.Background(), hs.repo.dir)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -189,7 +189,7 @@ func get(t *testing.T, ts *httptest.Server, path string, v any) int {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode != http.StatusOK || v == nil {
 		return resp.StatusCode
 	}

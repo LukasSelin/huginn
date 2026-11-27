@@ -80,7 +80,7 @@ func TestReviewPage(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	body, _ := io.ReadAll(resp.Body)
 	if resp.StatusCode != http.StatusOK || !strings.Contains(string(body), `<script src="review.js">`) {
 		t.Errorf("GET /review: %d\n%.300s", resp.StatusCode, body)

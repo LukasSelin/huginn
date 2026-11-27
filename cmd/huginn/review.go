@@ -85,7 +85,7 @@ func openScoped(ctx context.Context, dir string, folders []string) (*git.Repo, [
 			at = existing(abs[0])
 		}
 	}
-	repo, err := git.Open(at)
+	repo, err := git.Open(ctx, at)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -97,7 +97,7 @@ func openScoped(ctx context.Context, dir string, folders []string) (*git.Repo, [
 	for i, a := range abs {
 		rel, err := filepath.Rel(top, a)
 		if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) || filepath.IsAbs(rel) {
-			return nil, nil, fmt.Errorf("%s is not in the repository at %s", folders[i], top)
+			return nil, nil, fmt.Errorf("%s is not in the repository at %s", folders[i], top) //nolint:gosec // G602: abs has one entry per folder
 		}
 		if rel != "." {
 			scope = append(scope, filepath.ToSlash(rel))
@@ -200,6 +200,7 @@ func (p *printer) dependency(mark string, d semdiff.Dependency, refs []semdiff.R
 		note = "  (out of the scope)"
 	case semdiff.Inward:
 		note = "  (into the scope)"
+	case semdiff.Within:
 	}
 	p.printf("  %s %s → %s%s\n", mark, d.From, d.To, note)
 	if len(refs) == 0 {

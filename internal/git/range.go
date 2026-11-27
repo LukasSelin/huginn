@@ -55,7 +55,7 @@ func (r *Repo) DiffRange(ctx context.Context, base, head string) (_ *Range, err 
 	}
 	lr := newLogReader(bytes.NewReader(out))
 	var c Commit
-	if err := lr.files(&c); err != nil {
+	if err = lr.files(&c); err != nil {
 		return nil, fmt.Errorf("git diff: %w", err)
 	}
 	if lr.pending != nil {
@@ -72,7 +72,7 @@ func (r *Repo) DiffRange(ctx context.Context, base, head string) (_ *Range, err 
 	defer func() {
 		if err != nil {
 			cancel()
-			cf.close()
+			_ = cf.close() // err already says what went wrong
 			return
 		}
 		err = cf.close()

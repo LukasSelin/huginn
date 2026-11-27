@@ -22,7 +22,7 @@ func newTestRepo(t *testing.T) *testRepo { return &testRepo{gittest.New(t)} }
 
 func (r *testRepo) walk(opts Options) []*Commit {
 	r.T.Helper()
-	repo, err := Open(r.Dir)
+	repo, err := Open(context.Background(), r.Dir)
 	if err != nil {
 		r.T.Fatal(err)
 	}
@@ -239,7 +239,7 @@ func TestWalkStop(t *testing.T) {
 		}
 		hashes = append(hashes, r.Commit(fmt.Sprint("commit ", i), files))
 	}
-	repo, err := Open(r.Dir)
+	repo, err := Open(context.Background(), r.Dir)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -330,7 +330,7 @@ func TestOpenNotARepo(t *testing.T) {
 		t.Skip("git not installed")
 	}
 	t.Setenv("GIT_CEILING_DIRECTORIES", filepath.Dir(t.TempDir()))
-	if _, err := Open(t.TempDir()); err == nil {
+	if _, err := Open(context.Background(), t.TempDir()); err == nil {
 		t.Error("Open of a plain directory succeeded")
 	}
 }

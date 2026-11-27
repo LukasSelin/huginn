@@ -3,6 +3,7 @@ package lineage
 import (
 	"context"
 	"encoding/gob"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -29,7 +30,7 @@ func dump(h *History) []string {
 
 func build(t *testing.T, r *gittest.Repo, opts BuildOptions) *History {
 	t.Helper()
-	repo, err := git.Open(r.Dir)
+	repo, err := git.Open(context.Background(), r.Dir)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -118,8 +119,8 @@ func TestCacheDiscarded(t *testing.T) {
 			if err != nil {
 				return err
 			}
-			defer f.Close()
-			return gob.NewEncoder(f).Encode(cacheHeader{Version: cacheVersion + 1})
+			err = gob.NewEncoder(f).Encode(cacheHeader{Version: cacheVersion + 1})
+			return errors.Join(err, f.Close())
 		},
 		"truncated": func(path string) error {
 			b, err := os.ReadFile(path)
