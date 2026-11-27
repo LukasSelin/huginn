@@ -3,11 +3,15 @@
 // The journey page: the history played back frame by frame, one bubble per
 // package, with the story told alongside. In story mode playback pauses at
 // key moments to show what the commit changed; a package can be opened to
-// watch its symbols, and one symbol followed through renames and moves.
+// watch its symbols, and one symbol followed through renames and moves. The
+// architecture view plays the same history in 3D instead: each package
+// stacked on a layer above the packages it refers to, so playback builds
+// the architecture up, layer by layer.
 // common.js provides KINDS, h, $, mark, api, plural, waitReady and fail;
 // vendor/d3.min.js provides d3, for zooming, tweens, edges and packing;
 // video.js provides VideoWriter, for saving the playback as a video, and
-// gif.js GifWriter, for a GIF where the browser cannot encode video.
+// gif.js GifWriter, for a GIF where the browser cannot encode video;
+// stack3d.js Stack3D, which draws the architecture view.
 (() => {
   const ACT = ['#2A2418', '#4A3A1E', '#7A5A26', '#B07F33', '#F0A64A'];
   const BASE_MS = 1100; // per frame at 1×
@@ -90,6 +94,12 @@
     links: null, // the package in the breakout: { dir, rev, v, nodes, adj, wires, lit }
     tip: null, // the node the hover card describes: { node } on the map or { sym } in a package
     exporting: null, // the export under way: { cancel, video }
+    mode: 'map', // the view: 'map', or 'arch', the history building the architecture in 3D, which a link opens on unless it says view=map
+    layered: {}, // /api/layers responses by step
+    lay: null, // the one for the current step, frame by frame as the journey's
+    arch: null, // the architecture view's frame: packages, layers and references
+    archNow: new Map(), // package → its journey frame entry, for colouring the stack
+    archMarks: { focus: -1, followed: -1 }, // the card's package and the followed symbol's
   };
 
   const fmtShort = (t) => new Date(t * 1000).toLocaleDateString(undefined, { month: 'short', day: 'numeric', timeZone: 'UTC' });
@@ -232,6 +242,7 @@
     buildRows();
     buildChapterList();
     buildStage();
+    if (state.mode === 'arch') await layered();
     if (dir) await drill(dir);
     seek(state.frame, true);
   }
@@ -255,6 +266,126 @@
       state.reports.set(sha, p);
     }
     return p;
+  }
+
+  // ---------- Architecture ----------
+
+  // The architecture view draws the journey's frames in 3D: every package
+  // on a layer above the packages it refers to, at its place on the map. It
+  // starts above, where it is the map, and comes down to the side as
+  // playback stacks the layers up; a package born drops onto its layer.
+  const stack = Stack3D($('arch'), {
+    build: true,
+    views: $('camera'),
+    label: (p) => base(state.data.packages[p].path),
+    style: archStyle,
+    onHover(p, x, y) {
+      const id = p >= 0 ? p : null;
+      setLit('hover', id);
+      if (id == null) hideTip();
+      else showTip({ node: id, at: [x, y] });
+    },
+    onPick(p) {
+      if (p < 0) unpick();
+      else if (state.picked === p) openLinks(state.data.packages[p].path).catch(fail);
+      else pick(p);
+    },
+  });
+
+  // layered fetches the layers at the current step, once, and hands the
+  // stack the history.
+  async function layered() {
+    const step = state.step;
+    if (state.lay && state.lay.step === step) return;
+    if (!state.layered[step]) state.layered[step] = await api(`/api/layers?step=${step}`);
+    if (step !== state.step) return;
+    state.lay = state.layered[step];
+    stack.setData(state.data.packages, state.lay.frames);
+  }
+
+  async function setView(v, first) {
+    v = v === 'map' ? 'map' : 'arch'; // the architecture unless the map is asked for
+    if (v === state.mode && !first) return;
+    if (v === 'arch') {
+      if (state.drill) undrill();
+      await layered();
+      stack.fromAbove();
+      stack.start();
+    } else stack.stop();
+    state.mode = v;
+    const arch = v === 'arch';
+    hideTip();
+    state.hover = state.focused = null;
+    $('stage').classList.toggle('arch', arch);
+    $('arch').hidden = !arch;
+    $('camBox').hidden = !arch;
+    $('cLayersBox').hidden = !arch;
+    $('bubbles').inert = arch;
+    $('subtitle').textContent = arch ? 'The history building the architecture, layer by layer' : 'The history played back, chapter by chapter';
+    for (const b of $('viewBy').querySelectorAll('button')) b.setAttribute('aria-pressed', String(b.dataset.v === v));
+    if (arch) $('zoomIn').disabled = $('zoomOut').disabled = $('zoomReset').disabled = false;
+    else applyZoom();
+    if (state.data && state.data.frames.length) render(false);
+  }
+
+  // renderArch hands the stack frame f's packages in their layers, with an
+  // author picked keeping only theirs, as on the map.
+  function renderArch(f) {
+    const lf = state.lay && state.lay.frames[state.frame];
+    if (!lf) return;
+    const sf = scoped(f);
+    state.archNow = new Map(f.pkgs.map((s) => [s.p, s]));
+    let frame = lf;
+    if (state.who) {
+      const keep = new Set(sf.pkgs.map((s) => s.p));
+      frame = { pkgs: lf.pkgs.filter(([p]) => keep.has(p)), deps: lf.deps.filter(([a, b]) => keep.has(a) && keep.has(b)) };
+    }
+    state.arch = stack.setFrame(frame);
+    const fol = followNow();
+    state.archMarks = {
+      focus: state.card && state.card.pkg != null ? state.pathIdx.get(state.card.pkg) ?? -1 : -1,
+      followed: fol.e && fol.dir != null ? state.pathIdx.get(fol.dir) ?? -1 : -1,
+    };
+    if (state.picked != null && !state.arch.at.has(state.picked)) state.picked = null;
+    litArch();
+    stack.setPlaying(state.playing);
+    stack.redraw();
+    renderTip();
+  }
+
+  // litArch draws the references of the package picked, else of the one
+  // under the pointer, else of the card's.
+  function litArch() {
+    if (state.mode !== 'arch') return;
+    const lit = litPkg() ?? (state.archMarks.focus >= 0 ? state.archMarks.focus : null);
+    stack.setLit(lit ?? -1, lit != null && lit === state.picked);
+  }
+
+  // archStyle colours a package on the stack as the map colours its bubble:
+  // by how busy it was in the frame, or ringed by who knows it.
+  function archStyle(p) {
+    const s = state.archNow.get(p);
+    const know = state.colorBy === 'knowledge';
+    const a = actStep(s ? editsOf(s) : 0);
+    const st = { fill: know ? RING_IN : ACT[a], busy: !know && a >= 3 };
+    if (know && s && s.knowers) {
+      st.ring = s.knowers.map(([au, share, gone]) => [gone ? GONE : authorColor(state.data.authors[au]), share]);
+      const rest = 1 - s.knowers.reduce((t, k) => t + k[1], 0);
+      if (rest > 0.001) st.ring.push([OTHERS, rest]);
+    }
+    if (state.who && s) st.alpha = 0.35 + 0.65 * Math.min(1, shareOf(s, state.data.authors.indexOf(state.who)) / 0.5);
+    if (p === state.archMarks.followed) st.mark = 'followed';
+    else if (p === state.archMarks.focus) st.mark = 'focus';
+    return st;
+  }
+
+  // archCaption sums up the lit package's place in the architecture.
+  function archCaption(lit) {
+    const { out, into } = stack.neighbours(lit);
+    const at = state.arch && state.arch.at.get(lit);
+    const refs = (ds) => ds.reduce((t, d) => t + d.refs, 0);
+    const part = (ds) => (ds.length ? `${plural(ds.length, 'package')} (${plural(refs(ds), 'reference')})` : 'none');
+    return `${state.data.packages[lit].path}${at ? ` · layer ${at.layer}` : ''} · refers to → ${part(out)} · referred to by ← ${part(into)}`;
   }
 
   // ---------- Stage ----------
@@ -887,12 +1018,13 @@
     if (!t || tip.hidden) return;
     let x, y, r;
     if (t.sym != null) ({ x, y, r } = state.drill.pos[t.sym]);
-    else {
+    else if (!t.at) {
       ({ x, y } = nodeAt(t.node));
       r = (state.diam[t.node] || 0) / 2;
     }
     const z = state.zt, st = $('stage');
-    const cx = z.applyX(x), cy = z.applyY(y), cr = r * z.k;
+    // On the stack the card sits beside the pointer.
+    const [cx, cy, cr] = t.at ? [t.at[0], t.at[1], 6] : [z.applyX(x), z.applyY(y), r * z.k];
     const w = tip.offsetWidth, ht = tip.offsetHeight, gap = 12;
     let left = cx + cr + gap;
     if (left + w > st.clientWidth - 8) left = cx - cr - gap - w;
@@ -921,9 +1053,17 @@
       ? h('span', { class: 'tip-kinds' }, kinds.map(([k, l]) => h('span', { class: 'cnt', title: l }, mark(k), String(s.kinds[k]))))
       : h('span', { class: 'muted' }, 'none')));
     let uses = 0, by = 0;
-    for (const n of litDeps(pi).values()) {
-      if (n.out) uses++;
-      if (n.in) by++;
+    if (state.mode === 'arch') {
+      const { out: o, into } = stack.neighbours(pi);
+      uses = o.length;
+      by = into.length;
+      const at = state.arch && state.arch.at.get(pi);
+      if (at) rows.push(tipRow('Layer', `${at.layer}`, h('span', { class: 'muted' }, ` of ${state.arch.layers - 1}${state.arch.inCycle.has(pi) ? ' · in a cycle' : ''}`)));
+    } else {
+      for (const n of litDeps(pi).values()) {
+        if (n.out) uses++;
+        if (n.in) by++;
+      }
     }
     rows.push(tipRow('Uses →', plural(uses, 'package')), tipRow('Used by ←', plural(by, 'package')));
     if (born != null) rows.push(tipRow('First seen', fmtBig(born)));
@@ -939,7 +1079,8 @@
         }),
         s.orphaned > 0 ? h('div', { class: 'muted small' }, `${pct(s.orphaned)} orphaned`) : null));
     }
-    out.push(h('div', { class: 'tip-hint' }, state.picked === pi ? 'Click to break out the functions crossing it' : 'Click to show only it and its neighbours'));
+    out.push(h('div', { class: 'tip-hint' }, state.picked === pi ? 'Click to break out the functions crossing it'
+      : state.mode === 'arch' ? 'Click to keep its references lit' : 'Click to show only it and its neighbours'));
     return out;
   }
 
@@ -1035,6 +1176,7 @@
     if (state[key] === pi) return;
     state[key] = pi;
     renderLit();
+    litArch();
     if (state.data && state.data.frames.length) $('caption').textContent = caption(state.data.frames[state.frame]);
   }
 
@@ -1129,7 +1271,7 @@
     state.zoom = d3.zoom()
       .scaleExtent([1, state.maxZoom])
       .filter((e) => {
-        if (e.target.closest && e.target.closest('.ov')) return false;
+        if (state.mode === 'arch' || (e.target.closest && e.target.closest('.ov'))) return false;
         if (e.type === 'wheel') return true;
         if (e.touches) return e.touches.length > 1 || state.zt.k > 1;
         return !e.button;
@@ -1176,6 +1318,15 @@
 
   function zoomBy(f) {
     d3.select('#stage').transition('zoom').duration(reduced.matches ? 0 : 300).call(state.zoom.scaleBy, f);
+  }
+
+  // zoom zooms the view shown by f, or back to the whole of it for 0.
+  function zoom(f) {
+    if (state.mode === 'arch') {
+      if (f) stack.zoomBy(f);
+      else stack.resetZoom();
+    } else if (f) zoomBy(f);
+    else zoomTo(d3.zoomIdentity);
   }
 
   // relabel names the bubbles and symbols big enough on screen to hold a name.
@@ -1236,6 +1387,7 @@
     count('cCommits', f.total);
     count('cLive', f.live);
     count('cPkgs', f.pkgs.filter((p) => p.live > 0).length);
+    if (state.mode === 'arch' && state.arch) count('cLayers', state.arch.layers);
     renderKnowLegend(f);
     $('caption').textContent = caption(f);
     $('caption').hidden = !!state.card;
@@ -1263,7 +1415,7 @@
   // The frame's key moment, or else what happened in it.
   function caption(f) {
     const lit = litPkg();
-    if (lit != null) return litCaption(lit);
+    if (lit != null) return state.mode === 'arch' ? archCaption(lit) : litCaption(lit);
     let best = null;
     for (const m of state.moments) {
       if (inFrame(m, state.frame) && (!best || m.weight > best.weight)) best = m;
@@ -1378,6 +1530,8 @@
   async function drill(dir) {
     const pi = state.pathIdx.get(dir);
     if (pi === undefined) return;
+    // Symbols are looked at on the map.
+    if (state.mode === 'arch') await setView('map');
     const keep = state.follow ? state.follow.id : 0;
     const key = `${state.step} ${dir} ${keep}`;
     let v = state.views.get(key);
@@ -2192,7 +2346,8 @@
   function render(story = true, animate = false) {
     const f = state.data.frames[state.frame];
     if (!f) return;
-    renderStage(f);
+    if (state.mode === 'arch') renderArch(f);
+    else renderStage(f);
     if (state.drill) renderDrill(animate);
     if (state.links) {
       if (state.links.v) markFollowed();
@@ -2233,6 +2388,7 @@
   function play() {
     if (state.frame >= state.data.frames.length - 1) seek(0);
     state.playing = true;
+    stack.setPlaying(true);
     $('play').setAttribute('aria-label', 'Pause');
     $('playIcon').innerHTML = '<path d="M6 4h4v16H6zM14 4h4v16h-4z"></path>';
     wait(BASE_MS, tick);
@@ -2263,6 +2419,7 @@
     clearTimeout(state.timer);
     state.timer = null;
     state.playing = false;
+    stack.setPlaying(false);
     state.queue = [];
     $('play').setAttribute('aria-label', 'Play');
     $('playIcon').innerHTML = '<path d="M7 4v16l13-8z"></path>';
@@ -2474,7 +2631,35 @@
       }
     }
 
-    // The overlays keep their places on the stage.
+    paintOverlays(ctx, s, a, b, t);
+  }
+
+  // paintArch draws the architecture view as the stack shows it now, under
+  // the overlays t of the way from snapshot a to snapshot b.
+  function paintArch(ctx, s, a, b, t) {
+    const W = ctx.canvas.width / s, H = ctx.canvas.height / s;
+    ctx.setTransform(s, 0, 0, s, 0, 0);
+    ctx.globalAlpha = 1;
+    ctx.fillStyle = '#12161C';
+    ctx.fillRect(0, 0, W, H);
+    stack.paint(ctx, W, H);
+    ctx.setTransform(s, 0, 0, s, 0, 0);
+    paintOverlays(ctx, s, a, b, t);
+  }
+
+  // archSnap is what the overlays say at frame f in the architecture view.
+  function archSnap(f) {
+    return {
+      date: $('date').textContent, chap: $('chapLabel').textContent, caption: $('caption').textContent,
+      counts: [['Commits', f.total], ['Live symbols', f.live], ['Packages', f.pkgs.filter((p) => p.live > 0).length], ['Layers', state.arch ? state.arch.layers : 0]],
+      know: state.colorBy === 'knowledge' ? knowShares(f) : null,
+    };
+  }
+
+  // paintOverlays draws the date, chapter, counters, caption and legend in
+  // their places on the stage, the counters rolling t of the way from a to b.
+  function paintOverlays(ctx, s, a, b, t) {
+    const W = ctx.canvas.width / s, H = ctx.canvas.height / s;
     ctx.globalAlpha = 1;
     ctx.textAlign = 'left';
     ctx.textBaseline = 'middle';
@@ -2663,15 +2848,35 @@
       // long history.
       const tweens = video ? Math.max(1, Math.round((tweenTime * VIDEO_FPS) / 1000)) : fs.length > GIF_LONG ? 1 : GIF_TWEENS;
       state.instant = true;
+      const arch = state.mode === 'arch';
+      if (arch) {
+        // The stack is drawn here instead, and builds from nothing; it
+        // turns as it would while playing.
+        stack.stop();
+        stack.reset();
+        stack.setPlaying(true);
+      }
       let prev = null;
       for (let i = 0; i < fs.length; i++) {
         if (job.cancel) break;
         state.frame = i;
         render(false);
-        const snap = snapStage(fs[i]);
+        const snap = arch ? archSnap(fs[i]) : snapStage(fs[i]);
         let hold = i === fs.length - 1 ? GIF_END_MS : frameMs;
         if (state.story && pausesIn(i).length) hold += PAUSE_MS / state.speed;
-        if (!prev || tweens === 1) await draw(prev || snap, snap, 1, hold);
+        if (arch) {
+          // One drawing per frame of video, as many steps of the stack's
+          // easing as the screen would take; a GIF in fewer, larger steps.
+          const n = video ? Math.max(1, Math.round((hold * VIDEO_FPS) / 1000)) : fs.length > GIF_LONG ? 1 : GIF_TWEENS;
+          const per = Math.max(1, Math.round((hold * 60) / 1000 / n));
+          for (let k = 1; k <= n && !job.cancel; k++) {
+            for (let j = 0; j < per; j++) stack.step();
+            paintArch(ctx, s, prev || snap, snap, Math.min(1, (k * hold) / n / tweenTime));
+            if (video) await video.add(hold / n);
+            else gif.add(ctx.getImageData(0, 0, canvas.width, canvas.height).data, hold / n);
+            if (k % 30 === 0) await new Promise((r) => setTimeout(r));
+          }
+        } else if (!prev || tweens === 1) await draw(prev || snap, snap, 1, hold);
         else {
           for (let k = 1; k < tweens; k++) await draw(prev, snap, k / tweens, tweenTime / tweens);
           await draw(prev, snap, 1, hold - ((tweens - 1) * tweenTime) / tweens);
@@ -2685,7 +2890,7 @@
         label.textContent = 'Encoding…';
         await new Promise((r) => setTimeout(r));
         const url = URL.createObjectURL(video ? await video.finish() : gif.finish());
-        const name = `${state.status.repo.split(/[\\/]/).pop() || 'huginn'}-journey-${state.step}.${video ? 'webm' : 'gif'}`;
+        const name = `${state.status.repo.split(/[\\/]/).pop() || 'huginn'}-${arch ? 'architecture' : 'journey'}-${state.step}.${video ? 'webm' : 'gif'}`;
         h('a', { href: url, download: name }).click();
         setTimeout(() => URL.revokeObjectURL(url), 60000);
       }
@@ -2693,6 +2898,10 @@
       if (job.cancel && job.video) job.video.cancel();
       state.instant = false;
       state.exporting = null;
+      if (state.mode === 'arch') {
+        stack.setPlaying(false);
+        stack.start();
+      }
       for (const el of still) el.inert = false;
       btn.setAttribute('aria-pressed', 'false');
       label.textContent = 'Export video';
@@ -2717,6 +2926,7 @@
     if (state.colorBy !== 'edits') p.set('color', state.colorBy);
     if (state.lines !== 'key') p.set('lines', state.lines);
     if (state.who) p.set('who', state.who);
+    if (state.mode !== 'arch') p.set('view', state.mode);
     const s = `#${p.toString().replaceAll('%2F', '/')}`;
     if (s !== location.hash) {
       try { history.replaceState(null, '', s); } catch { /* ignore */ }
@@ -2738,6 +2948,7 @@
     setLines(p.get('lines'));
     state.who = state.data.authors.includes(p.get('who')) ? p.get('who') : '';
     $('who').value = state.who;
+    await setView(p.get('view'), first);
     if (!state.data.frames.length) return;
     const f = Number.parseInt(p.get('f'), 10), ch = Number.parseInt(p.get('ch'), 10);
     if (Number.isInteger(f)) seek(f);
@@ -2771,6 +2982,7 @@
     $('speed').addEventListener('click', (e) => { const b = e.target.closest('button'); if (b) setSpeed(Number(b.dataset.v)); });
     $('step').addEventListener('click', (e) => { const b = e.target.closest('button'); if (b) setStep(b.dataset.v).catch(fail); });
     $('storyMode').addEventListener('click', () => setStory(!state.story));
+    $('viewBy').addEventListener('click', (e) => { const b = e.target.closest('button'); if (b) setView(b.dataset.v).catch(fail); });
     $('colorBy').addEventListener('click', (e) => { const b = e.target.closest('button'); if (b) setColorBy(b.dataset.v); });
     $('lines').addEventListener('click', (e) => { const b = e.target.closest('button'); if (b) setLines(b.dataset.v); });
     $('who').addEventListener('change', (e) => setWho(e.target.value));
@@ -2789,9 +3001,9 @@
     });
     new ResizeObserver(() => drawWires()).observe($('boGrid'));
     setupZoom();
-    $('zoomIn').addEventListener('click', () => zoomBy(1.6));
-    $('zoomOut').addEventListener('click', () => zoomBy(1 / 1.6));
-    $('zoomReset').addEventListener('click', () => zoomTo(d3.zoomIdentity));
+    $('zoomIn').addEventListener('click', () => zoom(1.6));
+    $('zoomOut').addEventListener('click', () => zoom(1 / 1.6));
+    $('zoomReset').addEventListener('click', () => zoom(0));
     if (!('speechSynthesis' in window)) {
       $('narrate').disabled = true;
       $('narrate').title = 'This browser cannot speak';
@@ -2836,13 +3048,21 @@
           break;
         case '+':
         case '=':
-          zoomBy(1.6);
+          zoom(1.6);
           break;
         case '-':
-          zoomBy(1 / 1.6);
+          zoom(1 / 1.6);
           break;
         case '0':
-          zoomTo(d3.zoomIdentity);
+          zoom(0);
+          break;
+        case 'm':
+        case 'M':
+          setView('map').catch(fail);
+          break;
+        case 'a':
+        case 'A':
+          setView('arch').catch(fail);
           break;
         case 'Escape':
           if (state.links) closeLinks();

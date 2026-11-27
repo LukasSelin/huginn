@@ -5,8 +5,8 @@
 
 /* Stage */
 .stage { position: relative; height: max(380px, calc(100vh - 250px)); overflow: hidden; padding: 0; cursor: grab; touch-action: none; }
-.stage.dragging { cursor: grabbing; }
-.stage.over { cursor: pointer; }
+.stage canvas.dragging { cursor: grabbing; }
+.stage canvas.over { cursor: pointer; }
 #canvas { position: absolute; inset: 0; width: 100%; height: 100%; display: block; }
 
 .ov { position: absolute; margin: 0; pointer-events: none; }
