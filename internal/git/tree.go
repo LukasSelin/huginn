@@ -60,34 +60,43 @@ func (r *Repo) Tree(ctx context.Context, rev string) (_ *Tree, err error) {
 		if entry == "" {
 			continue
 		}
-		// "<mode> <type> <object>\t<path>", sorted by path.
-		meta, p, ok := strings.Cut(entry, "\t")
-		f := strings.Fields(meta)
-		if !ok || len(f) != 3 {
-			return nil, fmt.Errorf("git ls-tree: bad entry %q", entry)
-		}
-		mode, hash := f[0], f[2]
-		isMod := path.Base(p) == "go.mod" && (mode == "100644" || mode == "100755")
-		if !isMod && !isGoFile(p, mode) {
-			continue
-		}
-		src, err := cf.blob(hash)
-		if err != nil {
+		if err = t.add(cf, entry); err != nil {
 			return nil, err
-		}
-		if isMod {
-			t.GoMod[p] = src
-			continue
-		}
-		file, perr := ast.ParseSource(p, src)
-		if perr != nil {
-			t.ParseErrors = append(t.ParseErrors, perr)
-		}
-		if file != nil {
-			t.Files = append(t.Files, file)
 		}
 	}
 	return t, nil
+}
+
+// add reads the file of one ls-tree entry into t if it is a Go file or a
+// go.mod, and skips it otherwise.
+func (t *Tree) add(cf *catFile, entry string) error {
+	// "<mode> <type> <object>\t<path>", sorted by path.
+	meta, p, ok := strings.Cut(entry, "\t")
+	f := strings.Fields(meta)
+	if !ok || len(f) != 3 {
+		return fmt.Errorf("git ls-tree: bad entry %q", entry)
+	}
+	mode, hash := f[0], f[2]
+	isMod := path.Base(p) == "go.mod" && (mode == "100644" || mode == "100755")
+	if !isMod && !isGoFile(p, mode) {
+		return nil
+	}
+	src, err := cf.blob(hash)
+	if err != nil {
+		return err
+	}
+	if isMod {
+		t.GoMod[p] = src
+		return nil
+	}
+	file, perr := ast.ParseSource(p, src)
+	if perr != nil {
+		t.ParseErrors = append(t.ParseErrors, perr)
+	}
+	if file != nil {
+		t.Files = append(t.Files, file)
+	}
+	return nil
 }
 
 // resolve returns the name of the object of type typ ("commit", "tree") that

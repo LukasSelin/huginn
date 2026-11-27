@@ -326,7 +326,8 @@ type pending struct {
 	files []pendingSides
 }
 
-// pendingSides are the sides of one Go file a pending commit touched.
+// pendingSides are the sides of one Go file a pending commit, or a Range,
+// touched.
 type pendingSides struct {
 	fc       *FileChange
 	old, new *blob
@@ -502,7 +503,20 @@ type pkgFiles struct{ old, new []*ast.File }
 // commit, and returns the sides it parsed. The error is for failing to read
 // a blob; syntax errors go to the commit's ParseErrors.
 func (w *walker) analyze(p *pending) ([]fileSides, error) {
+	all, err := p.wait()
+	if err != nil {
+		return nil, err
+	}
 	c := p.c
+	pkgs, goFiles := w.byPackage(c, all)
+	c.Changes = diffPackages(pkgs)
+	c.FormattingOnly = goFiles > 0 && len(c.Changes) == 0 && len(c.ParseErrors) == 0
+	return all, nil
+}
+
+// wait waits for the blobs of p and returns both sides of each file, as
+// parsed. The error is for failing to read a blob.
+func (p *pending) wait() ([]fileSides, error) {
 	var all []fileSides
 	for _, ps := range p.files {
 		s := fileSides{fc: ps.fc}
@@ -515,7 +529,13 @@ func (w *walker) analyze(p *pending) ([]fileSides, error) {
 		}
 		all = append(all, s)
 	}
+	return all, nil
+}
 
+// byPackage groups the sides in all by directory, as the diff sees them,
+// and adds their syntax errors to c. It also returns how many files are Go
+// code on either side.
+func (w *walker) byPackage(c *Commit, all []fileSides) (map[string]*pkgFiles, int) {
 	pkgs := map[string]*pkgFiles{}
 	group := func(p string) *pkgFiles {
 		dir := path.Dir(p)
@@ -546,10 +566,7 @@ func (w *walker) analyze(p *pending) ([]fileSides, error) {
 			g.new = append(g.new, new.f)
 		}
 	}
-
-	c.Changes = diffPackages(pkgs)
-	c.FormattingOnly = goFiles > 0 && len(c.Changes) == 0 && len(c.ParseErrors) == 0
-	return all, nil
+	return pkgs, goFiles
 }
 
 func isGoFile(p, mode string) bool {
