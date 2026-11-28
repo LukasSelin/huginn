@@ -424,6 +424,7 @@ function showChange(i) {
 const GRAPH_NOTE = {
   packages: 'which packages the change reaches, and the imports and references it starts and stops · point at a package to trace it, pick it to filter the lists below',
   functions: 'the functions and methods it adds, edits and removes, split by the calls between them into parts to read one at a time · open a part, then a function, for every call in and out of it',
+  layers: 'the packages it touches on the layers of the whole codebase, each a layer above everything it imports, at the merge base and at the head · point at a package to trace its imports, pick it to filter the lists below',
 };
 const GRAPH_KEY = 'huginn.review.graph'; // the graph last drawn, kept in this browser
 
@@ -435,7 +436,7 @@ function graphHead() {
 }
 
 function setGraphView(v) {
-  state.graphView = v === 'functions' ? 'functions' : 'packages';
+  state.graphView = ['functions', 'layers'].includes(v) ? v : 'packages';
   try { localStorage.setItem(GRAPH_KEY, state.graphView); } catch { /* kept for this page only */ }
   if (!state.rv) return;
   graphHead();
@@ -455,6 +456,18 @@ function legend() {
       line('', '--body', 'call kept between changed functions'),
       line('', '--added', 'new call'),
       line('dash', '--deleted', 'removed call'));
+    return;
+  }
+  if (state.graphView === 'layers') {
+    $('legend').replaceChildren(
+      box('--accent', 'package it changes'),
+      box('--added', 'new package', true),
+      box('--deleted', 'removed package', true),
+      box('--line-strong', 'package it imports or moves'),
+      line('', '--muted', 'import'),
+      line('', '--added', 'new import'),
+      line('dash', '--deleted', 'removed import'),
+      h('span', {}, h('b', { class: 'move' }, '↑'), 'moved to a higher layer'));
     return;
   }
   $('legend').replaceChildren(
@@ -605,10 +618,11 @@ function edgeWidth(e) {
   return e.kind === 'impact' ? 1 + Math.min(5, w) : 1.5 + Math.min(3.5, w);
 }
 
-// drawGraph draws the relations as the graph picked: of packages, or of
-// functions as the change in parts.
+// drawGraph draws the relations as the graph picked: of packages, of
+// functions as the change in parts, or of the layers of the codebase.
 function drawGraph() {
   if (state.graphView === 'functions') drawLevels();
+  else if (state.graphView === 'layers') drawLayers();
   else drawPackages();
 }
 
@@ -692,8 +706,8 @@ function untrace(el) {
 
 function pick(pkg) {
   state.focus = state.focus === pkg ? null : pkg;
-  if (state.graphView === 'functions') {
-    drawGraph(); // drawing only what involves the package
+  if (state.graphView !== 'packages') {
+    drawGraph();
   } else {
     for (const g of $('graphBox').querySelectorAll('.g-node')) {
       g.classList.toggle('picked', g.getAttribute('aria-label').startsWith(`${state.focus}, `));
@@ -709,6 +723,187 @@ function focusBar() {
     bar.replaceChildren('Showing what involves ', pkgCode(state.focus),
       h('button', { type: 'button', onclick: () => pick(state.focus) }, 'Show everything'));
   }
+}
+
+// --- The layers of the whole codebase -------------------------------------------
+//
+// The packages the change touches on the layers of the whole codebase, as
+// the layers page stacks them: each a layer above everything it imports,
+// worked out over the whole tree on either side of the change, so a package
+// sits where it sits in the architecture. Every layer has a row, the
+// highest on top, saying how many packages of the codebase it holds; only
+// the packages the change touches sit on them, those it moves saying the
+// layer they come from, and the imports between them drawn, those it starts
+// and stops coloured.
+
+// layerOf is a package's layer at the head, or at the merge base for one
+// the change removes.
+const layerOf = (p) => (p.after >= 0 ? p.after : p.before);
+
+// layerNote says in a few words what the change does to a package: its
+// changes, and whether it is new, removed or moved to another layer.
+function layerNote(p) {
+  const parts = [];
+  if (p.before < 0) parts.push('new');
+  else if (p.after < 0) parts.push('removed');
+  else if (p.before !== p.after) parts.push(`${p.after > p.before ? '↑' : '↓'} from layer ${p.before}`);
+  parts.push(p.changes ? plural(p.changes, 'change') : 'code unchanged');
+  return parts.join(' · ');
+}
+
+// layersSummary sums the map up in a line: how many packages on how many of
+// the codebase's layers, and which ones the change moves.
+function layersSummary(L) {
+  const used = new Set(L.packages.map(layerOf));
+  const moved = L.packages.filter((p) => p.before >= 0 && p.after >= 0 && p.before !== p.after);
+  const out = [`${plural(L.packages.length, 'package')} the change touches, on ${used.size} of the codebase's ${plural(L.sizes.length, 'layer')}`];
+  if (moved.length) {
+    const up = moved.filter((p) => p.after > p.before).length;
+    out.push(`it moves ${plural(moved.length, 'package')}${up === moved.length ? ' up' : up ? '' : ' down'}: ` +
+      moved.slice(0, 4).map((p) => `${short(p.package)} ${p.before} → ${p.after}`).join(', ') + (moved.length > 4 ? ` and ${moved.length - 4} more` : ''));
+  } else {
+    out.push('it moves no package to another layer');
+  }
+  const ends = (ps, word, side) => (ps.length ? [`${word} ${ps.slice(0, 4).map((p) => `${short(p.package)} on layer ${p[side]}`).join(', ')}${ps.length > 4 ? ` and ${ps.length - 4} more` : ''}`] : []);
+  out.push(...ends(L.packages.filter((p) => p.before < 0), 'adds', 'after'), ...ends(L.packages.filter((p) => p.after < 0), 'removes', 'before'));
+  return out.join(' · ');
+}
+
+function drawLayers() {
+  const L = state.rv.layers, box = $('graphBox');
+  if (!L || !L.packages.length) {
+    box.replaceChildren(h('p', { class: 'empty muted' }, 'The change touches no package of the repository.'));
+    return;
+  }
+  const top = Math.max(L.sizes.length - 1, ...L.packages.map(layerOf));
+  const rows = Array.from({ length: top + 1 }, () => []);
+  for (const p of L.packages) rows[layerOf(p)].push(p);
+
+  // Order each row by where the packages it imports and is imported by
+  // sit in theirs, so lines cross less.
+  const nbrs = new Map(L.packages.map((p) => [p.package, []]));
+  for (const im of L.imports) {
+    nbrs.get(im.from).push(im.to);
+    nbrs.get(im.to).push(im.from);
+  }
+  const pos = new Map();
+  const place = (r) => r.forEach((p, i) => pos.set(p.package, (i + 0.5) / r.length));
+  for (const r of rows) {
+    r.sort((a, b) => a.package.localeCompare(b.package));
+    place(r);
+  }
+  for (let it = 0; it < 6; it++) {
+    for (const r of it % 2 ? rows : [...rows].reverse()) {
+      const at = new Map(r.map((p) => {
+        const ns = nbrs.get(p.package);
+        return [p, ns.length ? sum(ns, (n) => pos.get(n)) / ns.length : pos.get(p.package)];
+      }));
+      r.sort((a, b) => at.get(a) - at.get(b) || a.package.localeCompare(b.package));
+      place(r);
+    }
+  }
+
+  const LABEL = 132, NW = 200, NH = 40, GX = 16, FULL = 88, EMPTY = 26, PAD = 8;
+  const widest = Math.max(...rows.map((r) => r.length * NW + Math.max(0, r.length - 1) * GX));
+  const W = Math.max(box.clientWidth, 680, LABEL + widest + 16);
+  const area = W - LABEL - 16;
+  const nodes = new Map(), bands = [];
+  let y = PAD;
+  for (let l = top; l >= 0; l--) {
+    const r = rows[l], hgt = r.length ? FULL : EMPTY;
+    bands.push({ l, y, hgt, full: r.length > 0 });
+    const needed = r.length * NW + Math.max(0, r.length - 1) * GX;
+    let x = LABEL + (area - needed) / 2;
+    for (const p of r) {
+      nodes.set(p.package, { p, x, y: y + (hgt - NH) / 2 });
+      x += NW + GX;
+    }
+    y += hgt;
+  }
+  const H = y + PAD;
+  const el = svg('svg', { class: 'layers-map', width: W, height: H, viewBox: `0 0 ${W} ${H}`, role: 'img', 'aria-label': 'The packages the change touches on the layers of the whole codebase' });
+  const defs = svg('defs', {});
+  for (const [kind, color] of Object.entries({ impact: '--muted', added: '--added', removed: '--deleted' })) {
+    defs.append(svg('marker', { id: `ly-${kind}`, viewBox: '0 0 10 10', refX: 9, refY: 5, markerWidth: 8, markerHeight: 8, markerUnits: 'userSpaceOnUse', orient: 'auto' },
+      svg('path', { d: 'M0,1 L10,5 L0,9 z', style: `fill: var(${color})` })));
+  }
+  el.append(defs);
+  for (const b of bands) {
+    el.append(svg('rect', { x: 0, y: b.y + 1, width: W, height: b.hgt - 2, rx: 6, class: `ly-band${b.full ? ' full' : ''}` }),
+      svg('text', { x: 12, y: b.y + b.hgt / 2 + (b.full ? -2 : 4), class: 'ly-name' }, `layer ${b.l}`));
+    if (b.full) el.append(svg('text', { x: 12, y: b.y + b.hgt / 2 + 13, class: 'ly-count' }, plural(L.sizes[b.l] || 0, 'package')));
+    else el.append(svg('text', { x: 70, y: b.y + b.hgt / 2 + 4, class: 'ly-count' }, plural(L.sizes[b.l] || 0, 'package')));
+  }
+
+  const edgeEls = new Map();
+  const links = new Map([...nodes.keys()].map((k) => [k, []]));
+  const order = (im) => (im.before && im.after ? 0 : im.before ? 1 : 2);
+  // An import whose straight way down would run behind another package
+  // goes round its side instead, each further one a little wider.
+  const behind = (a, b, ax, bx) => [...nodes.values()].some((n) => n !== a && n !== b && n.y > a.y && n.y < b.y &&
+    n.x < Math.max(ax, bx) + 6 && n.x + NW > Math.min(ax, bx) - 6);
+  const round = { left: 0, right: 0 };
+  for (const im of [...L.imports].sort((a, b) => order(a) - order(b))) {
+    const a = nodes.get(im.from), b = nodes.get(im.to);
+    const kind = im.before && im.after ? 'impact' : im.after ? 'added' : 'removed';
+    const ax = a.x + NW / 2, bx = b.x + NW / 2;
+    let d;
+    if (a.y < b.y && behind(a, b, ax, bx)) {
+      const side = round.right <= round.left ? 'right' : 'left', k = round[side]++;
+      const out = side === 'right' ? 1 : -1, bow = 36 + 18 * k;
+      const x0 = side === 'right' ? a.x + NW : a.x, x1 = side === 'right' ? b.x + NW + 2 : b.x - 2;
+      const y0 = a.y + NH / 2, y1 = b.y + NH / 2;
+      d = `M${x0},${y0} C${x0 + out * bow},${y0} ${x1 + out * bow},${y1} ${x1},${y1}`;
+    } else if (a.y < b.y) {
+      const y0 = a.y + NH, y1 = b.y - 2, my = (y0 + y1) / 2;
+      d = `M${ax},${y0} C${ax},${my} ${bx},${my} ${bx},${y1}`;
+    } else if (a.y === b.y) {
+      const y0 = a.y + NH, dip = y0 + 22;
+      d = `M${ax},${y0} C${ax},${dip} ${bx},${dip} ${bx},${y0 + 2}`;
+    } else {
+      const y0 = a.y, y1 = b.y + NH + 2, my = (y0 + y1) / 2;
+      d = `M${ax},${y0} C${ax},${my} ${bx},${my} ${bx},${y1}`; // pointing up: only an import the change stops
+    }
+    const tip = `${short(im.from)} ${kind === 'added' ? 'starts importing' : kind === 'removed' ? 'stops importing' : 'imports'} ${short(im.to)}`;
+    const line = svg('path', { d, class: `g-edge ${kind}`, 'stroke-width': kind === 'impact' ? 1.25 : 2, 'marker-end': `url(#ly-${kind})` }, svg('title', {}, tip));
+    el.append(line);
+    edgeEls.set(line, im);
+    links.get(im.from).push(line);
+    links.get(im.to).push(line);
+  }
+
+  const nodeEls = new Map();
+  for (const [pkg, n] of nodes) {
+    const p = n.p;
+    const cls = p.before < 0 ? 'new' : p.after < 0 ? 'gone' : p.changes ? 'center' : '';
+    const moved = p.before >= 0 && p.after >= 0 && p.before !== p.after;
+    const g = svg('g', {
+      class: `g-node ly-node ${cls}${moved ? ' moved' : ''}${state.focus === pkg ? ' picked' : ''}`,
+      transform: `translate(${n.x},${n.y})`, tabindex: 0, role: 'button', 'aria-label': `${pkg}, ${layerNote(p)}`,
+    },
+    svg('title', {}, `${pkg}\nlayer ${p.before < 0 ? '–' : p.before} at the merge base, ${p.after < 0 ? '–' : p.after} at the head\n${layerNote(p)}`),
+    svg('rect', { width: NW, height: NH, rx: 6 }),
+    svg('text', { x: 9, y: 16 }, cut(short(pkg), 26)),
+    svg('text', { x: 9, y: 31, class: `badge${moved ? ' move' : ''}` }, layerNote(p)));
+    const lit = (on) => {
+      el.classList.toggle('tracing', on);
+      g.classList.toggle('hot', on);
+      for (const line of links.get(pkg)) {
+        line.classList.toggle('hot', on);
+        const im = edgeEls.get(line);
+        nodeEls.get(im.from === pkg ? im.to : im.from).classList.toggle('hot', on);
+      }
+    };
+    g.addEventListener('mouseenter', () => lit(true));
+    g.addEventListener('mouseleave', () => lit(false));
+    g.addEventListener('focus', () => lit(true));
+    g.addEventListener('blur', () => lit(false));
+    g.addEventListener('click', () => pick(pkg));
+    g.addEventListener('keydown', (ev) => { if (ev.key === 'Enter' || ev.key === ' ') { ev.preventDefault(); pick(pkg); } });
+    el.append(g);
+    nodeEls.set(pkg, g);
+  }
+  box.replaceChildren(h('p', { class: 'lv-lead' }, layersSummary(L)), el);
 }
 
 // --- The change in parts -------------------------------------------------------

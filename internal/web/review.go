@@ -24,11 +24,12 @@ type reviewJSON struct {
 	Module    string   `json:"module"` // to shorten import paths with
 
 	reportJSON
-	Relations relationsJSON `json:"relations"`
-	Types     []typeJSON    `json:"types"`
-	Focus     []focusJSON   `json:"focus"`
-	Paths     []pathsJSON   `json:"paths"`
-	Parts     []partJSON    `json:"parts"`
+	Relations relationsJSON     `json:"relations"`
+	Types     []typeJSON        `json:"types"`
+	Focus     []focusJSON       `json:"focus"`
+	Paths     []pathsJSON       `json:"paths"`
+	Parts     []partJSON        `json:"parts"`
+	Layers    *changeLayersJSON `json:"layers"`
 
 	// Indexed says the history was indexed, so the types' change coupling
 	// was looked for.
@@ -212,6 +213,43 @@ func partsJSON(ps []review.Part) []partJSON {
 	return out
 }
 
+// changeLayersJSON is the packages a change touches on the layers of the
+// whole codebase, as review.Layers has them; a layer of -1 says the package
+// does not exist on that side.
+type changeLayersJSON struct {
+	Packages []layerPackageJSON `json:"packages"`
+	Imports  []layerImportJSON  `json:"imports"`
+	Sizes    []int              `json:"sizes"`
+}
+
+type layerPackageJSON struct {
+	Package string `json:"package"`
+	Before  int    `json:"before"`
+	After   int    `json:"after"`
+	Changes int    `json:"changes"`
+}
+
+type layerImportJSON struct {
+	From   string `json:"from"`
+	To     string `json:"to"`
+	Before bool   `json:"before"`
+	After  bool   `json:"after"`
+}
+
+func changeLayersOf(l *review.Layers) *changeLayersJSON {
+	if l == nil {
+		return nil
+	}
+	out := &changeLayersJSON{Packages: make([]layerPackageJSON, len(l.Packages)), Imports: make([]layerImportJSON, len(l.Imports)), Sizes: l.Sizes}
+	for i, p := range l.Packages {
+		out.Packages[i] = layerPackageJSON{Package: p.Package, Before: p.Before, After: p.After, Changes: p.Changes}
+	}
+	for i, im := range l.Imports {
+		out.Imports[i] = layerImportJSON{From: im.From, To: im.To, Before: im.Before, After: im.After}
+	}
+	return out
+}
+
 type relationsJSON struct {
 	NewPackages  []string  `json:"newPackages"`
 	GonePackages []string  `json:"gonePackages"`
@@ -256,10 +294,11 @@ func newReviewJSON(rv *review.Review) *reviewJSON {
 			AddedRefs:    refsJSON(rel.AddedRefs),
 			RemovedRefs:  refsJSON(rel.RemovedRefs),
 		},
-		Types: typesJSON(rv.Types),
-		Focus: focusesJSON(rv.Focus),
-		Paths: pathsListJSON(rv.Paths),
-		Parts: partsJSON(rv.Parts),
+		Types:  typesJSON(rv.Types),
+		Focus:  focusesJSON(rv.Focus),
+		Paths:  pathsListJSON(rv.Paths),
+		Parts:  partsJSON(rv.Parts),
+		Layers: changeLayersOf(rv.Layers),
 	}
 }
 

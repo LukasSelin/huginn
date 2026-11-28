@@ -74,6 +74,10 @@ type Review struct {
 	// to read one at a time, in reading order.
 	Parts []Part
 
+	// Layers places the packages the change touches on the layers of the
+	// whole codebase on either side of it; nil when it touches none.
+	Layers *Layers
+
 	// Traced says capslock traced the functions the change adds or edits,
 	// so those missing from the focus's FocusExternal items reach nothing
 	// outside the process that capslock can see.
@@ -148,6 +152,7 @@ func Build(ctx context.Context, repo *git.Repo, opts Options) (*Review, error) {
 	rv.Focus = focus(rv.Report, rv.Types, caps)
 	rv.Paths = paths(rv.Report, rg.Files)
 	rv.Parts = parts(rv.Report)
+	rv.Layers = layersOf(rv.Report, semdiff.TreeBefore(in.Tree, in.Files), in.Tree, semdiff.PackagePaths(in.GoMod))
 	for _, err := range rg.ParseErrors {
 		rv.Warnings = append(rv.Warnings, err.Error())
 	}
