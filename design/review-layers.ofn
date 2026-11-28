@@ -1,0 +1,69 @@
+# The review page shows the packages a change touches on the layers of the
+# whole codebase, as the layers page stacks them: each package a layer above
+# everything it imports. The layers come from the whole tree at the merge
+# base and at the head, so the map shows where the change sits in the
+# architecture and which packages it moves to another layer.
+Prefix(:=<https://huginn#>)
+Prefix(rdfs:=<http://www.w3.org/2000/01/rdf-schema#>)
+Prefix(xsd:=<http://www.w3.org/2001/XMLSchema#>)
+
+Ontology(<https://huginn/design/review-layers>
+    Declaration(Class(:review.Review))
+
+    Declaration(Class(:review.Layers))
+    AnnotationAssertion(rdfs:comment :review.Layers "The packages a change touches, on the layers of the whole codebase at the merge base and at the head.")
+
+    Declaration(Class(:review.LayerPackage))
+    AnnotationAssertion(rdfs:comment :review.LayerPackage "A package the change touches, with its layer on either side.")
+
+    Declaration(Class(:review.LayerImport))
+    AnnotationAssertion(rdfs:comment :review.LayerImport "An import between two of the packages shown, on the sides where it exists.")
+
+    Declaration(ObjectProperty(:review.Review.Layers))
+    ObjectPropertyDomain(:review.Review.Layers :review.Review)
+    ObjectPropertyRange(:review.Review.Layers :review.Layers)
+
+    Declaration(ObjectProperty(:review.Layers.Packages))
+    ObjectPropertyDomain(:review.Layers.Packages :review.Layers)
+    ObjectPropertyRange(:review.Layers.Packages :review.LayerPackage)
+
+    Declaration(ObjectProperty(:review.Layers.Imports))
+    ObjectPropertyDomain(:review.Layers.Imports :review.Layers)
+    ObjectPropertyRange(:review.Layers.Imports :review.LayerImport)
+
+    Declaration(DataProperty(:review.Layers.Sizes))
+    DataPropertyDomain(:review.Layers.Sizes :review.Layers)
+    DataPropertyRange(:review.Layers.Sizes xsd:integer)
+
+    Declaration(DataProperty(:review.LayerPackage.Package))
+    DataPropertyDomain(:review.LayerPackage.Package :review.LayerPackage)
+    DataPropertyRange(:review.LayerPackage.Package xsd:string)
+
+    Declaration(DataProperty(:review.LayerPackage.Before))
+    DataPropertyDomain(:review.LayerPackage.Before :review.LayerPackage)
+    DataPropertyRange(:review.LayerPackage.Before xsd:integer)
+
+    Declaration(DataProperty(:review.LayerPackage.After))
+    DataPropertyDomain(:review.LayerPackage.After :review.LayerPackage)
+    DataPropertyRange(:review.LayerPackage.After xsd:integer)
+
+    Declaration(DataProperty(:review.LayerPackage.Changes))
+    DataPropertyDomain(:review.LayerPackage.Changes :review.LayerPackage)
+    DataPropertyRange(:review.LayerPackage.Changes xsd:integer)
+
+    Declaration(DataProperty(:review.LayerImport.From))
+    DataPropertyDomain(:review.LayerImport.From :review.LayerImport)
+    DataPropertyRange(:review.LayerImport.From xsd:string)
+
+    Declaration(DataProperty(:review.LayerImport.To))
+    DataPropertyDomain(:review.LayerImport.To :review.LayerImport)
+    DataPropertyRange(:review.LayerImport.To xsd:string)
+
+    Declaration(DataProperty(:review.LayerImport.Before))
+    DataPropertyDomain(:review.LayerImport.Before :review.LayerImport)
+    DataPropertyRange(:review.LayerImport.Before xsd:boolean)
+
+    Declaration(DataProperty(:review.LayerImport.After))
+    DataPropertyDomain(:review.LayerImport.After :review.LayerImport)
+    DataPropertyRange(:review.LayerImport.After xsd:boolean)
+)

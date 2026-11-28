@@ -537,8 +537,17 @@ and as a matrix whose rows are its call tree, indented by who calls whom,
 so every call points down the list. A function shows every call into it
 and out of it, grouped by where it goes, the chains reaching it from
 unchanged code, and its flow; *Connections* on any changed function in
-the list below opens it there, and Escape goes up a level. The callers
-list production code unless asked for the tests too. The changes
+the list below opens it there, and Escape goes up a level. Switched to
+*Layers*, it places the packages the change touches on the layers of the
+whole codebase, as the layers page stacks them: each package a layer above
+everything it imports, worked out from the whole tree at the merge base
+and at the head, without the history index. Every layer has a row saying
+how many packages of the codebase it holds, and only the packages the
+change touches sit on them: those it changes, those at either end of an
+import it starts or stops, and those it moves to another layer, which say
+the layer they come from. The imports between them are drawn, those it
+starts and stops coloured. The callers list production code unless asked
+for the tests too. The changes
 show the edits of existing code in full, a changed type by its members and
 whose code each breaks, a changed function by what it does to its paths;
 the new code, by file, and the changes to tests are folded away, each new
